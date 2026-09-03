@@ -1,0 +1,13 @@
+/target
+**/*.wav
+!docs/**/*.wav
+/core/ffi/include/*.h
+.DS_Store
+*.swp
+# Xcode / SwiftPM (apps/mac, apps/ios)
+.build/
+DerivedData/
+xcuserdata/
+# Node (apps/web)
+node_modules/
+dist/

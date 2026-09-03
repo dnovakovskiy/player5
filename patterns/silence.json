@@ -1,0 +1,7 @@
+{
+  "bpm": 120,
+  "voices": {
+    "kick": { "steps": "---- ---- ---- ----" }
+  },
+  "render": { "bars": 1, "sample_rate": 48000, "tail_seconds": 0.0 }
+}

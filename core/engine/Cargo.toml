@@ -1,0 +1,18 @@
+[package]
+name = "engine"
+description = "player5 engine: wires sequencer, clock and voices into a control half and a render half"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dsp.workspace = true
+sequencer.workspace = true
+sync.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

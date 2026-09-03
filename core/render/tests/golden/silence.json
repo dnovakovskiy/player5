@@ -1,0 +1,20 @@
+{
+  "hash_pcm16_fnv1a64": "0x9ebf9a6ec921bb25",
+  "fingerprint": {
+    "sample_rate": 48000,
+    "frames": 96000,
+    "peak_dbfs": -180.0,
+    "rms_dbfs": -180.0,
+    "bands_db": [
+      -180.0,
+      -180.0,
+      -180.0,
+      -180.0,
+      -180.0,
+      -180.0,
+      -180.0,
+      -180.0
+    ],
+    "onsets": []
+  }
+}

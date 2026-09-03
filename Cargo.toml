@@ -1,0 +1,50 @@
+# Workspace root. The Rust crates live under core/; apps/bridge joins this
+# workspace when it arrives (session 4). Keeping the manifest at the repo root
+# lets every `cargo` command run from anywhere in the checkout.
+[workspace]
+resolver = "2"
+members = [
+    "core/dsp",
+    "core/sequencer",
+    "core/sync",
+    "core/engine",
+    "core/ffi",
+    "core/render",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+rust-version = "1.80"
+
+[workspace.dependencies]
+dsp = { path = "core/dsp" }
+sequencer = { path = "core/sequencer" }
+sync = { path = "core/sync" }
+engine = { path = "core/engine" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hound = "3.5"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# Float literals in the DSP code are deliberately written out to the digits
+# that matter; the lint fires on ordinary constants like ln(2).
+excessive_precision = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+# Golden-master renders are slow in an unoptimised build; keep tests fast.
+[profile.test]
+opt-level = 2
+[profile.dev.package."*"]
+opt-level = 2

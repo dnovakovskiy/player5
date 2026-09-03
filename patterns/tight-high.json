@@ -1,0 +1,8 @@
+{
+  "bpm": 174,
+  "accent": 1.0,
+  "voices": {
+    "kick": { "steps": "X-x- --X- x--- X-x-", "tune": 1.0, "decay": 0.0, "level": 1.0 }
+  },
+  "render": { "bars": 2, "sample_rate": 96000, "tail_seconds": 0.25, "block_size": 128 }
+}

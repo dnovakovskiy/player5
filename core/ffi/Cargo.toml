@@ -1,0 +1,19 @@
+[package]
+name = "player5-ffi"
+description = "player5 C ABI for the Swift shells (macOS, iOS)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "player5"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+engine.workspace = true
+sequencer.workspace = true
+
+[lints]
+workspace = true

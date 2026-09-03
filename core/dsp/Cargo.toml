@@ -1,0 +1,13 @@
+[package]
+name = "dsp"
+description = "player5 synthesized drum voices and master section (real-time safe)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
