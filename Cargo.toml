@@ -43,6 +43,14 @@ lto = "thin"
 codegen-units = 1
 debug = 1
 
+# Browser build of core/ffi (scripts/build-wasm.sh): small, no debug info.
+[profile.wasm]
+inherits = "release"
+debug = false
+strip = true
+opt-level = "s"
+panic = "abort"
+
 # Golden-master renders are slow in an unoptimised build; keep tests fast.
 [profile.test]
 opt-level = 2

@@ -10,7 +10,15 @@ Targets: macOS, web (installable PWA) and iOS, all driven by one Rust core.
 * `docs/adr/` — architecture decision records.
 * `docs/protocols/` — digested protocol notes with sources.
 
-Quick start:
+Quick start (web UI):
+
+```sh
+rustup target add wasm32-unknown-unknown
+scripts/build-wasm.sh
+cd apps/web && npm install && npm run dev      # http://localhost:5173
+```
+
+Core only:
 
 ```sh
 cargo test --workspace

@@ -33,3 +33,36 @@ jobs:
         run: cargo test --workspace
       - name: Render smoke test
         run: cargo run -p render -- patterns/four-on-the-floor.json /tmp/four.wav --fingerprint
+
+  web:
+    name: web (wasm + vite + playwright)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Build wasm module
+        working-directory: .
+        run: scripts/build-wasm.sh
+      - name: Install
+        run: npm ci
+      - name: Typecheck
+        run: npm run check
+      - name: Wasm render matches native golden masters
+        run: npm run verify-wasm
+      - name: Build
+        run: npm run build
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Smoke test (AudioWorklet in headless Chromium)
+        run: npm test

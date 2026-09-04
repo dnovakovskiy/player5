@@ -66,6 +66,12 @@ impl Engine {
         self.renderer.position()
     }
 
+    /// Whether the scheduler is running.
+    #[must_use]
+    pub fn is_playing(&self) -> bool {
+        self.control.is_playing()
+    }
+
     /// Replaces the pattern.
     pub fn set_pattern(&mut self, pattern: Pattern) {
         self.control.set_pattern(pattern);
@@ -94,6 +100,27 @@ impl Engine {
     pub fn set_limiter(&mut self, enabled: bool) {
         let now = self.renderer.position();
         self.control.set_limiter(enabled, now);
+    }
+
+    /// Pattern step (`0..16`) audible at the current render position, or
+    /// `None` when stopped. For playhead displays.
+    #[must_use]
+    pub fn playing_step(&self) -> Option<usize> {
+        if !self.control.is_playing() {
+            return None;
+        }
+        let beat = self.control.beat_at(self.renderer.position());
+        if beat < 0.0 {
+            return None;
+        }
+        let step = (beat / sequencer::BEATS_PER_STEP).floor() as u64;
+        Some((step % sequencer::STEP_COUNT as u64) as usize)
+    }
+
+    /// Stops automatically after `steps` steps from the next start
+    /// (`None` loops forever).
+    pub fn set_stop_after(&mut self, steps: Option<u64>) {
+        self.control.set_stop_after(steps);
     }
 
     /// Starts playback from step 0 at the current position.

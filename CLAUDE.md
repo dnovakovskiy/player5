@@ -34,7 +34,11 @@ decks number 1–4; this app is the fifth device.
   nudge, latency offset (ms), quantized re-sync.
 - Deterministic DSP math: the render path uses `dsp::math`, not `libm`, so
   golden-master hashes are identical on every platform (ADR-0002).
-- Platform order: macOS → web → iOS.
+- The browser runs `core/ffi` compiled to WASM inside an AudioWorklet, whole
+  engine in lockstep, no wasm-bindgen (ADR-0004). The WASM render must stay
+  bit-identical to the native goldens (`npm run verify-wasm`).
+- Platform order: web (UI, voices, feel) and macOS (network clock bench) in
+  parallel, then iOS (ADR-0004 amends ADR-0001).
 
 ## Layout
 
@@ -48,8 +52,8 @@ core/engine        # Control / Renderer / Engine, JSON pattern spec
 core/ffi           # C ABI (lib name `player5`), cbindgen.toml
 core/render        # `render` CLI, WAV output, analysis, golden tests
 patterns/          # example pattern files; also the golden-test fixtures
-apps/mac           # SwiftUI + AVAudioEngine shell (session 2)
-apps/web           # Vite + TS + AudioWorklet PWA (session 6)
+apps/web           # Vite + TS + AudioWorklet app; worklet.js hosts the WASM core
+apps/mac           # SwiftUI + AVAudioEngine shell (session 3)
 apps/bridge        # headless sync → WebSocket relay (session 4)
 apps/ios           # shares the Swift package with mac (session 7)
 docs/adr           # numbered, append-only decision records
@@ -65,10 +69,15 @@ cargo test --workspace
 cargo run -p render -- patterns/four-on-the-floor.json out.wav --fingerprint
 UPDATE_GOLDEN=1 cargo test -p render --test golden   # after an intended sound change
 scripts/gen-header.sh                                 # C header (needs cbindgen)
+
+scripts/build-wasm.sh                                 # core/ffi → apps/web/public/player5.wasm
+cd apps/web && npm install && npm run dev             # web UI at http://localhost:5173
+cd apps/web && npm run check && npm run verify-wasm && npm run build && npm test
 ```
 
-CI runs fmt, clippy and tests on Linux and macOS; both must produce the same
-golden hashes.
+CI runs fmt, clippy and tests on Linux and macOS (both must produce the same
+golden hashes), then builds the WASM module, checks it against the goldens,
+builds the web app and runs the Playwright smoke test in headless Chromium.
 
 ## Pattern files
 
@@ -101,11 +110,16 @@ controls and render settings are all `0..=1` with defaults.
 
 1. ✅ Scaffold, CLAUDE.md, ADR-0001; 16-step sequencer with accent + shuffle,
    internal clock, kick voice, offline render, golden tests, CLI, CI.
-2. mac shell: AVAudioEngine playback, minimal SwiftUI step grid.
-3. Ableton Link source (mac) + PLL layer.
-4. Pro DJ Link source + `apps/bridge/` WebSocket relay.
-5. Opus Quad mode.
-6. Web shell: WASM + AudioWorklet PWA, URL-hash patterns, `BridgeClock` +
-   `WebMidiClock`.
-7. iOS shell (needs the multicast entitlement — see
-   `docs/ios-multicast-entitlement.md`); remaining voices fill in along the way.
+2. ✅ Web shell: WASM + AudioWorklet, step grid, transport, URL-hash
+   patterns, wasm-vs-native verification, Playwright smoke test (ADR-0004).
+3. mac shell: AVAudioEngine playback of the split engine, SwiftUI step grid
+   (the protocol bench for everything below).
+4. Voices: snare, closed/open hats, then toms, clap, rimshot, cowbell; flam.
+   Each voice lands with golden patterns and appears in the web UI.
+5. Ableton Link source (mac) + the PLL layer.
+6. Pro DJ Link source + `apps/bridge/` WebSocket relay + `BridgeClock` in
+   the web app.
+7. Opus Quad mode.
+8. PWA completion (service worker, offline, install) + `WebMidiClock`.
+9. iOS shell (needs the multicast entitlement — see
+   `docs/ios-multicast-entitlement.md`).

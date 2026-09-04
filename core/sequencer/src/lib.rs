@@ -21,5 +21,8 @@ pub mod queue;
 mod scheduler;
 
 pub use event::{Event, EventKind, MasterParam, ParamTarget, VoiceParam};
-pub use pattern::{Pattern, PatternParseError, Step, Track, VoiceId, STEP_COUNT};
+pub use pattern::{
+    Pattern, PatternParseError, Step, Track, VoiceId, BEATS_PER_STEP, MAX_SHUFFLE_BEATS,
+    STEP_COUNT, UNACCENTED_VELOCITY,
+};
 pub use scheduler::Scheduler;

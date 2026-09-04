@@ -100,6 +100,13 @@ impl Control {
         self.clock.tempo_bpm()
     }
 
+    /// The beat (from beat 0 at start) that falls on `sample`, with the
+    /// global controls applied. Negative before playback started.
+    #[must_use]
+    pub fn beat_at(&self, sample: u64) -> f64 {
+        AdjustedClock::new(&self.clock, self.controls).beat_at_sample(sample as f64)
+    }
+
     /// Starts playback: beat 0 and step 0 fall on `now`.
     pub fn start(&mut self, now: u64) {
         self.clock.reset(now as f64);
