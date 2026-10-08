@@ -31,11 +31,11 @@ with three audio APIs must sound identical and stay in step.
    `BridgeClock` and `WebMidiClock` (browser variants), `Tap`. Global
    controls regardless of source: phase nudge, latency offset in ms,
    quantized re-sync.
-5. **Voices are synthesized**, never sampled: 808-style kick (bridged-T
-   resonator + click transient), snare (two detuned oscillators + filtered
+5. **Voices are synthesized**, never sampled: a classic analogue-style
+   kick (bridged-T resonator + click transient), snare (two detuned oscillators + filtered
    noise), open/closed hats (six detuned squares → band-pass/high-pass),
    plus toms, clap, rimshot, cowbell. TR-style Accent, flam, shuffle and
-   per-voice Tune/Decay/Snappy behaviour. A sample layer for 909-style
+   per-voice Tune/Decay/Snappy behaviour. A sample layer for sampled-era
    hats/cymbals may come later using only our own recordings.
 6. **Dumb master output:** full-range, mono-compatible, default peaks ≈ −6
    dBFS, a single output-gain control, optional soft safety limiter. No

@@ -15,3 +15,6 @@ dist/
 /apps/web/public/player5.wasm
 /apps/web/test-results/
 /apps/web/playwright-report/
+
+# Agent worktrees (Claude Code workflows)
+.claude/worktrees/

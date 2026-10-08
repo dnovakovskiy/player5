@@ -10,7 +10,7 @@ decks number 1–4; this app is the fifth device.
 - **Timing is the product.** Sample-accurate sequencing. The render path is
   real-time safe: no allocations, locks, syscalls, blocking or logging.
 - **Synthesized voices only.** No ripped samples. A sample layer for
-  909-style hats/cymbals may come later, using only recordings we make.
+  sampled-era hats/cymbals may come later, using only recordings we make.
 - **No Roland trademarks or trade dress** anywhere: code, UI, docs, commit
   messages. "TR-inspired" is the ceiling. Never name a specific Roland model.
 - **Dumb master output.** Full-range, mono-compatible, default peaks ≈ −6
