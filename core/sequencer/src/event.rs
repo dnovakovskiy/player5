@@ -27,6 +27,11 @@ pub enum EventKind {
         /// New normalised value.
         value: f32,
     },
+    /// Discard every *trigger* the renderer already holds that is stamped at
+    /// or after this event's sample. Sent when the timeline jumps (a clock
+    /// re-sync) so steps scheduled against the old timeline do not play
+    /// twice. Applied as soon as it is received, not at its sample.
+    Flush,
 }
 
 /// Addressable parameters.
@@ -47,9 +52,9 @@ pub enum VoiceParam {
     Decay,
     /// Output level.
     Level,
-    /// Snare noise amount (future voices).
+    /// Noise amount (snare).
     Snappy,
-    /// Tonal balance (future voices).
+    /// Timbre / filter position.
     Tone,
 }
 
@@ -69,6 +74,15 @@ impl Event {
         Self {
             sample,
             kind: EventKind::Trigger { voice, velocity },
+        }
+    }
+
+    /// A flush of pending triggers at or after `sample`.
+    #[must_use]
+    pub fn flush(sample: u64) -> Self {
+        Self {
+            sample,
+            kind: EventKind::Flush,
         }
     }
 

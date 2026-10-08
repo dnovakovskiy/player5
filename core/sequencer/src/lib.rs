@@ -22,7 +22,7 @@ mod scheduler;
 
 pub use event::{Event, EventKind, MasterParam, ParamTarget, VoiceParam};
 pub use pattern::{
-    Pattern, PatternParseError, Step, Track, VoiceId, BEATS_PER_STEP, MAX_SHUFFLE_BEATS,
-    STEP_COUNT, UNACCENTED_VELOCITY,
+    Pattern, PatternParseError, Step, Track, VoiceId, BEATS_PER_STEP, FLAM_GRACE_RATIO,
+    FLAM_SPACING_RANGE_S, MAX_SHUFFLE_BEATS, STEP_COUNT, UNACCENTED_VELOCITY,
 };
 pub use scheduler::Scheduler;

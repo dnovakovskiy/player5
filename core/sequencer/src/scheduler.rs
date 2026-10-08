@@ -55,6 +55,45 @@ impl Scheduler {
         self.playing = true;
     }
 
+    /// Starts at absolute step `step` (pattern position `step % 16`), for
+    /// joining a running external timeline in phase.
+    pub fn start_at(&mut self, step: u64) {
+        self.next_step = step;
+        self.playing = true;
+    }
+
+    /// The first absolute step whose (shuffled) position on `clock` falls at
+    /// or after `sample`. Steps before beat 0 do not exist, so the result is
+    /// never below 0.
+    #[must_use]
+    pub fn first_step_at_or_after<C: ClockSource>(&self, clock: &C, sample: u64) -> u64 {
+        let beat = clock.beat_at_sample(sample as f64);
+        let mut step = if beat <= 0.0 {
+            0
+        } else {
+            (beat / crate::BEATS_PER_STEP).floor() as u64
+        };
+        // Back off one in case shuffle delayed the previous step past
+        // `sample`, then walk forward to the first step at or after it.
+        step = step.saturating_sub(1);
+        while self.step_sample(clock, step) < sample {
+            step += 1;
+        }
+        step
+    }
+
+    /// Moves the cursor to the first step at or after `sample` on `clock`,
+    /// after the timeline jumped. Use together with an [`Event::flush`] so
+    /// already-queued steps from the old timeline are discarded.
+    pub fn resync<C: ClockSource>(&mut self, clock: &C, sample: u64) {
+        self.next_step = self.first_step_at_or_after(clock, sample);
+    }
+
+    fn step_sample<C: ClockSource>(&self, clock: &C, step: u64) -> u64 {
+        let beat = self.pattern.step_beat(step);
+        clock.sample_at_beat(beat).round().max(0.0) as u64
+    }
+
     /// Stops scheduling. Already-queued events still play.
     pub fn stop(&mut self) {
         self.playing = false;
@@ -108,22 +147,33 @@ impl Scheduler {
                 self.playing = false;
                 break;
             }
-            let beat = self.pattern.step_beat(self.next_step);
-            let sample = clock.sample_at_beat(beat).round().max(0.0) as u64;
+            let sample = self.step_sample(clock, self.next_step);
             if sample >= horizon {
                 break;
             }
-            // A step is emitted atomically: either all its voices fit in the
-            // queue or none are pushed and we retry the step next tick.
-            if out.vacant() < VoiceId::COUNT {
+            // A step is emitted atomically: either all its voices (and their
+            // flam grace notes) fit in the queue or none are pushed and we
+            // retry the step next tick.
+            if out.vacant() < 2 * VoiceId::COUNT {
                 break;
             }
             let index = self.next_pattern_step();
+            let flam_samples = (self.pattern.flam_seconds() * clock.sample_rate()).round() as u64;
             for voice in VoiceId::ALL {
-                let step = self.pattern.track(voice).steps[index];
+                let track = self.pattern.track(voice);
+                if track.mute {
+                    continue;
+                }
+                let step = track.steps[index];
                 if step.on {
                     let velocity = self.pattern.velocity(step);
                     // Cannot fail: vacancy was checked above.
+                    if step.flam {
+                        let grace_at = sample.saturating_sub(flam_samples);
+                        let grace = velocity * crate::FLAM_GRACE_RATIO;
+                        let _ = out.push(Event::trigger(grace_at, voice, grace));
+                        pushed += 1;
+                    }
                     let _ = out.push(Event::trigger(sample, voice, velocity));
                     pushed += 1;
                 }
@@ -178,7 +228,7 @@ mod tests {
             .iter()
             .map(|e| match e.kind {
                 EventKind::Trigger { velocity, .. } => velocity,
-                EventKind::Param { .. } => unreachable!(),
+                EventKind::Param { .. } | EventKind::Flush => unreachable!(),
             })
             .collect();
         assert_eq!(velocities, vec![1.0, 0.7, 1.0, 0.7]);
@@ -216,20 +266,103 @@ mod tests {
     }
 
     #[test]
+    fn flam_adds_a_quieter_grace_note_before_the_grid() {
+        let clock = InternalClock::new(48_000.0, 120.0);
+        let (mut p, mut c) = event_queue(64);
+        let mut pattern = Pattern::empty();
+        *pattern.track_mut(VoiceId::Snare) = Track::parse("---- F--- ---- ----").unwrap();
+        pattern.flam = 0.0; // 8 ms = 384 samples
+        pattern.accent = 1.0;
+        let mut s = Scheduler::new(pattern);
+        s.start();
+        s.schedule(&clock, 48_000, &mut p);
+        let events = drain(&mut c);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].sample, 24_000 - 384);
+        assert_eq!(events[1].sample, 24_000);
+        match (events[0].kind, events[1].kind) {
+            (EventKind::Trigger { velocity: g, .. }, EventKind::Trigger { velocity: m, .. }) => {
+                assert_eq!(m, 1.0);
+                assert!((g - 0.6).abs() < 1e-6);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn muted_tracks_schedule_nothing() {
+        let clock = InternalClock::new(48_000.0, 120.0);
+        let (mut p, mut c) = event_queue(64);
+        let mut pattern = four_on_the_floor();
+        *pattern.track_mut(VoiceId::ClosedHat) = Track::parse("x-x- x-x- x-x- x-x-").unwrap();
+        pattern.track_mut(VoiceId::Kick).mute = true;
+        let mut s = Scheduler::new(pattern);
+        s.start();
+        s.schedule(&clock, 96_000, &mut p);
+        let events = drain(&mut c);
+        assert_eq!(events.len(), 8);
+        assert!(events.iter().all(|e| matches!(
+            e.kind,
+            EventKind::Trigger {
+                voice: VoiceId::ClosedHat,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn resync_finds_the_next_step_on_a_moved_timeline() {
+        let mut clock = InternalClock::new(48_000.0, 120.0);
+        let mut s = Scheduler::new(four_on_the_floor());
+        s.start();
+        // Timeline jumps: beat 0 is now at sample 1 000.
+        clock.reset(1_000.0);
+        s.resync(&clock, 30_000);
+        // Step 5 is at beat 1.25 = 1 000 + 30 000 = 31 000 ≥ 30 000; step 4
+        // is at 25 000.
+        assert_eq!(s.next_step(), 5);
+        // With shuffle, an odd step may sit later than its straight slot.
+        let mut pattern = four_on_the_floor();
+        pattern.shuffle = 1.0;
+        s.set_pattern(pattern);
+        s.resync(&clock, 31_500);
+        // Step 5 (odd) is delayed by 2 000 → 33 000 ≥ 31 500.
+        assert_eq!(s.next_step(), 5);
+        assert_eq!(s.first_step_at_or_after(&clock, 0), 0);
+    }
+
+    #[test]
+    fn start_at_joins_mid_pattern() {
+        let clock = InternalClock::new(48_000.0, 120.0);
+        let (mut p, mut c) = event_queue(64);
+        let mut s = Scheduler::new(four_on_the_floor());
+        s.start_at(20); // bar 2, step 4
+        assert_eq!(s.next_pattern_step(), 4);
+        s.schedule(&clock, 20 * 6_000 + 1, &mut p);
+        let events = drain(&mut c);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].sample, 120_000);
+    }
+
+    #[test]
     fn full_queue_pauses_without_losing_steps() {
         let clock = InternalClock::new(48_000.0, 120.0);
-        let (mut p, mut c) = event_queue(2);
+        // 32 slots; a step needs room for every voice plus flams (20), so
+        // the scheduler stops once fewer than 20 slots are free.
+        let (mut p, mut c) = event_queue(32);
         let mut pattern = Pattern::empty();
         pattern.track_mut(VoiceId::Kick).steps = [Step::ON; 16];
         let mut s = Scheduler::new(pattern);
         s.start();
-        assert_eq!(s.schedule(&clock, 1_000_000, &mut p), 2);
-        assert_eq!(s.next_step(), 2);
+        assert_eq!(s.schedule(&clock, 1_000_000, &mut p), 13);
+        assert_eq!(s.next_step(), 13);
+        assert_eq!(s.schedule(&clock, 1_000_000, &mut p), 0);
         let first = drain(&mut c);
-        assert_eq!(s.schedule(&clock, 1_000_000, &mut p), 2);
+        assert_eq!(s.schedule(&clock, 1_000_000, &mut p), 13);
         let second = drain(&mut c);
         let samples: Vec<u64> = first.iter().chain(&second).map(|e| e.sample).collect();
-        assert_eq!(samples, vec![0, 6_000, 12_000, 18_000]);
+        let expected: Vec<u64> = (0..26).map(|k| k * 6_000).collect();
+        assert_eq!(samples, expected);
     }
 
     #[test]

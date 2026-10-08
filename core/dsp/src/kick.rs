@@ -21,6 +21,7 @@
 
 use crate::math;
 use crate::voice::Voice;
+use crate::VoiceParams;
 
 /// Normalised kick parameters. Every field is `0..=1`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -190,6 +191,12 @@ impl Voice for Kick {
         self.click_hp_coef = math::onepole_coefficient(CLICK_HP_HZ, self.sample_rate);
         self.click_lp_coef = math::onepole_coefficient(CLICK_LP_HZ, self.sample_rate);
         self.reset_state();
+    }
+
+    fn apply_params(&mut self, params: &VoiceParams) {
+        self.set_tune(params.tune);
+        self.set_decay(params.decay);
+        self.set_level(params.level);
     }
 
     fn trigger(&mut self, velocity: f32) {

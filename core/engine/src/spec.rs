@@ -5,20 +5,27 @@
 //!   "bpm": 120,
 //!   "shuffle": 0.0,
 //!   "accent": 0.5,
+//!   "flam": 0.5,
 //!   "voices": {
-//!     "kick": { "steps": "X--- x--- X--- x---", "tune": 0.5, "decay": 0.5, "level": 1.0 }
+//!     "kick":       { "steps": "X--- x--- X--- x---", "tune": 0.5, "decay": 0.5, "level": 1.0 },
+//!     "snare":      { "steps": "---- X--- ---- X---", "snappy": 0.6 },
+//!     "closed_hat": { "steps": "x-x- x-x- x-x- x-x-", "mute": false }
 //!   },
 //!   "render": { "bars": 2, "sample_rate": 48000, "tail_seconds": 0.5 }
 //! }
 //! ```
 //!
+//! Voices: `kick`, `snare`, `low_tom`, `mid_tom`, `high_tom`, `rim`, `clap`,
+//! `closed_hat`, `open_hat`, `cowbell`. Absent voices are silent.
+//!
 //! Step notation: one character per step, `-`/`.` off, `x` hit, `X` accented
-//! hit; spaces are ignored. Every field except `voices` has a default.
+//! hit, `f` flammed hit, `F` accented flammed hit; spaces are ignored.
+//! Every field except `steps` has a default.
 
 use serde::{Deserialize, Serialize};
 
-use dsp::KickParams;
-use sequencer::{Pattern, PatternParseError, Track, VoiceId, VoiceParam};
+use dsp::{KickParams, VoiceParams};
+use sequencer::{Pattern, PatternParseError, Track, VoiceId};
 
 use crate::Engine;
 
@@ -26,19 +33,22 @@ use crate::Engine;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PatternSpec {
-    /// Tempo.
+    /// Tempo for the internal clock.
     #[serde(default = "default_bpm")]
     pub bpm: f64,
     /// Shuffle amount `0..=1`.
     #[serde(default)]
     pub shuffle: f32,
     /// Accent amount `0..=1`.
-    #[serde(default = "default_accent")]
+    #[serde(default = "default_half")]
     pub accent: f32,
+    /// Flam spacing `0..=1`.
+    #[serde(default = "default_half")]
+    pub flam: f32,
     /// Per-voice steps and controls.
     #[serde(default)]
     pub voices: VoicesSpec,
-    /// Offline render settings.
+    /// Offline render settings (output gain and limiter also apply live).
     #[serde(default)]
     pub render: RenderSpec,
 }
@@ -50,6 +60,68 @@ pub struct VoicesSpec {
     /// Bass drum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kick: Option<VoiceSpec>,
+    /// Snare drum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snare: Option<VoiceSpec>,
+    /// Low tom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_tom: Option<VoiceSpec>,
+    /// Mid tom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mid_tom: Option<VoiceSpec>,
+    /// High tom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub high_tom: Option<VoiceSpec>,
+    /// Rimshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rim: Option<VoiceSpec>,
+    /// Hand clap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clap: Option<VoiceSpec>,
+    /// Closed hi-hat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_hat: Option<VoiceSpec>,
+    /// Open hi-hat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_hat: Option<VoiceSpec>,
+    /// Cowbell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cowbell: Option<VoiceSpec>,
+}
+
+impl VoicesSpec {
+    /// The entry for a voice.
+    #[must_use]
+    pub fn get(&self, voice: VoiceId) -> Option<&VoiceSpec> {
+        match voice {
+            VoiceId::Kick => self.kick.as_ref(),
+            VoiceId::Snare => self.snare.as_ref(),
+            VoiceId::LowTom => self.low_tom.as_ref(),
+            VoiceId::MidTom => self.mid_tom.as_ref(),
+            VoiceId::HighTom => self.high_tom.as_ref(),
+            VoiceId::Rim => self.rim.as_ref(),
+            VoiceId::Clap => self.clap.as_ref(),
+            VoiceId::ClosedHat => self.closed_hat.as_ref(),
+            VoiceId::OpenHat => self.open_hat.as_ref(),
+            VoiceId::Cowbell => self.cowbell.as_ref(),
+        }
+    }
+
+    /// Mutable entry for a voice.
+    pub fn get_mut(&mut self, voice: VoiceId) -> &mut Option<VoiceSpec> {
+        match voice {
+            VoiceId::Kick => &mut self.kick,
+            VoiceId::Snare => &mut self.snare,
+            VoiceId::LowTom => &mut self.low_tom,
+            VoiceId::MidTom => &mut self.mid_tom,
+            VoiceId::HighTom => &mut self.high_tom,
+            VoiceId::Rim => &mut self.rim,
+            VoiceId::Clap => &mut self.clap,
+            VoiceId::ClosedHat => &mut self.closed_hat,
+            VoiceId::OpenHat => &mut self.open_hat,
+            VoiceId::Cowbell => &mut self.cowbell,
+        }
+    }
 }
 
 /// One voice's steps and TR-style controls.
@@ -65,8 +137,45 @@ pub struct VoiceSpec {
     #[serde(default = "default_half")]
     pub decay: f32,
     /// `0..=1`.
+    #[serde(default = "default_half")]
+    pub tone: f32,
+    /// `0..=1` (snare).
+    #[serde(default = "default_half")]
+    pub snappy: f32,
+    /// `0..=1`.
     #[serde(default = "default_one")]
     pub level: f32,
+    /// Muted tracks keep their steps but play nothing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mute: bool,
+}
+
+impl VoiceSpec {
+    /// A voice with these steps and default controls.
+    #[must_use]
+    pub fn new(steps: &str) -> Self {
+        Self {
+            steps: steps.to_string(),
+            tune: 0.5,
+            decay: 0.5,
+            tone: 0.5,
+            snappy: 0.5,
+            level: 1.0,
+            mute: false,
+        }
+    }
+
+    /// The DSP controls.
+    #[must_use]
+    pub fn params(&self) -> VoiceParams {
+        VoiceParams {
+            tune: self.tune,
+            decay: self.decay,
+            tone: self.tone,
+            snappy: self.snappy,
+            level: self.level,
+        }
+    }
 }
 
 /// Offline render settings.
@@ -109,9 +218,6 @@ impl Default for RenderSpec {
 fn default_bpm() -> f64 {
     120.0
 }
-fn default_accent() -> f32 {
-    0.5
-}
 fn default_half() -> f32 {
     0.5
 }
@@ -129,6 +235,10 @@ fn default_tail() -> f32 {
 }
 fn default_block_size() -> usize {
     256
+}
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Errors from loading a pattern file.
@@ -176,24 +286,35 @@ impl PatternSpec {
         let mut pattern = Pattern::empty();
         pattern.shuffle = self.shuffle;
         pattern.accent = self.accent;
-        if let Some(kick) = &self.voices.kick {
-            *pattern.track_mut(VoiceId::Kick) =
-                Track::parse(&kick.steps).map_err(|e| SpecError::Steps(VoiceId::Kick.name(), e))?;
+        pattern.flam = self.flam;
+        for voice in VoiceId::ALL {
+            if let Some(v) = self.voices.get(voice) {
+                let mut track =
+                    Track::parse(&v.steps).map_err(|e| SpecError::Steps(voice.name(), e))?;
+                track.mute = v.mute;
+                *pattern.track_mut(voice) = track;
+            }
         }
         Ok(pattern)
+    }
+
+    /// Controls for a voice (defaults when the voice is absent).
+    #[must_use]
+    pub fn voice_params(&self, voice: VoiceId) -> VoiceParams {
+        self.voices
+            .get(voice)
+            .map_or_else(VoiceParams::default, VoiceSpec::params)
     }
 
     /// Kick controls (defaults when the voice is absent).
     #[must_use]
     pub fn kick_params(&self) -> KickParams {
-        self.voices
-            .kick
-            .as_ref()
-            .map_or_else(KickParams::default, |k| KickParams {
-                tune: k.tune,
-                decay: k.decay,
-                level: k.level,
-            })
+        let p = self.voice_params(VoiceId::Kick);
+        KickParams {
+            tune: p.tune,
+            decay: p.decay,
+            level: p.level,
+        }
     }
 
     /// Total frames an offline render of this file produces.
@@ -208,18 +329,10 @@ impl PatternSpec {
 
     /// Builds an engine, applies this file and renders it offline.
     pub fn render(&self) -> Result<Vec<f32>, SpecError> {
-        let pattern = self.pattern()?;
         let mut engine = Engine::new(self.render.sample_rate as f32);
-        engine.set_tempo(self.bpm);
-        engine.set_pattern(pattern);
-        let kick = self.kick_params();
-        engine.set_kick_param(VoiceParam::Tune, kick.tune);
-        engine.set_kick_param(VoiceParam::Decay, kick.decay);
-        engine.set_kick_param(VoiceParam::Level, kick.level);
-        engine.set_output_gain(self.render.output_gain);
-        engine.set_limiter(self.render.limiter);
+        engine.load_spec(self)?;
         // Play exactly `bars` bars; the tail is the last hits ringing out.
-        engine.control().set_stop_after(Some(
+        engine.set_stop_after(Some(
             u64::from(self.render.bars) * sequencer::STEP_COUNT as u64,
         ));
         engine.start();
@@ -239,6 +352,7 @@ mod tests {
         assert_eq!(spec.bpm, 120.0);
         assert_eq!(spec.render.bars, 2);
         assert_eq!(spec.kick_params(), KickParams::default());
+        assert_eq!(spec.voice_params(VoiceId::Snare), VoiceParams::default());
         // 2 bars at 120 BPM = 4 s = 192 000 frames, plus 0.5 s tail.
         assert_eq!(spec.render_frames(), 216_000);
     }
@@ -246,11 +360,30 @@ mod tests {
     #[test]
     fn rejects_unknown_fields_and_bad_steps() {
         assert!(PatternSpec::from_json(r#"{ "bpm": 120, "swing": 1 }"#).is_err());
-        let bad = r#"{ "voices": { "kick": { "steps": "x---" } } }"#;
+        assert!(PatternSpec::from_json(
+            r#"{ "voices": { "cymbal": { "steps": "----------------" } } }"#
+        )
+        .is_err());
+        let bad = r#"{ "voices": { "snare": { "steps": "x---" } } }"#;
         assert!(matches!(
             PatternSpec::from_json(bad),
-            Err(SpecError::Steps("kick", _))
+            Err(SpecError::Steps("snare", _))
         ));
+    }
+
+    #[test]
+    fn every_voice_parses_with_mute_and_flam() {
+        let mut spec = PatternSpec::from_json(MINIMAL).unwrap();
+        for v in VoiceId::ALL {
+            let mut vs = VoiceSpec::new("f--- ---- X--- ----");
+            vs.mute = v == VoiceId::Clap;
+            *spec.voices.get_mut(v) = Some(vs);
+        }
+        let again = PatternSpec::from_json(&spec.to_json()).unwrap();
+        assert_eq!(spec, again);
+        let pattern = again.pattern().unwrap();
+        assert!(pattern.track(VoiceId::Clap).mute);
+        assert!(pattern.track(VoiceId::Cowbell).steps[0].flam);
     }
 
     #[test]

@@ -34,6 +34,12 @@ impl InternalClock {
         self.anchor_beat = 0.0;
     }
 
+    /// Re-anchors so that `beat` falls on `sample`, keeping tempo.
+    pub fn align(&mut self, sample: f64, beat: f64) {
+        self.anchor_sample = sample;
+        self.anchor_beat = beat;
+    }
+
     /// Changes tempo without a jump in the beat count: the beat at `now`
     /// stays where it is and later beats follow the new tempo.
     pub fn set_tempo(&mut self, bpm: f64, now_sample: f64) {

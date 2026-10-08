@@ -1,20 +1,19 @@
 [package]
-name = "player5-ffi"
-description = "player5 C ABI for the Swift shells (macOS, iOS)"
+name = "player5-bridge"
+description = "Headless relay: joins the booth network clock and serves it to browsers over WebSocket"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
-[lib]
-name = "player5"
-crate-type = ["staticlib", "cdylib", "rlib"]
+[[bin]]
+name = "player5-bridge"
+path = "src/main.rs"
 
 [dependencies]
-engine.workspace = true
-sequencer.workspace = true
 sync.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 [lints]

@@ -10,6 +10,10 @@
 //!
 //! Accuracy is far beyond what a drum synth needs (relative error on the order
 //! of `f32::EPSILON`), and the functions are cheaper than `libm` anyway.
+//!
+//! `f32::sqrt`, `abs`, `min`, `max` and `clamp` are fine to use directly:
+//! IEEE 754 requires `sqrt` to be correctly rounded, so it is as
+//! deterministic as addition.
 
 pub use core::f32::consts::{LN_10, LN_2, TAU};
 
@@ -65,6 +69,14 @@ pub fn sin_turns(turns: f32) -> f32 {
         + r2 * (-1.0 / 6.0
             + r2 * (1.0 / 120.0
                 + r2 * (-1.0 / 5_040.0 + r2 * (1.0 / 362_880.0 - r2 / 39_916_800.0)))))
+}
+
+/// `tan(2π · turns)` for `turns` in `(-0.25, 0.25)`, as `sin / cos`. Used to
+/// prewarp filter cutoffs: `tan(π · fc / fs) = tan_turns(fc / fs / 2)`.
+#[inline]
+#[must_use]
+pub fn tan_turns(turns: f32) -> f32 {
+    sin_turns(turns) / cos_turns(turns)
 }
 
 /// `cos(2π · turns)`.
@@ -166,6 +178,20 @@ mod tests {
         assert_eq!(sin_turns(0.0), 0.0);
         assert!((sin_turns(0.25) - 1.0).abs() < 5e-7);
         assert!((cos_turns(0.0) - 1.0).abs() < 5e-7);
+    }
+
+    #[test]
+    fn tan_matches_std() {
+        let mut t = -0.24f32;
+        while t < 0.24 {
+            let ours = tan_turns(t);
+            let theirs = (t as f64 * std::f64::consts::TAU).tan() as f32;
+            assert!(
+                ((ours - theirs) / theirs.abs().max(1.0)).abs() < 2e-6,
+                "tan({t}): {ours} vs {theirs}"
+            );
+            t += 0.001_7;
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
-# Workspace root. The Rust crates live under core/; apps/bridge joins this
-# workspace when it arrives (session 4). Keeping the manifest at the repo root
-# lets every `cargo` command run from anywhere in the checkout.
+# Workspace root. The core crates live under core/, the bridge binary under
+# apps/bridge. Keeping the manifest at the repo root lets every `cargo`
+# command run from anywhere in the checkout.
 [workspace]
 resolver = "2"
 members = [
@@ -10,6 +10,7 @@ members = [
     "core/engine",
     "core/ffi",
     "core/render",
+    "apps/bridge",
 ]
 
 [workspace.package]

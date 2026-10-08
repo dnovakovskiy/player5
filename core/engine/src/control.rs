@@ -1,40 +1,110 @@
+use std::sync::Arc;
+
+use dsp::{Param, VoiceParams, VOICE_COUNT};
 use sequencer::queue::Producer;
 use sequencer::{Event, MasterParam, ParamTarget, Pattern, Scheduler, VoiceId, VoiceParam};
-use sync::{AdjustedClock, ClockControls, ClockSource, InternalClock};
+use sync::{
+    AdjustedClock, ClockControls, ClockSource, FollowerClock, InternalClock, MidiClockFollower,
+    MidiMessage, Observation, Phase, Precision, TapTempo,
+};
+
+use crate::timing::{SharedTiming, TimingSnapshot};
 
 /// Default lookahead: 100 ms at 48 kHz. See ADR-0001.
 pub const DEFAULT_LOOKAHEAD_SAMPLES: u64 = 4_800;
 
-/// Control-thread half of the engine. Owns the clock, the scheduler and the
-/// producer end of the event queue.
+/// Which clock drives the sequencer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClockMode {
+    /// The free-running internal clock (tempo from the pattern / UI / tap).
+    Internal,
+    /// Follow observations from an external source with this tuning.
+    Follow(Precision),
+}
+
+/// Borrowed view of whichever clock is active.
+#[derive(Clone, Copy, Debug)]
+enum ActiveClock<'a> {
+    Internal(&'a InternalClock),
+    Follow(&'a FollowerClock),
+}
+
+impl ClockSource for ActiveClock<'_> {
+    fn sample_rate(&self) -> f64 {
+        match self {
+            Self::Internal(c) => c.sample_rate(),
+            Self::Follow(c) => c.sample_rate(),
+        }
+    }
+    fn tempo_bpm(&self) -> f64 {
+        match self {
+            Self::Internal(c) => c.tempo_bpm(),
+            Self::Follow(c) => c.tempo_bpm(),
+        }
+    }
+    fn beat_at_sample(&self, sample: f64) -> f64 {
+        match self {
+            Self::Internal(c) => c.beat_at_sample(sample),
+            Self::Follow(c) => c.beat_at_sample(sample),
+        }
+    }
+    fn sample_at_beat(&self, beat: f64) -> f64 {
+        match self {
+            Self::Internal(c) => c.sample_at_beat(beat),
+            Self::Follow(c) => c.sample_at_beat(beat),
+        }
+    }
+}
+
+/// Control-thread half of the engine. Owns the clocks, the scheduler and
+/// the producer end of the event queue.
 ///
 /// Every mutation that must be audible goes through the queue as an event
-/// stamped with a sample position; nothing here shares memory with the
-/// renderer.
+/// stamped with a sample position; the only memory shared with the renderer
+/// is the [`SharedTiming`] the renderer publishes.
 pub struct Control {
     sample_rate: f32,
-    clock: InternalClock,
+    mode: ClockMode,
+    internal: InternalClock,
+    follower: FollowerClock,
+    tap: TapTempo,
+    midi: MidiClockFollower,
     controls: ClockControls,
     scheduler: Scheduler,
     producer: Producer,
     lookahead: u64,
+    timing: Arc<SharedTiming>,
+    sent_params: [VoiceParams; VOICE_COUNT],
+    sent_gain: f32,
+    sent_limiter: bool,
+    last_now: u64,
 }
 
 impl Control {
     /// Default tempo.
     pub const DEFAULT_BPM: f64 = 120.0;
 
-    /// Creates the control half over `producer`.
+    /// Creates the control half over `producer`, reading render timing from
+    /// `timing`.
     #[must_use]
-    pub fn new(sample_rate: f32, producer: Producer) -> Self {
+    pub fn new(sample_rate: f32, producer: Producer, timing: Arc<SharedTiming>) -> Self {
+        let sr = f64::from(sample_rate);
         Self {
             sample_rate,
-            clock: InternalClock::new(f64::from(sample_rate), Self::DEFAULT_BPM),
+            mode: ClockMode::Internal,
+            internal: InternalClock::new(sr, Self::DEFAULT_BPM),
+            follower: FollowerClock::new(sr, Self::DEFAULT_BPM, Precision::Fine),
+            tap: TapTempo::new(sr),
+            midi: MidiClockFollower::new(sr),
             controls: ClockControls::default(),
             scheduler: Scheduler::default(),
             producer,
-            lookahead: (DEFAULT_LOOKAHEAD_SAMPLES as f64 * f64::from(sample_rate) / 48_000.0)
-                .round() as u64,
+            lookahead: (DEFAULT_LOOKAHEAD_SAMPLES as f64 * sr / 48_000.0).round() as u64,
+            timing,
+            sent_params: [VoiceParams::default(); VOICE_COUNT],
+            sent_gain: 1.0,
+            sent_limiter: false,
+            last_now: 0,
         }
     }
 
@@ -44,10 +114,48 @@ impl Control {
         self.sample_rate
     }
 
+    fn active(&self) -> ActiveClock<'_> {
+        active_of(self.mode, &self.internal, &self.follower)
+    }
+
     /// The internal clock.
     #[must_use]
-    pub fn clock(&self) -> &InternalClock {
-        &self.clock
+    pub fn internal_clock(&self) -> &InternalClock {
+        &self.internal
+    }
+
+    /// The follower clock (meaningful in [`ClockMode::Follow`]).
+    #[must_use]
+    pub fn follower_clock(&self) -> &FollowerClock {
+        &self.follower
+    }
+
+    /// Current clock mode.
+    #[must_use]
+    pub fn clock_mode(&self) -> ClockMode {
+        self.mode
+    }
+
+    /// Switches clock mode at `now`, keeping the beat continuous so a
+    /// running pattern does not jump.
+    pub fn set_clock_mode(&mut self, mode: ClockMode, now: u64) {
+        if mode == self.mode {
+            return;
+        }
+        let beat = self.active().beat_at_sample(now as f64);
+        let bpm = self.active().tempo_bpm();
+        match mode {
+            ClockMode::Internal => {
+                self.internal.set_tempo(bpm, now as f64);
+                self.internal.align(now as f64, beat);
+            }
+            ClockMode::Follow(precision) => {
+                self.follower = FollowerClock::new(f64::from(self.sample_rate), bpm, precision);
+                self.follower.reset(now as f64, beat);
+                let _ = self.follower.take_discontinuity();
+            }
+        }
+        self.mode = mode;
     }
 
     /// Global timing controls (nudge, latency offset).
@@ -59,6 +167,24 @@ impl Control {
     /// Replaces the global timing controls.
     pub fn set_clock_controls(&mut self, controls: ClockControls) {
         self.controls = controls;
+    }
+
+    /// Phase nudge in milliseconds at the current tempo (positive = later).
+    pub fn set_nudge_ms(&mut self, ms: f64) {
+        let ms = if ms.is_finite() { ms } else { 0.0 };
+        self.controls.nudge_beats = ms / 1_000.0 * self.tempo() / 60.0;
+    }
+
+    /// Phase nudge in milliseconds at the current tempo.
+    #[must_use]
+    pub fn nudge_ms(&self) -> f64 {
+        self.controls.nudge_beats * 60_000.0 / self.tempo()
+    }
+
+    /// Output-path latency compensation in milliseconds (positive = trigger
+    /// earlier).
+    pub fn set_latency_ms(&mut self, ms: f64) {
+        self.controls.latency_ms = if ms.is_finite() { ms } else { 0.0 };
     }
 
     /// Lookahead in samples.
@@ -89,28 +215,50 @@ impl Control {
         self.scheduler.pattern()
     }
 
-    /// Changes tempo, keeping the beat continuous at `now`.
+    /// Sets the internal clock's tempo, keeping the beat continuous at
+    /// `now`. Ignored for scheduling while following an external clock.
     pub fn set_tempo(&mut self, bpm: f64, now: u64) {
-        self.clock.set_tempo(bpm, now as f64);
+        self.internal.set_tempo(bpm, now as f64);
     }
 
-    /// Current tempo.
+    /// Tempo of the active clock.
     #[must_use]
     pub fn tempo(&self) -> f64 {
-        self.clock.tempo_bpm()
+        self.active().tempo_bpm()
     }
 
-    /// The beat (from beat 0 at start) that falls on `sample`, with the
-    /// global controls applied. Negative before playback started.
+    /// The beat (with the global controls applied) that falls on `sample`.
     #[must_use]
     pub fn beat_at(&self, sample: u64) -> f64 {
-        AdjustedClock::new(&self.clock, self.controls).beat_at_sample(sample as f64)
+        AdjustedClock::new(&self.active(), self.controls).beat_at_sample(sample as f64)
     }
 
-    /// Starts playback: beat 0 and step 0 fall on `now`.
+    /// Whether the active clock is tracking a live source (always `true`
+    /// for the internal clock).
+    #[must_use]
+    pub fn is_locked(&self) -> bool {
+        match self.mode {
+            ClockMode::Internal => true,
+            ClockMode::Follow(_) => self.follower.is_locked(),
+        }
+    }
+
+    /// Starts playback at `now`. Internal clock: beat 0 and step 0 fall on
+    /// `now`. Following: joins the external timeline in phase at the next
+    /// step, so the pattern position matches the source's bar position.
     pub fn start(&mut self, now: u64) {
-        self.clock.reset(now as f64);
-        self.scheduler.start();
+        match self.mode {
+            ClockMode::Internal => {
+                self.internal.reset(now as f64);
+                self.scheduler.start();
+            }
+            ClockMode::Follow(_) => {
+                let active = self.active();
+                let clock = AdjustedClock::new(&active, self.controls);
+                let step = self.scheduler.first_step_at_or_after(&clock, now);
+                self.scheduler.start_at(step);
+            }
+        }
     }
 
     /// Stops scheduling. Queued events still play.
@@ -129,6 +277,65 @@ impl Control {
         self.scheduler.is_playing()
     }
 
+    /// Feeds an external observation (sample-domain). Ignored unless
+    /// following.
+    pub fn observe(&mut self, observation: &Observation, now: u64) {
+        if matches!(self.mode, ClockMode::Follow(_)) {
+            self.follower.observe(observation, now as f64);
+        }
+    }
+
+    /// Feeds a MIDI clock message received at `sample`.
+    pub fn midi(&mut self, message: MidiMessage, sample: f64, now: u64) {
+        if let Some(obs) = self.midi.handle(message, sample) {
+            self.observe(&obs, now);
+        }
+    }
+
+    /// Registers a tap at `sample`. Internal clock: sets tempo and pulls the
+    /// beat grid onto the tap. Following: treated as an observation.
+    pub fn tap(&mut self, sample: f64, now: u64) {
+        let Some(obs) = self.tap.tap(sample) else {
+            return;
+        };
+        match self.mode {
+            ClockMode::Internal => {
+                if let Some(bpm) = obs.bpm {
+                    self.internal.set_tempo(bpm, sample);
+                }
+                let beat = self.internal.beat_at_sample(sample);
+                self.internal.align(sample, beat.round());
+                self.realign(now);
+            }
+            ClockMode::Follow(_) => self.follower.observe(&obs, now as f64),
+        }
+    }
+
+    /// Quantized re-sync. Following: the next observation snaps phase
+    /// instead of slewing. Internal: the bar restarts at `now`.
+    pub fn resync(&mut self, now: u64) {
+        match self.mode {
+            ClockMode::Internal => {
+                self.internal.reset(now as f64);
+                self.realign(now);
+            }
+            ClockMode::Follow(_) => self.follower.request_resync(),
+        }
+    }
+
+    /// After the timeline moved: drop already-queued triggers from `now` on
+    /// and continue from the first step at or after `now`.
+    fn realign(&mut self, now: u64) {
+        if !self.scheduler.is_playing() {
+            return;
+        }
+        let _ = self.producer.push(Event::flush(now));
+        let active = self.active();
+        let clock = AdjustedClock::new(&active, self.controls);
+        let step = self.scheduler.first_step_at_or_after(&clock, now);
+        self.scheduler.start_at(step);
+    }
+
     /// Queues a voice parameter change for sample `at`. Returns `false` if
     /// the queue was full (the change is dropped; retry later).
     pub fn set_voice_param(
@@ -138,40 +345,263 @@ impl Control {
         value: f32,
         at: u64,
     ) -> bool {
-        self.producer
+        let ok = self
+            .producer
             .push(Event::param(at, ParamTarget::Voice(voice, param), value))
-            .is_ok()
+            .is_ok();
+        if ok {
+            self.sent_params[voice.index()].set(dsp_param(param), value);
+        }
+        ok
     }
 
-    /// Queues an output-gain change for sample `at`.
+    /// Queues only the controls of `voice` that differ from what was last
+    /// sent. Returns `false` if the queue filled up.
+    pub fn set_voice_params(&mut self, voice: VoiceId, params: &VoiceParams, at: u64) -> bool {
+        let mut ok = true;
+        for (param, vp) in [
+            (Param::Tune, VoiceParam::Tune),
+            (Param::Decay, VoiceParam::Decay),
+            (Param::Tone, VoiceParam::Tone),
+            (Param::Snappy, VoiceParam::Snappy),
+            (Param::Level, VoiceParam::Level),
+        ] {
+            let value = params.get(param);
+            if self.sent_params[voice.index()].get(param) != value {
+                ok &= self.set_voice_param(voice, vp, value, at);
+            }
+        }
+        ok
+    }
+
+    /// Queues an output-gain change for sample `at` (skipped if unchanged).
     pub fn set_output_gain(&mut self, gain: f32, at: u64) -> bool {
-        self.producer
+        if gain == self.sent_gain {
+            return true;
+        }
+        let ok = self
+            .producer
             .push(Event::param(
                 at,
                 ParamTarget::Master(MasterParam::OutputGain),
                 gain,
             ))
-            .is_ok()
+            .is_ok();
+        if ok {
+            self.sent_gain = gain;
+        }
+        ok
     }
 
-    /// Queues a limiter on/off change for sample `at`.
+    /// Queues a limiter on/off change for sample `at` (skipped if
+    /// unchanged).
     pub fn set_limiter(&mut self, enabled: bool, at: u64) -> bool {
+        if enabled == self.sent_limiter {
+            return true;
+        }
         let value = if enabled { 1.0 } else { 0.0 };
-        self.producer
+        let ok = self
+            .producer
             .push(Event::param(
                 at,
                 ParamTarget::Master(MasterParam::Limiter),
                 value,
             ))
-            .is_ok()
+            .is_ok();
+        if ok {
+            self.sent_limiter = enabled;
+        }
+        ok
     }
 
-    /// Schedules every step up to `now + lookahead`. Call once per control
-    /// tick (or before every block when driving offline). Returns the number
-    /// of events pushed.
-    pub fn schedule_ahead(&mut self, now: u64) -> usize {
-        let clock = AdjustedClock::new(&self.clock, self.controls);
+    /// The renderer's latest published timing.
+    #[must_use]
+    pub fn render_timing(&self) -> TimingSnapshot {
+        self.timing.read()
+    }
+
+    /// Maps a host time (ns, [`sync::host_time`] scale) onto the sample
+    /// clock using the renderer's latest timestamp. `None` until the host
+    /// has supplied host times.
+    #[must_use]
+    pub fn host_ns_to_sample(&self, host_ns: u64) -> Option<f64> {
+        let snap = self.timing.read();
+        if snap.host_ticks == 0 {
+            return None;
+        }
+        let block_ns = sync::host_time::ticks_to_ns(snap.host_ticks);
+        let delta_s = (host_ns as f64 - block_ns as f64) / 1e9;
+        Some(snap.position as f64 + delta_s * f64::from(self.sample_rate))
+    }
+
+    /// Feeds an observation timestamped in host nanoseconds (from a network
+    /// source or MIDI driver). Dropped until the renderer has published a
+    /// host time.
+    pub fn observe_host(&mut self, host_ns: u64, phase: Phase, bpm: Option<f64>) {
+        if let Some(sample) = self.host_ns_to_sample(host_ns) {
+            let now = self.timing.read().position;
+            self.observe(&Observation { sample, phase, bpm }, now);
+        }
+    }
+
+    /// One control tick at render position `now`: advances the follower,
+    /// handles timeline jumps, and schedules up to `now + lookahead`.
+    /// Returns the number of events pushed.
+    pub fn tick(&mut self, now: u64) -> usize {
+        self.last_now = now;
+        if matches!(self.mode, ClockMode::Follow(_)) {
+            self.follower.advance(now as f64);
+            if self.follower.take_discontinuity() {
+                self.realign(now);
+            }
+        }
+        let active = active_of(self.mode, &self.internal, &self.follower);
+        let clock = AdjustedClock::new(&active, self.controls);
         self.scheduler
             .schedule(&clock, now + self.lookahead, &mut self.producer)
+    }
+
+    /// [`Control::tick`] at the renderer's published position, for shells
+    /// that run control and render on different threads.
+    pub fn tick_shared(&mut self) -> usize {
+        let now = self.timing.read().position;
+        self.tick(now)
+    }
+
+    /// Position passed to the last [`Control::tick`].
+    #[must_use]
+    pub fn last_tick_position(&self) -> u64 {
+        self.last_now
+    }
+}
+
+fn active_of<'a>(
+    mode: ClockMode,
+    internal: &'a InternalClock,
+    follower: &'a FollowerClock,
+) -> ActiveClock<'a> {
+    match mode {
+        ClockMode::Internal => ActiveClock::Internal(internal),
+        ClockMode::Follow(_) => ActiveClock::Follow(follower),
+    }
+}
+
+/// Maps the sequencer's parameter names onto the DSP ones.
+#[must_use]
+pub fn dsp_param(param: VoiceParam) -> Param {
+    match param {
+        VoiceParam::Tune => Param::Tune,
+        VoiceParam::Decay => Param::Decay,
+        VoiceParam::Level => Param::Level,
+        VoiceParam::Snappy => Param::Snappy,
+        VoiceParam::Tone => Param::Tone,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sequencer::queue::event_queue;
+    use sequencer::{EventKind, Track};
+
+    fn control() -> (Control, sequencer::queue::Consumer) {
+        let (p, c) = event_queue(1_024);
+        (
+            Control::new(48_000.0, p, Arc::new(SharedTiming::default())),
+            c,
+        )
+    }
+
+    fn drain(c: &mut sequencer::queue::Consumer) -> Vec<Event> {
+        std::iter::from_fn(|| c.pop()).collect()
+    }
+
+    fn kicks() -> Pattern {
+        let mut p = Pattern::empty();
+        *p.track_mut(VoiceId::Kick) = Track::parse("x--- x--- x--- x---").unwrap();
+        p
+    }
+
+    #[test]
+    fn param_changes_are_diffed() {
+        let (mut ctl, mut c) = control();
+        let mut params = VoiceParams::default();
+        assert!(ctl.set_voice_params(VoiceId::Snare, &params, 0));
+        assert!(drain(&mut c).is_empty(), "defaults are not resent");
+        params.snappy = 0.9;
+        ctl.set_voice_params(VoiceId::Snare, &params, 0);
+        let events = drain(&mut c);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].kind,
+            EventKind::Param {
+                target: ParamTarget::Voice(VoiceId::Snare, VoiceParam::Snappy),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn following_joins_in_bar_phase() {
+        let (mut ctl, mut c) = control();
+        ctl.set_pattern(kicks());
+        ctl.set_clock_mode(ClockMode::Follow(Precision::Exact), 0);
+        // Source says: at sample 100 000 we are on beat 2 of the bar (2.0).
+        ctl.observe(
+            &Observation {
+                sample: 100_000.0,
+                phase: Phase::Bar(2.0),
+                bpm: Some(120.0),
+            },
+            100_000,
+        );
+        ctl.tick(100_000);
+        ctl.start(100_000);
+        ctl.tick(100_000);
+        let events = drain(&mut c);
+        assert!(!events.is_empty());
+        // First hit lands on the source's beat 2 (sample 100 000, a kick
+        // step since kicks are on every beat).
+        assert_eq!(events[0].sample, 100_000);
+        assert_eq!(ctl.scheduler().next_step() % 16, 9);
+    }
+
+    #[test]
+    fn internal_resync_flushes_and_restarts_the_bar() {
+        let (mut ctl, mut c) = control();
+        ctl.set_pattern(kicks());
+        ctl.start(0);
+        ctl.tick(0);
+        drain(&mut c);
+        ctl.resync(10_000);
+        ctl.tick(10_000);
+        let events = drain(&mut c);
+        assert!(matches!(events[0].kind, EventKind::Flush));
+        assert_eq!(events[0].sample, 10_000);
+        assert_eq!(events[1].sample, 10_000);
+    }
+
+    #[test]
+    fn host_time_maps_through_the_published_timing() {
+        let timing = Arc::new(SharedTiming::default());
+        let (p, _c) = event_queue(16);
+        let ctl = Control::new(48_000.0, p, Arc::clone(&timing));
+        assert_eq!(ctl.host_ns_to_sample(5), None);
+        timing.publish(48_000, 1_000_000_000);
+        // Off Apple platforms ticks are nanoseconds.
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let s = ctl.host_ns_to_sample(1_500_000_000).unwrap();
+            assert!((s - 72_000.0).abs() < 1e-6, "{s}");
+        }
+    }
+
+    #[test]
+    fn nudge_is_expressed_in_ms() {
+        let (mut ctl, _c) = control();
+        ctl.set_nudge_ms(10.0);
+        assert!((ctl.nudge_ms() - 10.0).abs() < 1e-9);
+        // 10 ms at 120 BPM = 0.02 beats.
+        assert!((ctl.clock_controls().nudge_beats - 0.02).abs() < 1e-12);
     }
 }

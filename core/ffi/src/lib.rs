@@ -1,35 +1,46 @@
-//! C ABI for the Swift shells.
+//! C ABI for the platform shells.
 //!
-//! The surface is deliberately tiny and grows only when a shell needs
+//! The surface is deliberately small and grows only when a shell needs
 //! something. It is consumed two ways with no changes:
 //!
-//! * as a static library by Swift (macOS, iOS);
+//! * as a static library by Swift (macOS, iOS), through the two-handle
+//!   split API in [`split`]: `P5Control` on a control thread, `P5Renderer`
+//!   inside the audio callback;
 //! * as a `cdylib` compiled to `wasm32-unknown-unknown` and instantiated
-//!   inside an AudioWorklet (`apps/web`). The module has no imports; the
+//!   inside an AudioWorklet (`apps/web`), through the single-handle
+//!   lockstep API below (`P5Engine`). The module has no imports; the
 //!   worklet writes JSON into memory obtained from [`p5_alloc`] and reads
 //!   rendered audio from a buffer it allocated the same way.
 //!
-//! The engine is driven single-threaded here (control and render halves in
-//! lockstep), which is exactly right for the single-threaded worklet. The
-//! mac shell will split the halves so the render half lives on the audio
-//! thread.
+//! Integer codes shared by both APIs:
+//!
+//! | code | clock mode (`p5_*_set_clock_mode`) | phase kind (`*_observe`) | MIDI message |
+//! |------|------------------------------------|--------------------------|--------------|
+//! | 0 | internal | bar position `0..4` | clock (0xF8) |
+//! | 1 | follow, exact (Link, CDJ-3000 precise) | beat position `0..1` | start (0xFA) |
+//! | 2 | follow, fine (beat packets, bridge) | tempo only | continue (0xFB) |
+//! | 3 | follow, coarse (Opus Quad) | — | stop (0xFC) |
+//! | 4 | follow, jittery (MIDI clock) | — | — |
 //!
 //! Header generation: `scripts/gen-header.sh` (requires `cargo install
 //! cbindgen`).
+
+pub mod split;
 
 use std::alloc::Layout;
 use std::ffi::{c_char, CStr};
 use std::ptr;
 
-use engine::{Engine, PatternSpec};
+use engine::{ClockMode, Engine, PatternSpec};
+use sync::{MidiMessage, Observation, Phase, Precision};
 
-/// Opaque engine handle.
+/// Opaque single-threaded engine handle (control and render in lockstep).
 pub struct P5Engine(Engine);
 
-/// ABI version. Bump on any breaking change to this file.
+/// ABI version. Bump on any breaking change to this crate's exports.
 #[no_mangle]
 pub extern "C" fn p5_abi_version() -> u32 {
-    2
+    3
 }
 
 /// Allocates `bytes` of memory (8-byte aligned) for the host to fill, e.g.
@@ -62,6 +73,57 @@ pub unsafe extern "C" fn p5_free(ptr: *mut u8, bytes: usize) {
     }
 }
 
+pub(crate) fn clock_mode_from(code: i32) -> Option<ClockMode> {
+    Some(match code {
+        0 => ClockMode::Internal,
+        1 => ClockMode::Follow(Precision::Exact),
+        2 => ClockMode::Follow(Precision::Fine),
+        3 => ClockMode::Follow(Precision::Coarse),
+        4 => ClockMode::Follow(Precision::Jittery),
+        _ => return None,
+    })
+}
+
+pub(crate) fn phase_from(kind: i32, value: f64) -> Option<Phase> {
+    if !value.is_finite() {
+        return None;
+    }
+    Some(match kind {
+        0 => Phase::Bar(value.rem_euclid(4.0)),
+        1 => Phase::Beat(value.rem_euclid(1.0)),
+        2 => Phase::TempoOnly,
+        _ => return None,
+    })
+}
+
+pub(crate) fn bpm_from(bpm: f64) -> Option<f64> {
+    (bpm.is_finite() && bpm > 0.0).then_some(bpm)
+}
+
+pub(crate) fn midi_from(code: i32) -> Option<MidiMessage> {
+    Some(match code {
+        0 => MidiMessage::Clock,
+        1 => MidiMessage::Start,
+        2 => MidiMessage::Continue,
+        3 => MidiMessage::Stop,
+        _ => return None,
+    })
+}
+
+/// Parses NUL-terminated JSON into a spec. Errors: 1 invalid, 2 null.
+///
+/// # Safety
+/// `json` must be null or a NUL-terminated string.
+pub(crate) unsafe fn spec_from(json: *const c_char) -> Result<PatternSpec, i32> {
+    if json.is_null() {
+        return Err(2);
+    }
+    // SAFETY: per the caller contract.
+    let text = unsafe { CStr::from_ptr(json) };
+    let text = text.to_str().map_err(|_| 1)?;
+    PatternSpec::from_json(text).map_err(|_| 1)
+}
+
 /// Creates an engine at `sample_rate` Hz. Returns null on invalid input.
 /// Free with [`p5_engine_free`].
 #[no_mangle]
@@ -87,7 +149,8 @@ pub unsafe extern "C" fn p5_engine_free(engine: *mut P5Engine) {
 }
 
 /// Loads a pattern file (the JSON format documented in `engine::spec`),
-/// applying tempo, pattern, voice controls and master settings. Returns 0 on
+/// applying tempo, pattern, every voice's controls and master settings.
+/// Only controls that changed are sent to the renderer. Returns 0 on
 /// success, 1 on invalid JSON, 2 on null arguments.
 ///
 /// # Safety
@@ -97,30 +160,22 @@ pub unsafe extern "C" fn p5_engine_load_pattern_json(
     engine: *mut P5Engine,
     json: *const c_char,
 ) -> i32 {
-    if engine.is_null() || json.is_null() {
+    // SAFETY: per the caller contract.
+    let Some(engine) = (unsafe { engine.as_mut() }) else {
         return 2;
+    };
+    // SAFETY: per the caller contract.
+    match unsafe { spec_from(json) } {
+        Ok(spec) => match engine.0.load_spec(&spec) {
+            Ok(()) => 0,
+            Err(_) => 1,
+        },
+        Err(code) => code,
     }
-    // SAFETY: both pointers are valid per the caller contract.
-    let (engine, json) = unsafe { (&mut (*engine).0, CStr::from_ptr(json)) };
-    let Ok(text) = json.to_str() else { return 1 };
-    let Ok(spec) = PatternSpec::from_json(text) else {
-        return 1;
-    };
-    let Ok(pattern) = spec.pattern() else {
-        return 1;
-    };
-    engine.set_tempo(spec.bpm);
-    engine.set_pattern(pattern);
-    let kick = spec.kick_params();
-    engine.set_kick_param(sequencer::VoiceParam::Tune, kick.tune);
-    engine.set_kick_param(sequencer::VoiceParam::Decay, kick.decay);
-    engine.set_kick_param(sequencer::VoiceParam::Level, kick.level);
-    engine.set_output_gain(spec.render.output_gain);
-    engine.set_limiter(spec.render.limiter);
-    0
 }
 
-/// Starts playback from step 0 at the current render position.
+/// Starts playback at the current render position (internal clock: from
+/// step 0; following: joins the source's bar phase at the next step).
 ///
 /// # Safety
 /// `engine` must be a live handle.
@@ -175,8 +230,142 @@ pub unsafe extern "C" fn p5_engine_playing_step(engine: *const P5Engine) -> i32 
         .map_or(-1, |s| s as i32)
 }
 
-/// Renders `frames` mono samples into `out`. Session-1 convenience: drives
-/// both halves in lockstep, so it must be called from a single thread.
+/// Tempo of the active clock in BPM.
+///
+/// # Safety
+/// `engine` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn p5_engine_tempo(engine: *const P5Engine) -> f64 {
+    unsafe { engine.as_ref() }.map_or(0.0, |e| e.0.tempo())
+}
+
+/// Continuous beat (nudge and latency applied) at the current position.
+/// `beat % 4` is the bar position.
+///
+/// # Safety
+/// `engine` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn p5_engine_beat(engine: *const P5Engine) -> f64 {
+    unsafe { engine.as_ref() }.map_or(0.0, |e| e.0.beat())
+}
+
+/// `1` if the active clock is tracking its source (always for internal).
+///
+/// # Safety
+/// `engine` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn p5_engine_clock_locked(engine: *const P5Engine) -> i32 {
+    unsafe { engine.as_ref() }.map_or(0, |e| i32::from(e.0.is_locked()))
+}
+
+/// Selects the clock (see the code table in the crate docs). Returns 0, or
+/// 1 for an unknown code.
+///
+/// # Safety
+/// `engine` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn p5_engine_set_clock_mode(engine: *mut P5Engine, mode: i32) -> i32 {
+    match (unsafe { engine.as_mut() }, clock_mode_from(mode)) {
+        (Some(e), Some(m)) => {
+            e.0.set_clock_mode(m);
+            0
+        }
+        _ => 1,
+    }
+}
+
+/// Feeds an external observation: at sample position `sample` (fractional,
+/// engine sample clock) the source was at `phase` (meaning per
+/// `phase_kind`), at `bpm` (`<= 0` = unknown). Returns 0, or 1 on bad input.
+///
+/// # Safety
+/// `engine` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn p5_engine_observe(
+    engine: *mut P5Engine,
+    sample: f64,
+    phase_kind: i32,
+    phase: f64,
+    bpm: f64,
+) -> i32 {
+    let (Some(e), Some(phase)) = (unsafe { engine.as_mut() }, phase_from(phase_kind, phase)) else {
+        return 1;
+    };
+    if !sample.is_finite() {
+        return 1;
+    }
+    e.0.observe(&Observation {
+        sample,
+        phase,
+        bpm: bpm_from(bpm),
+    });
+    0
+}
+
+/// Feeds a MIDI clock message (code table in the crate docs) received at
+/// `sample`. Returns 0, or 1 on bad input.
+///
+/// # Safety
+/// `engine` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn p5_engine_midi(engine: *mut P5Engine, message: i32, sample: f64) -> i32 {
+    match (unsafe { engine.as_mut() }, midi_from(message)) {
+        (Some(e), Some(m)) if sample.is_finite() => {
+            e.0.midi(m, sample);
+            0
+        }
+        _ => 1,
+    }
+}
+
+/// Registers a tap at `sample`.
+///
+/// # Safety
+/// `engine` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn p5_engine_tap(engine: *mut P5Engine, sample: f64) {
+    if let Some(e) = unsafe { engine.as_mut() } {
+        if sample.is_finite() {
+            e.0.tap(sample);
+        }
+    }
+}
+
+/// Quantized re-sync (see `engine::Control::resync`).
+///
+/// # Safety
+/// `engine` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn p5_engine_resync(engine: *mut P5Engine) {
+    if let Some(e) = unsafe { engine.as_mut() } {
+        e.0.resync();
+    }
+}
+
+/// Phase nudge in milliseconds (positive = later).
+///
+/// # Safety
+/// `engine` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn p5_engine_set_nudge_ms(engine: *mut P5Engine, ms: f64) {
+    if let Some(e) = unsafe { engine.as_mut() } {
+        e.0.set_nudge_ms(ms);
+    }
+}
+
+/// Output-path latency compensation in milliseconds (positive = earlier).
+///
+/// # Safety
+/// `engine` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn p5_engine_set_latency_ms(engine: *mut P5Engine, ms: f64) {
+    if let Some(e) = unsafe { engine.as_mut() } {
+        e.0.set_latency_ms(ms);
+    }
+}
+
+/// Renders `frames` mono samples into `out`, ticking the scheduler first.
+/// Single-threaded by design.
 ///
 /// # Safety
 /// `engine` must be a live handle; `out` must point to `frames` writable
@@ -248,6 +437,22 @@ mod tests {
             }
             // stop_after(16) has ended playback after one bar.
             assert_eq!(p5_engine_playing_step(engine), -1);
+            p5_engine_free(engine);
+        }
+    }
+
+    #[test]
+    fn follow_mode_takes_tempo_from_observations() {
+        let engine = p5_engine_new(48_000.0);
+        unsafe {
+            assert_eq!(p5_engine_set_clock_mode(engine, 9), 1);
+            assert_eq!(p5_engine_set_clock_mode(engine, 1), 0);
+            assert_eq!(p5_engine_observe(engine, 0.0, 0, 0.0, 128.0), 0);
+            assert_eq!(p5_engine_observe(engine, 0.0, 7, 0.0, 128.0), 1);
+            assert!((p5_engine_tempo(engine) - 128.0).abs() < 1e-9);
+            assert_eq!(p5_engine_clock_locked(engine), 1);
+            assert_eq!(p5_engine_midi(engine, 0, 10.0), 0);
+            assert_eq!(p5_engine_midi(engine, 5, 10.0), 1);
             p5_engine_free(engine);
         }
     }
