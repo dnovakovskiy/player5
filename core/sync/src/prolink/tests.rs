@@ -168,7 +168,10 @@ fn real_beats_parse_and_rebuild_byte_exact() {
     );
     assert!((b.track_bpm().unwrap() - 132.01).abs() < 1e-9);
     assert!((b.pitch_percent() + 3.05).abs() < 0.01);
-    assert!((b.effective_bpm().unwrap() - 127.99).abs() < 0.01);
+    // BPM × pitch / 0x6400000, the documented formula ("Pitch").
+    let expected = f64::from(0x3391_u32) * f64::from(0x000f_8312_u32) / f64::from(0x0640_0000_u32);
+    assert!((b.effective_bpm().unwrap() - expected).abs() < 1e-9);
+    assert!((b.effective_bpm().unwrap() - 127.98).abs() < 0.005);
     assert_eq!(build_beat_packet(&b), raw);
 
     let raw = fixture("beat-djm-2000nexus");
@@ -203,7 +206,7 @@ fn real_cdj_status() {
     assert!(s.playing() && s.master() && !s.synced() && !s.on_air());
     assert_eq!((s.play_state, s.flags), (3, 0xe4));
     assert_eq!(s.track_bpm(), Some(132.01));
-    assert!((s.effective_bpm().unwrap() - 127.99).abs() < 0.01);
+    assert!((s.effective_bpm().unwrap() - 127.98).abs() < 0.005);
     assert_eq!((s.beat_number(), s.beat_within_bar), (Some(2), 2));
     assert_eq!(s.master_handoff_to(), None);
 

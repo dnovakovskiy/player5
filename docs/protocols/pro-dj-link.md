@@ -231,6 +231,13 @@ Details we rely on:
 - We send keep-alives every 1.5 s with `p` = devices we see + 1 and byte
   `25` latched as "first on the network" when we started claiming.
 - A mixer's assignment is accepted, as a CDJ does.
+- Our own broadcasts come back to our port-50000 socket. An announcement
+  byte-identical to one we broadcast in the last 3 s is our echo, whatever
+  its source address; so is one carrying our name from our interface
+  address. Only content tells the echo apart reliably: on a computer that
+  reaches the booth network through two interfaces the echo can carry the
+  other interface's address, and taking it for a device holding our number
+  would make us give the number up to ourselves. When that happens we warn.
 
 ## Broadcast, unicast, and what works passively
 
@@ -287,8 +294,10 @@ the packet ... means that the player is starting a new beat" —
   apply none: the observation is stamped with the receive time. The global
   latency offset (`ClockControls`) absorbs whatever the booth adds. In the
   real capture (fixture `beat-cdj-2000nexus`, [CAP, S06](https://github.com/Deep-Symmetry/dysentery/tree/main/doc/assets/captures/S06-load-and-play))
-  consecutive beat packets from a player at 127.99 BPM effective arrive
-  469 ms apart, as expected (60 / 127.99 = 0.4688 s).
+  a player at 127.98 BPM effective (BPM `3391` × pitch `0f8312` /
+  `6400000`) sends its beat packets 468–472 ms apart while it plays
+  steadily, median 468.6 ms, as expected (60 / 127.98 = 0.4688 s); the
+  `nextBeat` field meanwhile says 454–455 ms, the interval at +0 % pitch.
 
 ## Pitch
 
@@ -413,8 +422,10 @@ on it; the builder copies the hardware.
 - `SourceEvent::Devices` whenever the device table changes.
 - `SourceEvent::Status` for: listening/joining progress, a mixer's
   assignment, giving up our number, no traffic for 5 s (and recovery),
-  joined but no status arriving, an Opus Quad on the network, and changes of
-  the followed device.
+  joined but no status arriving, an Opus Quad on the network, changes of
+  the followed device, our own announcements coming back from another
+  address, and beats arriving twice (both signs of two interfaces on the
+  booth network).
 - Follow target: `FollowTarget::Device(n)`, or `FollowTarget::Master` =
   the master from status, else the lowest-numbered playing player.
 
@@ -445,6 +456,16 @@ on it; the builder copies the hardware.
   default `listen_address`). Two interfaces on the same booth network
   deliver every broadcast twice; the reference implementation warns about
   this — [BL, `VirtualCdj.createVirtualCdj`](https://github.com/Deep-Symmetry/beat-link/blob/main/src/main/java/org/deepsymmetry/beatlink/VirtualCdj.java).
+  A doubled beat would reach the follower as two observations a moment
+  apart, so the source drops a beat packet that is byte-identical to the
+  previous one from the same device and address within 50 ms (real beats
+  are at least 150 ms apart even at 400 BPM, the follower's ceiling) and
+  warns once. Other doubled broadcasts (keep-alives, on-air flags, precise
+  position) only refresh state and are harmless.
+- **Receive order.** Each port has its own receive thread, which stamps a
+  packet the moment it arrives; packets queued together are handed to the
+  tracker in timestamp order, so observations leave in time order (a
+  follower ignores a report older than the newest it has used).
 - **Passive mode** cannot identify the tempo master (see above).
 - **Unanalysed tracks** produce no beat packets, so nothing to follow until
   the track is analysed (above).
