@@ -521,9 +521,16 @@ mod tests {
             seen.drain(&source);
             let obs = seen.last.unwrap();
             // Map the observation's host time onto the peer's Link clock
-            // with a plain back-to-back reading (not `sample_clocks`).
-            let link_now = peer.clock_micros();
-            let host_now = host_time::now_ns();
+            // with an independent reading (not `sample_clocks`), retried
+            // until it is not split by preemption.
+            let (link_now, host_now) = loop {
+                let before = host_time::now_ns();
+                let link = peer.clock_micros();
+                let after = host_time::now_ns();
+                if after - before < 50_000 {
+                    break (link, before + (after - before) / 2);
+                }
+            };
             let ago_us = (host_now - obs.host_ns) as f64 / 1e3;
             let link_t = link_now - ago_us.round() as i64;
             peer.capture_app_session_state(&mut state);
@@ -533,12 +540,18 @@ mod tests {
             assert!((obs.bpm - state.tempo()).abs() < 1e-3);
         }
 
+        // Other Link apps on this network may be in the session too, so
+        // look for the count to drop rather than for zero.
+        let before = peer.num_peers();
         source.stop();
         let deadline = Instant::now() + Duration::from_secs(3);
-        while peer.num_peers() > 0 && Instant::now() < deadline {
+        while peer.num_peers() >= before && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(peer.num_peers(), 0, "the source did not leave the session");
+        assert!(
+            peer.num_peers() < before,
+            "the source did not leave the session"
+        );
         peer.enable(false);
     }
 }

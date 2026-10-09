@@ -190,7 +190,9 @@ for a shell that plays to Link.
   ableton-link`): two instances in one process found each other in about
   0.5 s over the container's interface with multicast loopback. They then
   agreed on phase to within about 2·10⁻⁶ beats. When one left, the other's
-  peer count dropped to 0 within the test's 3 s window.
+  peer count dropped to 0 within the test's 3 s window. Three test
+  processes running at once, each a foreign peer to the others, also
+  passed.
 
 **What we do:** poll `numPeers()` every poll and send
 `SourceEvent::Status` ("Ableton Link: no peers" / "1 peer" / "N peers")
