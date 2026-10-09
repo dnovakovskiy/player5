@@ -4,11 +4,19 @@
 //! Pulses arrive individually jittery (driver and USB scheduling), so the
 //! tempo is a least-squares fit of pulse time against pulse index over a
 //! sliding window, which averages the jitter of every pulse in it instead
-//! of trusting any single interval. Phase comes from the pulse count since
-//! Start: beat 0 is the first pulse after Start, Continue keeps counting,
-//! Stop turns the reports tempo-only. Timestamps the fit cannot explain
-//! (a stalled driver delivering a burst) are left out of the fit; a gap
-//! longer than any accepted tempo restarts it.
+//! of trusting any single interval. The fit shares one slope (the period)
+//! but gives each run of pulses its own intercept, a run starting at every
+//! Start or Continue, because a source may restart its clock's phase
+//! there. While the tempo moves (the newest half of the window disagrees
+//! with the whole by more than the measured jitter explains) the period is
+//! extrapolated to the newest pulse, so a pitch-fader move is not reported
+//! a window late.
+//!
+//! Phase comes from the pulse count since Start: beat 0 is the first pulse
+//! after Start, Continue keeps counting, Stop turns the reports tempo-only.
+//! Timestamps the fit cannot explain (a stalled driver delivering a burst)
+//! are left out of the fit; a gap longer than any accepted tempo restarts
+//! it. Song Position Pointer is not handled (see the protocol note).
 
 use crate::follower::{FollowerClock, Observation, Phase};
 
@@ -17,9 +25,7 @@ pub const PPQN: u32 = 24;
 
 /// Pulses in the tempo fit: four beats. The slope error of a least-squares
 /// fit falls as `N^-1.5`: with ±1 ms of jitter it is about 0.035 BPM (1σ)
-/// at 120 BPM after two beats and 0.012 BPM once the window is full. A
-/// pitch-fader move shows up about half a window (two beats) late; the
-/// follower's phase loop absorbs that.
+/// at 120 BPM after two beats and 0.012 BPM once the window is full.
 const WINDOW: usize = 4 * PPQN as usize;
 
 /// How far (in standard deviations of the expected difference) the newest
