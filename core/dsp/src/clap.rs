@@ -862,5 +862,68 @@ mod tests {
                 db(peak(&out))
             );
         }
+        let mut clean = clap_with(SR, 0.5, 0.5, 1.0);
+        let reference = max_step(&full_hit(&mut clean, 1.0, 24_000));
+        for (at, first, second) in [
+            (240, 1.0, 1.0),
+            (1_150, 0.6, 1.0),
+            (2_900, 1.0, 0.7),
+            (6_000, 1.0, 1.0),
+            (1_700, 1.0, 0.1),
+        ] {
+            let mut clap = clap_with(SR, 0.5, 0.5, 1.0);
+            let mut out = full_hit(&mut clap, first, at);
+            out.extend(full_hit(&mut clap, second, 480));
+            let around = max_step(&out[at - 48..at + 48]);
+            let at_edge = (out[at] - out[at - 1]).abs();
+            println!("retrigger {at}: around {around:.4} edge {at_edge:.4} ref {reference:.4} local peak {:.4}", peak(&out[at - 48..at + 48]));
+        }
+        for sr in crate::SUPPORTED_SAMPLE_RATES {
+            for tone in [0.0, 1.0] {
+                let mut clap = clap_with(sr, tone, 1.0, 1.0);
+                let gap = (sr * 0.0625) as usize;
+                let mut out = Vec::new();
+                for _ in 0..32 {
+                    out.extend(full_hit(&mut clap, 1.0, gap));
+                }
+                println!("roll {sr} tone {tone}: {:.2} dBFS", db(peak(&out)));
+            }
+            for velocity in [0.7, 1.0] {
+                let mut clap = clap_with(sr, 0.5, 0.5, 1.0);
+                let out = full_hit(&mut clap, velocity, (sr * 0.04) as usize);
+                println!(
+                    "maxima {sr} v {velocity}: {:?}",
+                    distinct_maxima(&frame_rms(&out, sr))
+                );
+            }
+        }
+        let mut clap = clap_with(SR, 0.0, 1.0, 1.0);
+        let out = full_hit(&mut clap, 1.0, 9_600);
+        let n = out.len() as f64;
+        let mean = out.iter().map(|&s| f64::from(s)).sum::<f64>() / n;
+        let rms = (energy(&out) / n).sqrt();
+        let spec = spectrum(&out, SR);
+        let total: f64 = spec.iter().map(|&(_, p)| p).sum();
+        let low: f64 = spec
+            .iter()
+            .filter(|&&(f, _)| f <= 100.0)
+            .map(|&(_, p)| p)
+            .sum();
+        println!("dc {mean:.2e} rms {rms:.3e} low fraction {:.2e}", low / total);
+        let mut clap = clap_with(SR, 0.5, 1.0, 1.0);
+        let start = std::time::Instant::now();
+        let mut acc = 0.0f32;
+        for i in 0..480_000 {
+            if i % 6_000 == 0 {
+                clap.trigger(1.0);
+            }
+            acc += std::hint::black_box(clap.process()).abs();
+        }
+        println!("10 s in {:?} ({acc})", start.elapsed());
+        for tone in [0.0, 0.5, 1.0] {
+            let mut clap = clap_with(SR, tone, 0.5, 1.0);
+            let out = full_hit(&mut clap, 0.7, 4_800);
+            println!("tone {tone} centroid {:.0}", centroid_hz(&out, SR));
+        }
     }
 }
