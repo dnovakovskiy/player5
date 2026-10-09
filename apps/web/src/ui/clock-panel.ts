@@ -410,7 +410,9 @@ export class ClockPanel {
         break;
       }
     }
-    if (this.following && !running) text += " Press Play to start the engine; it joins the source in phase.";
+    if (this.following && !running) {
+      text += `${/[.!?]$/.test(text) ? " " : ". "}Press Play to start the engine; it joins the source in phase.`;
+    }
     if (this.el.status.textContent !== text) this.el.status.textContent = text;
     const shown = detail ? ` · ${detail}` : "";
     if (this.el.statusDetail.textContent !== shown) this.el.statusDetail.textContent = shown;

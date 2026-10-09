@@ -178,7 +178,9 @@ export class BridgeClient {
       this.ws = null;
       this.clearTimers();
       this.timeline = null;
-      this.setConnection("closed", e.reason || (e.code ? `code ${e.code}` : undefined));
+      // 1006 (no close frame: refused, unreachable, dropped) says nothing
+      // "offline" does not already say.
+      this.setConnection("closed", e.reason || (e.code && e.code !== 1006 ? `code ${e.code}` : undefined));
       if (!this.closedByUser) this.scheduleReconnect();
     };
   }

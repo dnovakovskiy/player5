@@ -128,6 +128,10 @@ test("bridge discovery: GET /bridge.json only once Bridge is chosen", async ({ p
   await expect(page.locator("#bridge-url")).toHaveValue("ws://127.0.0.1:4173/ws");
   expect(asked).toBe(1);
   await expect(page.locator("#source-status")).toContainText("127.0.0.1:4173/ws");
+  // Offline reads as one sentence, then the hint; no bare close code 1006
+  // (which only repeats "offline").
+  await expect(page.locator("#source-status")).toHaveText(/retrying\. Press Play to start/);
+  await expect(page.locator("#source-status")).not.toContainText("1006");
   expect(errors).toEqual([]);
 });
 
