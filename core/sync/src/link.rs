@@ -729,7 +729,16 @@ mod tests {
     /// independent peer pushes the session to 800 BPM; the source follows
     /// at half tempo with the bar phase every peer shares for an 8-beat
     /// quantum, says so, and returns to full tempo when the session does.
+    ///
+    /// Ignored by default: unlike the other tests, which only join, this
+    /// one commits tempo changes, and those reach every Link app in the
+    /// session on the LAN (and any other test process running at the same
+    /// time). Run it on an isolated machine with
+    /// `cargo test -p sync --features ableton-link -- --ignored`.
+    /// `follow_reports_a_fast_session_at_half_or_quarter_tempo` covers the
+    /// same arithmetic offline.
     #[test]
+    #[ignore = "commits a tempo change to every Link session on the LAN"]
     fn follows_a_fast_session_at_half_tempo() {
         let _guard = network_lock();
         let peer = AblLink::new(120.0);

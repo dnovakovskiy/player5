@@ -32,9 +32,10 @@ Facts (sources below):
 - **iOS.** The Link README sends iOS developers to LinkKit. The LinkKit
   README puts LinkKit under the Ableton Link SDK license and states that
   the GPL is not compatible with the iOS App Store. [6] [7]
-- **Web.** Browsers cannot join a Link session (no UDP). The web app
-  reaches Link only through the bridge (ADR-0007), so the bridge binary is
-  where Link would be linked for the web path.
+- **Web.** Link discovers peers over UDP multicast (protocol notes,
+  "Peers and discovery"), and browsers cannot open UDP sockets (ADR-0001,
+  ADR-0007). The web app reaches Link only through the bridge (ADR-0007),
+  so the bridge binary is where Link would be linked for the web path.
 
 ## Decision
 
@@ -103,8 +104,10 @@ Facts (sources below):
    `license = "GPL-2.0-or-later"`, edition 2024), README "License" and
    "Requirements" (https://docs.rs/crate/rusty_link/0.4.8/source/README.md),
    `build.rs` (https://docs.rs/crate/rusty_link/0.4.8/source/build.rs),
-   changelog (https://github.com/anzbert/rusty_link/blob/master/CHANGELOG.md).
-   Read from the published `.crate` on static.crates.io.
+   changelog (https://github.com/anzbert/rusty_link/blob/master/CHANGELOG.md#048
+   for 0.4.8 → Link 3.1.5; the 0.4.9 entry, Link 4.0.0b3, is only in the
+   0.4.9 crate: https://docs.rs/crate/rusty_link/0.4.9/source/CHANGELOG.md).
+   Read from the published `.crate` files on static.crates.io.
 4. Asio licence files in the bundled Link tree:
    https://docs.rs/crate/rusty_link/0.4.8/source/link/modules/asio-standalone/asio/LICENSE_1_0.txt
 5. GNU GPL v2 as shipped with Link,
