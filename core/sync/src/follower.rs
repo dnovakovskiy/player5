@@ -1573,6 +1573,26 @@ mod tests {
         }
     }
 
+
+    #[test]
+    #[ignore = "probe"]
+    fn probe_jittery_nudge() {
+        for (name, nudge) in [("nudge", true), ("ramp", false)] {
+            let mut sc = typical(Precision::Jittery);
+            if nudge {
+                sc.shift = Some((10.0, 0.024 * sc.bpm / 60.0));
+            } else {
+                sc.ramp = Some((10.0, 14.0, sc.bpm + 6.0));
+            }
+            for r in seeds(sc) {
+                let mut line = String::new();
+                for t0 in [9.0, 10.5, 11.0, 12.0, 14.0, 16.0, 18.0, 20.0, 25.0, 29.0] {
+                    line += &format!(" {t0}:{:.2}", r.max_abs_error_between(t0, t0 + 1.0));
+                }
+                println!("{name}{line} drift {:.6}", r.follower.drift);
+            }
+        }
+    }
     // ---- tuning report (not a test) -----------------------------------------
 
     #[test]

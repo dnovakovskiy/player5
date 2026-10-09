@@ -18,6 +18,9 @@ use sync::{MidiMessage, Observation, Phase, Precision};
 const SR: f64 = 48_000.0;
 /// Render block (the web worklet's quantum).
 const BLOCK: usize = 128;
+/// Render block of the split rig (a typical Core Audio buffer); its control
+/// thread still ticks every [`BLOCK`] samples.
+const SPLIT_BLOCK: usize = 512;
 
 /// Deterministic xorshift64 noise.
 struct Rng(u64);
@@ -69,6 +72,8 @@ struct Source {
     /// Press re-sync every this many seconds after the start (each one
     /// snaps on the next report: a stream of small snaps).
     resync_every: Option<f64>,
+    /// Run control and render as two threads would (see [`Rig::split`]).
+    split: bool,
     /// `(period_s, length_s)`: delivery stalls for `length_s` at the start
     /// of every `period_s`; what was due arrives in one burst.
     stall: Option<(f64, f64)>,
@@ -88,6 +93,7 @@ impl Source {
             seconds: 60.0,
             start_s: 1.0,
             resync_every: None,
+            split: false,
             stall: None,
             seed: 0x2545_F491_4F6C_DD1D,
         }
@@ -107,7 +113,16 @@ struct Rig {
     renderer: Renderer,
     tap: Consumer,
     to_renderer: Producer,
-    /// Triggers that were (or will be) heard: `(sample, voice)`.
+    /// Control and render on different threads (the mac shell through
+    /// `core/ffi`'s split API): the control half runs after the renderer
+    /// has pulled its events for the block, at the position the renderer
+    /// published for it, and what it queues reaches the renderer only at
+    /// the next block.
+    split: bool,
+    /// Triggers the renderer holds but has not played yet, mirroring its
+    /// pending list: a flush drops the ones at or after its sample.
+    pending: Vec<(u64, VoiceId)>,
+    /// Triggers that were heard: `(sample, voice)`, in render order.
     hits: Vec<(u64, VoiceId)>,
     flushes: Vec<u64>,
     peak: f32,
@@ -123,23 +138,31 @@ impl Rig {
             renderer: Renderer::new(SR as f32, consumer, timing),
             tap,
             to_renderer,
+            split: false,
+            pending: Vec::new(),
             hits: Vec::new(),
             flushes: Vec::new(),
             peak: 0.0,
         }
     }
 
+    /// The `now` the control half uses: the render position in lockstep,
+    /// the renderer's published block start when split.
     fn now(&self) -> u64 {
-        self.renderer.position()
+        if self.split {
+            self.control.render_timing().position
+        } else {
+            self.renderer.position()
+        }
     }
 
     fn forward(&mut self) {
         while let Some(e) = self.tap.pop() {
             match e.kind {
-                EventKind::Trigger { voice, .. } => self.hits.push((e.sample, voice)),
+                EventKind::Trigger { voice, .. } => self.pending.push((e.sample, voice)),
                 EventKind::Flush => {
                     self.flushes.push(e.sample);
-                    self.hits.retain(|h| h.0 < e.sample);
+                    self.pending.retain(|h| h.0 < e.sample);
                 }
                 EventKind::Param { .. } => {}
             }
@@ -147,14 +170,49 @@ impl Rig {
         }
     }
 
-    /// One `Engine::render`-style block.
-    fn block(&mut self) {
-        let now = self.now();
-        self.control.tick(now);
-        self.forward();
-        let mut out = [0.0f32; BLOCK];
+    /// Renders one block of `frames`: the renderer pulls everything
+    /// forwarded so far and plays what falls before the block's end (late
+    /// ones at once).
+    fn render(&mut self, frames: usize) {
+        let end = self.renderer.position() + frames as u64;
+        let (due, later): (Vec<_>, Vec<_>) = self.pending.iter().partition(|h| h.0 < end);
+        self.pending = later;
+        let mut due = due;
+        due.sort_by_key(|h| h.0);
+        self.hits.extend(due);
+        let mut out = vec![0.0f32; frames];
         self.renderer.process(&mut out);
         self.peak = out.iter().fold(self.peak, |p, s| p.max(s.abs()));
+    }
+
+    /// [`BLOCK`] samples of simulated time from `clock`. Lockstep
+    /// (`Engine::render`): `Control::tick` at the render position, then
+    /// render. Split: the audio thread renders a [`SPLIT_BLOCK`] when its
+    /// time comes, and the control thread ticks at the published position.
+    fn block(&mut self, clock: u64) {
+        if self.split {
+            if self.renderer.position() <= clock {
+                self.forward();
+                self.render(SPLIT_BLOCK);
+            }
+            let now = self.now();
+            self.control.tick(now);
+        } else {
+            let now = self.now();
+            self.control.tick(now);
+            self.forward();
+            self.render(BLOCK);
+        }
+    }
+
+    /// Everything still pending will be heard.
+    fn finish(&mut self) -> Vec<(u64, VoiceId)> {
+        self.forward();
+        let mut rest = std::mem::take(&mut self.pending);
+        rest.sort_by_key(|h| h.0);
+        let mut hits = std::mem::take(&mut self.hits);
+        hits.extend(rest);
+        hits
     }
 }
 
@@ -197,6 +255,7 @@ struct Outcome {
 fn run(src: Source) -> Outcome {
     let mut rng = Rng(src.seed);
     let mut rig = Rig::new();
+    rig.split = src.split;
     rig.control.set_pattern(pattern());
     rig.control
         .set_clock_mode(ClockMode::Follow(src.precision), 0);
@@ -220,8 +279,10 @@ fn run(src: Source) -> Outcome {
     let mut start = None;
     let mut next_resync: Option<f64> = None;
     let mut resyncs = 0usize;
-    while (rig.now() as f64) < src.seconds * SR {
-        let now = rig.now() as f64;
+    // Simulated time; the control half's `now` is `rig.now()`.
+    let mut clock = 0u64;
+    while (clock as f64) < src.seconds * SR {
+        let now = clock as f64;
         let t = now / SR;
         // Advance the source over this block (trapezoid; exact for ramps).
         let b0 = src.reported_bpm(t) * (1.0 + src.skew);
@@ -288,7 +349,8 @@ fn run(src: Source) -> Outcome {
                 next_resync = src.resync_every.map(|every| at + every);
             }
         }
-        rig.block();
+        rig.block(clock);
+        clock += BLOCK as u64;
     }
     // MIDI phase is relative to the song start, not the deck's beat count.
     if src.feed == Feed::Midi {
@@ -297,7 +359,7 @@ fn run(src: Source) -> Outcome {
         }
     }
     Outcome {
-        hits: rig.hits,
+        hits: rig.finish(),
         flushes: rig.flushes,
         truth: Truth { beats: truth },
         start: start.unwrap(),
@@ -589,5 +651,41 @@ fn a_backward_cue_realigns_once_without_doubling() {
         let worst = out.max_error_after(snap as f64 / SR + 0.1);
         assert!(worst < 4.0, "{by}: {worst:.3} ms");
         out.assert_bars_aligned_except((30.0 * SR) as u64, snap);
+    }
+}
+
+/// Control and render on two threads (the mac shell): a realign happens
+/// after the renderer already pulled (and is playing) the block at the
+/// published position, and the flush only reaches it a block later. The
+/// steps in that block were heard; a realign that treats them as unplayed
+/// plays them twice.
+#[test]
+fn split_threads_never_drop_or_double_a_step() {
+    for (feed, precision, bpm, jitter, jump) in [
+        (Feed::Beats, Precision::Fine, 124.0, 0.003, None),
+        (Feed::Position, Precision::Exact, 200.0, 0.000_2, None),
+        (Feed::Beats, Precision::Fine, 60.0, 0.003, None),
+        (Feed::Midi, Precision::Jittery, 128.0, 0.001, None),
+        (Feed::Beats, Precision::Fine, 124.0, 0.003, Some((20.0, -0.5))),
+        (Feed::Beats, Precision::Fine, 124.0, 0.003, Some((20.0, 1.5))),
+    ] {
+        let mut src = Source::new(feed, precision);
+        src.split = true;
+        src.bpm = bpm;
+        src.jitter_s = jitter;
+        src.jump = jump;
+        if jump.is_none() {
+            src.resync_every = Some(0.77);
+        }
+        src.seconds = 40.0;
+        let out = run(src);
+        out.assert_every_step_once(usize::from(jump.is_some_and(|j| j.1 > 0.0)));
+        out.assert_no_double_in_time();
+        if jump.is_some() {
+            // Re-sync presses may each leave a step up to the snap grace
+            // late; a single jump is long settled by now.
+            let worst = out.max_error_after(25.0);
+            assert!(worst < 4.0, "{precision:?} {bpm}: {worst:.3} ms");
+        }
     }
 }
