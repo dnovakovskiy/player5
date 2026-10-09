@@ -671,9 +671,12 @@ impl Control {
         self.last_now = now;
         self.note_render_position();
         if matches!(self.mode, ClockMode::Follow(_)) {
+            let before = self.follower.clone();
             self.follower.advance(now as f64);
             if self.follower.take_discontinuity() {
-                self.realign(now);
+                // Not expected (advance only slews), but if the follower
+                // ever jumps here it gets the same no-replay realign.
+                self.realign_after_snap(now, &before);
             }
         }
         let active = active_of(self.mode, &self.internal, &self.follower);
