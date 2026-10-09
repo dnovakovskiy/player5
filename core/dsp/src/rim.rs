@@ -679,6 +679,73 @@ mod tests {
         }
     }
 
+    /// True when a filter's state (seen through its response to silence) or
+    /// any of `values` is subnormal.
+    fn any_subnormal(filters: [&Svf; 2], values: &[f32]) -> bool {
+        filters.iter().any(|f| {
+            let o = (*f).clone().process(0.0);
+            [o.low, o.band, o.high].iter().any(|x| x.is_subnormal())
+        }) || values.iter().any(|x| x.is_subnormal())
+    }
+
+    #[test]
+    fn no_state_goes_subnormal_at_any_velocity_or_control() {
+        for sr in [44_100.0, 96_000.0] {
+            for bits in 0..8u32 {
+                let pick = |b: u32| if bits & (1 << b) != 0 { 1.0 } else { 0.0 };
+                for velocity in [1e-6, 1e-3, 0.1, 0.7, 1.0] {
+                    let mut rim = with_params(sr, pick(0), pick(1), pick(2), 1.0);
+                    rim.trigger(velocity);
+                    let mut n = 0;
+                    while rim.is_active() {
+                        let s = rim.process();
+                        let values = [
+                            s,
+                            rim.click_env,
+                            rim.low.re,
+                            rim.low.im,
+                            rim.high.re,
+                            rim.high.im,
+                            rim.level_now,
+                        ];
+                        assert!(
+                            !any_subnormal([&rim.click_bp, &rim.hp], &values),
+                            "{sr} Hz, controls {bits:03b}, velocity {velocity}, sample {n}"
+                        );
+                        n += 1;
+                        assert!(n < sr as usize, "still ringing after 1 s");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retriggers_at_any_offset_never_jump() {
+        // Sweep the retrigger point through the first 50 ms. Striking adds to
+        // the ring, so the sharpest edge after a retrigger is at most a fresh
+        // attack on top of the ring's own steepest slope (a hard restart
+        // would add the whole ring level as a jump).
+        let max_step = |s: &[f32]| s.windows(2).fold(0.0f32, |m, w| m.max((w[1] - w[0]).abs()));
+        for sr in crate::SUPPORTED_SAMPLE_RATES {
+            let mut fresh = Rim::new(sr);
+            let mut single = vec![0.0];
+            single.extend(hit(&mut fresh, 1.0, sr as usize / 10));
+            let fresh_step = max_step(&single);
+            for at in (1..(sr * 0.05) as usize).step_by(7) {
+                let mut rim = Rim::new(sr);
+                let first = hit(&mut rim, 1.0, at);
+                let mut joined = vec![first[at - 1]];
+                joined.extend(hit(&mut rim, 1.0, 400));
+                let step = max_step(&joined);
+                assert!(
+                    step <= 2.0 * fresh_step,
+                    "{sr} Hz, retrigger at {at}: {step} vs fresh {fresh_step}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn ten_seconds_render_quickly() {
         let mut rim = Rim::new(SR);

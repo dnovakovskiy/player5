@@ -717,6 +717,66 @@ mod tests {
     }
 
     #[test]
+    fn no_state_goes_subnormal_at_any_velocity_or_control() {
+        for sr in [44_100.0, 96_000.0] {
+            for bits in 0..8u32 {
+                let pick = |b: u32| if bits & (1 << b) != 0 { 1.0 } else { 0.0 };
+                for velocity in [1e-6, 1e-3, 0.1, 0.7, 1.0] {
+                    let mut cowbell = with_params(sr, pick(0), pick(1), pick(2), 1.0);
+                    cowbell.trigger(velocity);
+                    let mut n = 0;
+                    while cowbell.is_active() {
+                        let s = cowbell.process();
+                        let o = cowbell.filter.clone().process(0.0);
+                        let values = [
+                            s,
+                            cowbell.fast,
+                            cowbell.tail,
+                            cowbell.env,
+                            cowbell.level_now,
+                            o.low,
+                            o.band,
+                            o.high,
+                        ];
+                        assert!(
+                            values.iter().all(|x| !x.is_subnormal()),
+                            "{sr} Hz, controls {bits:03b}, velocity {velocity}, sample {n}"
+                        );
+                        n += 1;
+                        assert!(n < 2 * sr as usize, "still ringing after 2 s");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retriggers_at_any_offset_never_jump() {
+        // Sweep the retrigger point through the first 50 ms, including the
+        // 0.5 ms before a fresh hit's aligned edges: the oscillators and
+        // filter keep running and the envelope slews, so no retrigger is
+        // sharper than a fresh hit.
+        let max_step = |s: &[f32]| s.windows(2).fold(0.0f32, |m, w| m.max((w[1] - w[0]).abs()));
+        for sr in crate::SUPPORTED_SAMPLE_RATES {
+            let mut fresh = Cowbell::new(sr);
+            let mut single = vec![0.0];
+            single.extend(hit(&mut fresh, 1.0, sr as usize / 10));
+            let fresh_step = max_step(&single);
+            for at in (1..(sr * 0.05) as usize).step_by(7) {
+                let mut cowbell = Cowbell::new(sr);
+                let first = hit(&mut cowbell, 1.0, at);
+                let mut joined = vec![first[at - 1]];
+                joined.extend(hit(&mut cowbell, 1.0, 400));
+                let step = max_step(&joined);
+                assert!(
+                    step <= 1.1 * fresh_step,
+                    "{sr} Hz, retrigger at {at}: {step} vs fresh {fresh_step}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn ten_seconds_render_quickly() {
         let mut cowbell = Cowbell::new(SR);
         let start = std::time::Instant::now();
