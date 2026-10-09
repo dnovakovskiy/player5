@@ -13,6 +13,11 @@ use crate::timing::{SharedTiming, TimingSnapshot};
 /// Default lookahead: 100 ms at 48 kHz. See ADR-0001.
 pub const DEFAULT_LOOKAHEAD_SAMPLES: u64 = 4_800;
 
+/// After a following snap moves the timeline forward, a step that now
+/// falls at most this long before `now` is still played (late) rather than
+/// skipped, e.g. the downbeat right after a MIDI Start. ADR-0006.
+const SNAP_GRACE_S: f64 = 0.02;
+
 /// Which clock drives the sequencer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClockMode {
@@ -137,19 +142,25 @@ impl Control {
     }
 
     /// Switches clock mode at `now`, keeping the beat continuous so a
-    /// running pattern does not jump.
+    /// running pattern does not jump. Switching between two following
+    /// precisions keeps the follower (and its lock); entering follow mode
+    /// starts a fresh follower on the current beat, which snaps to the
+    /// source on its first observation like any first lock.
     pub fn set_clock_mode(&mut self, mode: ClockMode, now: u64) {
         if mode == self.mode {
             return;
         }
         let beat = self.active().beat_at_sample(now as f64);
         let bpm = self.active().tempo_bpm();
-        match mode {
-            ClockMode::Internal => {
+        match (self.mode, mode) {
+            (_, ClockMode::Internal) => {
                 self.internal.set_tempo(bpm, now as f64);
                 self.internal.align(now as f64, beat);
             }
-            ClockMode::Follow(precision) => {
+            (ClockMode::Follow(_), ClockMode::Follow(precision)) => {
+                self.follower.set_precision(precision);
+            }
+            (ClockMode::Internal, ClockMode::Follow(precision)) => {
                 self.follower = FollowerClock::new(f64::from(self.sample_rate), bpm, precision);
                 self.follower.reset(now as f64, beat);
                 let _ = self.follower.take_discontinuity();
@@ -278,15 +289,30 @@ impl Control {
     }
 
     /// Feeds an external observation (sample-domain). Ignored unless
-    /// following.
+    /// following. Small corrections leave the schedule alone (the follower
+    /// slews); a snap flushes and realigns immediately.
     pub fn observe(&mut self, observation: &Observation, now: u64) {
-        if matches!(self.mode, ClockMode::Follow(_)) {
-            self.follower.observe(observation, now as f64);
+        if !matches!(self.mode, ClockMode::Follow(_)) {
+            return;
+        }
+        // The timeline before the observation tells which queued steps
+        // have already played if it snaps.
+        let before = self.follower.clone();
+        self.follower.observe(observation, now as f64);
+        if self.follower.take_discontinuity() {
+            self.realign_after_snap(now, &before);
         }
     }
 
-    /// Feeds a MIDI clock message received at `sample`.
+    /// Feeds a MIDI clock message received at `sample`. While following,
+    /// Start and Continue request a re-sync: the source's song position
+    /// jumped, so the next pulse snaps instead of slewing.
     pub fn midi(&mut self, message: MidiMessage, sample: f64, now: u64) {
+        if matches!(message, MidiMessage::Start | MidiMessage::Continue)
+            && matches!(self.mode, ClockMode::Follow(_))
+        {
+            self.follower.request_resync();
+        }
         if let Some(obs) = self.midi.handle(message, sample) {
             self.observe(&obs, now);
         }
@@ -307,7 +333,7 @@ impl Control {
                 self.internal.align(sample, beat.round());
                 self.realign(now);
             }
-            ClockMode::Follow(_) => self.follower.observe(&obs, now as f64),
+            ClockMode::Follow(_) => self.observe(&obs, now),
         }
     }
 
@@ -333,6 +359,29 @@ impl Control {
         let active = self.active();
         let clock = AdjustedClock::new(&active, self.controls);
         let step = self.scheduler.first_step_at_or_after(&clock, now);
+        self.scheduler.start_at(step);
+    }
+
+    /// [`Control::realign`] after a follower snap, where both timelines are
+    /// known: steps the old timeline already played (stamped before `now`)
+    /// are never scheduled again, and a step the jump left just behind
+    /// `now` (within [`SNAP_GRACE_S`]) is played late instead of skipped.
+    fn realign_after_snap(&mut self, now: u64, before: &FollowerClock) {
+        if !self.scheduler.is_playing() {
+            return;
+        }
+        let _ = self.producer.push(Event::flush(now));
+        let old = AdjustedClock::new(before, self.controls);
+        let unplayed = self
+            .scheduler
+            .first_step_at_or_after(&old, now)
+            .min(self.scheduler.next_step());
+        let grace = (SNAP_GRACE_S * f64::from(self.sample_rate)).round() as u64;
+        let new = AdjustedClock::new(&self.follower, self.controls);
+        let step = self
+            .scheduler
+            .first_step_at_or_after(&new, now.saturating_sub(grace))
+            .max(unplayed);
         self.scheduler.start_at(step);
     }
 

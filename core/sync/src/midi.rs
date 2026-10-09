@@ -1,15 +1,37 @@
 //! MIDI clock input (24 pulses per quarter note), from CoreMIDI on Apple
-//! platforms or Web MIDI in Chromium. Tempo only, individually jittery:
-//! the follower smooths pulse intervals; phase comes from Start/Continue
-//! and the pulse count. See `docs/protocols/midi-clock.md`.
+//! platforms or Web MIDI in Chromium. See `docs/protocols/midi-clock.md`.
 //!
-//! PLACEHOLDER IMPLEMENTATION: averages the last 24 pulse intervals. The
-//! public API is fixed.
+//! Pulses arrive individually jittery (driver and USB scheduling), so the
+//! tempo is a least-squares fit of pulse time against pulse index over a
+//! sliding window, which averages the jitter of every pulse in it instead
+//! of trusting any single interval. Phase comes from the pulse count since
+//! Start: beat 0 is the first pulse after Start, Continue keeps counting,
+//! Stop turns the reports tempo-only. Timestamps the fit cannot explain
+//! (a stalled driver delivering a burst) are left out of the fit; a gap
+//! longer than any accepted tempo restarts it.
 
-use crate::follower::{Observation, Phase};
+use crate::follower::{FollowerClock, Observation, Phase};
 
 /// Pulses per quarter note.
 pub const PPQN: u32 = 24;
+
+/// Pulses in the tempo fit: four beats. The slope error of a least-squares
+/// fit falls as `N^-1.5`: with ±1 ms of jitter it is about 0.035 BPM (1σ)
+/// at 120 BPM after two beats and 0.012 BPM once the window is full. A
+/// pitch-fader move shows up about half a window (two beats) late; the
+/// follower's phase loop absorbs that.
+const WINDOW: usize = 4 * PPQN as usize;
+
+/// Pulses needed before the first tempo report.
+const MIN_FIT: usize = 6;
+
+/// A pulse further than this fraction of a pulse period from where the fit
+/// expects it is not used for tempo.
+const OUTLIER_FRACTION: f64 = 0.5;
+
+/// Consecutive rejected pulses after which the fit restarts (the tempo
+/// really changed abruptly).
+const MAX_REJECTED: u32 = 4;
 
 /// The MIDI System Real-Time messages that matter for clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,11 +65,16 @@ impl MidiMessage {
 pub struct MidiClockFollower {
     sample_rate: f64,
     running: bool,
+    /// Pulses since Start (song position, for phase).
     pulses: u64,
+    /// Pulses ever received (x axis of the tempo fit; never reset).
+    index: u64,
     last_pulse: Option<f64>,
-    intervals: [f64; PPQN as usize],
-    filled: usize,
-    next: usize,
+    /// Ring of `(index, sample)` pairs used for the tempo fit.
+    fit: [(u64, f64); WINDOW],
+    len: usize,
+    head: usize,
+    rejected: u32,
 }
 
 impl MidiClockFollower {
@@ -58,10 +85,12 @@ impl MidiClockFollower {
             sample_rate,
             running: false,
             pulses: 0,
+            index: 0,
             last_pulse: None,
-            intervals: [0.0; PPQN as usize],
-            filled: 0,
-            next: 0,
+            fit: [(0, 0.0); WINDOW],
+            len: 0,
+            head: 0,
+            rejected: 0,
         }
     }
 
@@ -71,55 +100,147 @@ impl MidiClockFollower {
         self.running
     }
 
+    /// Current tempo estimate, once enough pulses arrived.
+    #[must_use]
+    pub fn tempo_bpm(&self) -> Option<f64> {
+        let period = self.period()?;
+        let bpm = 60.0 * self.sample_rate / (period * f64::from(PPQN));
+        (FollowerClock::MIN_BPM..=FollowerClock::MAX_BPM)
+            .contains(&bpm)
+            .then_some(bpm)
+    }
+
     /// Handles one message received at `sample` (consumer's sample clock).
-    /// Returns an observation when there is something to report.
+    /// Returns an observation when there is something to report: one per
+    /// Timing Clock once the tempo is known, with the bar phase while
+    /// running and tempo only while stopped.
     pub fn handle(&mut self, message: MidiMessage, sample: f64) -> Option<Observation> {
         match message {
             MidiMessage::Start => {
                 self.running = true;
                 self.pulses = 0;
-                self.last_pulse = None;
                 None
             }
             MidiMessage::Continue => {
                 self.running = true;
-                self.last_pulse = None;
                 None
             }
             MidiMessage::Stop => {
                 self.running = false;
                 None
             }
-            MidiMessage::Clock => {
-                if let Some(prev) = self.last_pulse {
-                    let interval = sample - prev;
-                    if interval > 0.0 {
-                        self.intervals[self.next] = interval;
-                        self.next = (self.next + 1) % self.intervals.len();
-                        self.filled = (self.filled + 1).min(self.intervals.len());
-                    }
-                }
-                self.last_pulse = Some(sample);
-                let pulse = self.pulses;
-                self.pulses += 1;
-                if self.filled == 0 {
-                    return None;
-                }
-                let mean = self.intervals[..self.filled].iter().sum::<f64>() / self.filled as f64;
-                let bpm = 60.0 * self.sample_rate / (mean * f64::from(PPQN));
-                let phase = if self.running {
-                    let beat = pulse as f64 / f64::from(PPQN);
-                    Phase::Bar(beat.rem_euclid(4.0))
-                } else {
-                    Phase::TempoOnly
-                };
-                Some(Observation {
-                    sample,
-                    phase,
-                    bpm: Some(bpm),
-                })
+            MidiMessage::Clock => self.clock(sample),
+        }
+    }
+
+    fn clock(&mut self, sample: f64) -> Option<Observation> {
+        if !sample.is_finite() {
+            return None;
+        }
+        // The pulse counts for phase whatever its timestamp looks like.
+        let pulse = self.pulses;
+        if self.running {
+            self.pulses += 1;
+        }
+        let index = self.index;
+        self.index += 1;
+
+        let usable = self.accept_timing(index, sample);
+        self.last_pulse = Some(sample);
+        if !usable {
+            return None;
+        }
+        let bpm = self.tempo_bpm()?;
+        let phase = if self.running {
+            Phase::Bar((pulse as f64 / f64::from(PPQN)).rem_euclid(4.0))
+        } else {
+            Phase::TempoOnly
+        };
+        Some(Observation {
+            sample,
+            phase,
+            bpm: Some(bpm),
+        })
+    }
+
+    /// Decides whether this pulse's timestamp is trustworthy and, if so,
+    /// adds it to the fit.
+    fn accept_timing(&mut self, index: u64, sample: f64) -> bool {
+        // Slower than the slowest accepted tempo: the clock paused.
+        let max_gap = 60.0 * self.sample_rate / (FollowerClock::MIN_BPM * f64::from(PPQN));
+        if let Some(prev) = self.last_pulse {
+            if sample - prev > max_gap {
+                self.clear_fit();
+            } else if sample <= prev {
+                // Out-of-order or duplicate timestamp: no timing information.
+                return false;
             }
         }
+        if self.len >= MIN_FIT {
+            if let (Some(period), Some(predicted)) = (self.period(), self.predict(index)) {
+                if (sample - predicted).abs() > OUTLIER_FRACTION * period {
+                    self.rejected += 1;
+                    if self.rejected < MAX_REJECTED {
+                        return false;
+                    }
+                    // Persistently off: the tempo jumped. Start a new fit.
+                    self.clear_fit();
+                }
+            }
+        }
+        self.rejected = 0;
+        self.fit[self.head] = (index, sample);
+        self.head = (self.head + 1) % WINDOW;
+        self.len = (self.len + 1).min(WINDOW);
+        true
+    }
+
+    fn clear_fit(&mut self) {
+        self.len = 0;
+        self.rejected = 0;
+    }
+
+    fn points(&self) -> impl Iterator<Item = (u64, f64)> + '_ {
+        let start = (self.head + WINDOW - self.len) % WINDOW;
+        (0..self.len).map(move |i| self.fit[(start + i) % WINDOW])
+    }
+
+    /// Least-squares line `sample = a + b * index` over the window, centred
+    /// on the newest point for precision: `(newest index, a, b)`.
+    fn line(&self) -> Option<(u64, f64, f64)> {
+        if self.len < MIN_FIT {
+            return None;
+        }
+        let (i0, s0) = self.fit[(self.head + WINDOW - 1) % WINDOW];
+        let n = self.len as f64;
+        let (mut sx, mut sy) = (0.0, 0.0);
+        for (i, s) in self.points() {
+            sx += i as f64 - i0 as f64;
+            sy += s - s0;
+        }
+        let (mx, my) = (sx / n, sy / n);
+        let (mut sxx, mut sxy) = (0.0, 0.0);
+        for (i, s) in self.points() {
+            let dx = i as f64 - i0 as f64 - mx;
+            sxx += dx * dx;
+            sxy += dx * (s - s0 - my);
+        }
+        if sxx <= 0.0 {
+            return None;
+        }
+        let b = sxy / sxx;
+        let a = s0 + my - b * mx;
+        Some((i0, a, b))
+    }
+
+    /// Fitted samples per pulse.
+    fn period(&self) -> Option<f64> {
+        self.line().map(|(_, _, b)| b).filter(|b| *b > 0.0)
+    }
+
+    fn predict(&self, index: u64) -> Option<f64> {
+        self.line()
+            .map(|(i0, a, b)| a + b * (index as f64 - i0 as f64))
     }
 }
 
@@ -127,10 +248,29 @@ impl MidiClockFollower {
 mod tests {
     use super::*;
 
+    const SR: f64 = 48_000.0;
+
+    /// Deterministic xorshift64 noise, uniform in `[-a, a)`.
+    struct Rng(u64);
+
+    impl Rng {
+        fn sym(&mut self, a: f64) -> f64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            ((x >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0) * a
+        }
+    }
+
+    fn pulse_samples(bpm: f64) -> f64 {
+        60.0 * SR / (bpm * f64::from(PPQN))
+    }
+
     #[test]
     fn steady_clock_reports_tempo() {
-        let sr = 48_000.0;
-        let mut m = MidiClockFollower::new(sr);
+        let mut m = MidiClockFollower::new(SR);
         // 120 BPM: 24 pulses per 24 000 samples = 1 000 samples per pulse.
         m.handle(MidiMessage::Start, 0.0);
         let mut last = None;
@@ -145,6 +285,158 @@ mod tests {
     #[test]
     fn status_bytes() {
         assert_eq!(MidiMessage::from_status(0xF8), Some(MidiMessage::Clock));
+        assert_eq!(MidiMessage::from_status(0xFA), Some(MidiMessage::Start));
+        assert_eq!(MidiMessage::from_status(0xFB), Some(MidiMessage::Continue));
+        assert_eq!(MidiMessage::from_status(0xFC), Some(MidiMessage::Stop));
         assert_eq!(MidiMessage::from_status(0x90), None);
+    }
+
+    /// ±1 ms of jitter at 24 ppqn: within ±0.1 BPM after two beats (all but
+    /// a handful of 3σ reports), and every report within it after four.
+    #[test]
+    fn jittery_clock_gives_tempo_within_a_tenth_after_two_beats() {
+        for bpm in [86.5, 120.0, 124.0, 128.0, 140.0] {
+            let (mut reports, mut outside) = (0u32, 0u32);
+            let mut worst_after_four: f64 = 0.0;
+            for seed in 1..=20u64 {
+                let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+                let mut m = MidiClockFollower::new(SR);
+                m.handle(MidiMessage::Start, 0.0);
+                let period = pulse_samples(bpm);
+                for k in 0..(24 * 16) {
+                    let t = 1_000.0 + k as f64 * period + rng.sym(0.001) * SR;
+                    let obs = m.handle(MidiMessage::Clock, t);
+                    if k >= 2 * 24 {
+                        let got = obs.and_then(|o| o.bpm).expect("tempo after two beats");
+                        let err = (got - bpm).abs();
+                        reports += 1;
+                        if err >= 0.1 {
+                            outside += 1;
+                        }
+                        if k >= 4 * 24 {
+                            worst_after_four = worst_after_four.max(err);
+                        }
+                    }
+                }
+            }
+            assert!(
+                f64::from(outside) < 0.01 * f64::from(reports),
+                "{bpm} BPM: {outside} of {reports} reports off by 0.1 BPM or more"
+            );
+            assert!(
+                worst_after_four < 0.1,
+                "{bpm} BPM: {worst_after_four:.4} BPM after four beats"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "report; run with --ignored --nocapture"]
+    fn tempo_error_report() {
+        for bpm in [90.0, 120.0, 128.0, 140.0, 174.0] {
+            let mut worst2: f64 = 0.0;
+            let mut worst4: f64 = 0.0;
+            for seed in 1..=50u64 {
+                let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+                let mut m = MidiClockFollower::new(SR);
+                m.handle(MidiMessage::Start, 0.0);
+                let period = pulse_samples(bpm);
+                for k in 0..(24 * 8) {
+                    let t = 1_000.0 + k as f64 * period + rng.sym(0.001) * SR;
+                    let obs = m.handle(MidiMessage::Clock, t);
+                    let err = obs.and_then(|o| o.bpm).map_or(0.0, |b| (b - bpm).abs());
+                    if k >= 48 {
+                        worst2 = worst2.max(err);
+                    }
+                    if k >= 96 {
+                        worst4 = worst4.max(err);
+                    }
+                }
+            }
+            println!("{bpm}: worst after 2 beats {worst2:.4}, after 4 beats {worst4:.4}");
+        }
+    }
+
+    #[test]
+    fn start_resets_the_pulse_count_and_continue_keeps_it() {
+        let mut m = MidiClockFollower::new(SR);
+        // Clock runs while stopped: tempo-only reports.
+        let mut t = 0.0;
+        let mut last = None;
+        for _ in 0..30 {
+            last = m.handle(MidiMessage::Clock, t);
+            t += 1_000.0;
+        }
+        assert_eq!(last.unwrap().phase, Phase::TempoOnly);
+        assert!(!m.is_running());
+        // Start: the next pulse is beat 0.
+        m.handle(MidiMessage::Start, t - 500.0);
+        let first = m.handle(MidiMessage::Clock, t).unwrap();
+        assert_eq!(first.phase, Phase::Bar(0.0));
+        for _ in 0..35 {
+            t += 1_000.0;
+            last = m.handle(MidiMessage::Clock, t);
+        }
+        assert_eq!(last.unwrap().phase, Phase::Bar(35.0 / 24.0));
+        // Stop: tempo-only, count frozen.
+        m.handle(MidiMessage::Stop, t + 10.0);
+        t += 1_000.0;
+        assert_eq!(
+            m.handle(MidiMessage::Clock, t).unwrap().phase,
+            Phase::TempoOnly
+        );
+        // Continue: counting resumes where it stopped.
+        m.handle(MidiMessage::Continue, t + 10.0);
+        t += 1_000.0;
+        assert_eq!(
+            m.handle(MidiMessage::Clock, t).unwrap().phase,
+            Phase::Bar(36.0 / 24.0)
+        );
+    }
+
+    #[test]
+    fn absurd_intervals_are_rejected() {
+        let mut m = MidiClockFollower::new(SR);
+        m.handle(MidiMessage::Start, 0.0);
+        let mut t = 0.0;
+        for _ in 0..48 {
+            m.handle(MidiMessage::Clock, t);
+            t += 1_000.0;
+        }
+        // A burst: one pulse stamped 600 samples late, the next on time.
+        assert!(m.handle(MidiMessage::Clock, t + 600.0).is_none());
+        t += 1_000.0;
+        let obs = m.handle(MidiMessage::Clock, t).unwrap();
+        assert!((obs.bpm.unwrap() - 120.0).abs() < 1e-6);
+        // Both pulses still counted for phase.
+        assert_eq!(obs.phase, Phase::Bar(49.0 / 24.0));
+        // A duplicate timestamp carries no timing.
+        assert!(m.handle(MidiMessage::Clock, t).is_none());
+        // A long gap (the clock paused) restarts the fit instead of
+        // averaging the pause in.
+        t += 10.0 * SR;
+        assert!(m.handle(MidiMessage::Clock, t).is_none());
+        for _ in 0..(MIN_FIT - 1) {
+            t += 500.0;
+            m.handle(MidiMessage::Clock, t);
+        }
+        assert!((m.tempo_bpm().unwrap() - 240.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn follows_a_tempo_jump() {
+        let mut m = MidiClockFollower::new(SR);
+        m.handle(MidiMessage::Start, 0.0);
+        let mut t = 0.0;
+        for _ in 0..96 {
+            m.handle(MidiMessage::Clock, t);
+            t += pulse_samples(120.0);
+        }
+        // An abrupt switch to 140 BPM.
+        for _ in 0..96 {
+            m.handle(MidiMessage::Clock, t);
+            t += pulse_samples(140.0);
+        }
+        assert!((m.tempo_bpm().unwrap() - 140.0).abs() < 1e-6);
     }
 }

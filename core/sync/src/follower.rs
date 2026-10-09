@@ -124,7 +124,7 @@ impl Precision {
             Self::Fine => Tuning {
                 acquire_obs: 1,
                 phase_tau: 0.75,
-                drift_gain: 0.3,
+                drift_gain: 0.1,
                 max_drift: 0.01,
                 slew_tau: 0.5,
                 max_slew: 0.04,
@@ -219,6 +219,7 @@ pub struct FollowerClock {
     last_observation: Option<f64>,
     last_phase_observation: Option<f64>,
     mean_spacing: Option<f64>,
+    last_phase_value: f64,
     phase_error: f64,
 }
 
@@ -261,6 +262,7 @@ impl FollowerClock {
             last_observation: None,
             last_phase_observation: None,
             mean_spacing: None,
+            last_phase_value: 0.0,
             phase_error: 0.0,
         }
     }
@@ -353,15 +355,19 @@ impl FollowerClock {
                 return;
             }
         }
-        let bpm = obs
-            .bpm
-            .filter(|b| b.is_finite() && *b > 0.0)
-            .map(|b| b.clamp(Self::MIN_BPM, Self::MAX_BPM));
         let target = match obs.phase {
             Phase::Bar(p) if p.is_finite() => Some((p, 4.0)),
             Phase::Beat(p) if p.is_finite() => Some((p, 1.0)),
             Phase::Bar(_) | Phase::Beat(_) | Phase::TempoOnly => None,
         };
+        let bpm = obs
+            .bpm
+            .filter(|b| b.is_finite() && *b > 0.0)
+            .map(|b| b.clamp(Self::MIN_BPM, Self::MAX_BPM))
+            .or_else(|| target.and_then(|(p, m)| self.tempo_from_phase(s, p, m)));
+        if let Some((p, _)) = target {
+            self.last_phase_value = p;
+        }
 
         // Carry the estimate forward to `s`. The tempo report describes the
         // tempo at `s`; across a change, average old and new (exact for a
@@ -419,6 +425,27 @@ impl FollowerClock {
         self.lock = Lock::Acquire;
         self.acquired = 0;
         self.discontinuity = true;
+    }
+
+    /// For a phase report without a tempo: the tempo implied by the phase
+    /// advance since the previous phase report, blended into the current
+    /// estimate (a source that never reports tempo can still be followed;
+    /// one that does is better).
+    fn tempo_from_phase(&self, s: f64, phase: f64, modulus: f64) -> Option<f64> {
+        let last = self.last_phase_observation?;
+        let samples = s - last;
+        if samples <= 0.0 || self.lock != Lock::Track {
+            return None;
+        }
+        // Unwrap the phase advance around what the current tempo predicts.
+        let expected = samples * self.est_rate();
+        let beats = expected + wrap(phase - self.last_phase_value - expected, modulus);
+        let measured = beats / samples * 60.0 * self.sample_rate / (1.0 + self.drift);
+        if !(Self::MIN_BPM..=Self::MAX_BPM).contains(&measured) {
+            return None;
+        }
+        let weight = expected / (expected + 4.0 * self.tuning.phase_tau);
+        Some(self.bpm + (measured - self.bpm) * weight)
     }
 
     /// Estimated source tempo in beats per sample.
@@ -633,10 +660,14 @@ impl ClockSource for FollowerClock {
         self.sample_rate
     }
 
-    /// The estimated source tempo (feed-forward report plus learned drift);
-    /// a slew in progress is not included.
+    /// The source's tempo as it reports it (or as estimated from its phase
+    /// when it reports none): what a tempo display should show. The
+    /// timeline itself runs at this times `1 + drift`, the learned
+    /// correction for clock skew between the source and our sample clock,
+    /// plus any slew in progress; [`ClockSource::samples_per_beat`] gives
+    /// the timeline's actual long-run rate.
     fn tempo_bpm(&self) -> f64 {
-        self.rate * 60.0 * self.sample_rate
+        self.bpm
     }
 
     fn beat_at_sample(&self, sample: f64) -> f64 {
@@ -845,7 +876,7 @@ mod tests {
                 snaps.push(now / SR);
             }
             let ours = f.beat_at_sample(now);
-            if std::env::var_os("P5_TRACE").is_some() && (now as u64) % 24_064 == 0 {
+            if std::env::var_os("P5_TRACE").is_some() && (now as u64) % 6_144 == 0 && now / SR > 9.5 && now / SR < 16.0 {
                 println!(
                     "{:.2}s est {:+.2} ms out {:+.2} ms drift {:+.6} n {}",
                     now / SR,
@@ -955,8 +986,17 @@ mod tests {
 
     #[test]
     #[ignore = "trace; run with P5_TRACE=1 --ignored --nocapture"]
-    fn trace_coarse() {
-        let sc = typical(Precision::Coarse);
+    fn trace() {
+        let p = match std::env::var("P5_TRACE").as_deref() {
+            Ok("exact") => Precision::Exact,
+            Ok("fine") => Precision::Fine,
+            Ok("jittery") => Precision::Jittery,
+            _ => Precision::Coarse,
+        };
+        let mut sc = typical(p);
+        if std::env::var_os("P5_NUDGE").is_some() {
+            sc.shift = Some((10.0, 0.6 * p.tuning().jump_s * sc.bpm / 60.0));
+        }
         let r = run(&sc);
         println!("snaps {:?}", r.snaps);
     }
