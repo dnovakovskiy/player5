@@ -1,0 +1,10 @@
+{
+  "bpm": 122,
+  "accent": 0.8,
+  "flam": 0.3,
+  "voices": {
+    "rim": { "steps": "--x- x--X --x- xF--", "tune": 0.55, "tone": 0.65 },
+    "cowbell": { "steps": "X--x --x- X-x- --F-", "tune": 0.45, "decay": 0.3, "tone": 0.6 }
+  },
+  "render": { "bars": 2, "sample_rate": 48000, "tail_seconds": 0.6 }
+}
