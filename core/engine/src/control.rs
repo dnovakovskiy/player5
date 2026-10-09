@@ -13,6 +13,69 @@ use crate::timing::{SharedTiming, TimingSnapshot};
 /// Default lookahead: 100 ms at 48 kHz. See ADR-0001.
 pub const DEFAULT_LOOKAHEAD_SAMPLES: u64 = 4_800;
 
+/// After a following snap moves the timeline forward, a step that now
+/// falls at most this long before `now` is still played (late) rather than
+/// skipped, e.g. the downbeat right after a MIDI Start. ADR-0006.
+const SNAP_GRACE_S: f64 = 0.02;
+
+/// Steps remembered with the sample each was queued at. A 100 ms lookahead
+/// holds at most three steps even at the top tempo; the rest is margin for
+/// longer lookaheads.
+const QUEUED_MEMORY: usize = 32;
+
+/// One scheduled step and the sample it was queued at.
+#[derive(Clone, Copy, Debug, Default)]
+struct Queued {
+    step: u64,
+    sample: u64,
+}
+
+/// The most recently scheduled steps in a fixed ring, oldest first, with
+/// the samples they were actually queued at. A following timeline is
+/// re-planned at every report, so after a snap only this record (not the
+/// timeline) can tell which queued steps were already heard.
+#[derive(Clone, Debug)]
+struct QueuedLog {
+    entries: [Queued; QUEUED_MEMORY],
+    /// Next slot to write.
+    head: usize,
+    len: usize,
+}
+
+impl QueuedLog {
+    const fn new() -> Self {
+        Self {
+            entries: [Queued { step: 0, sample: 0 }; QUEUED_MEMORY],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    fn push(&mut self, queued: Queued) {
+        self.entries[self.head] = queued;
+        self.head = (self.head + 1) % QUEUED_MEMORY;
+        self.len = (self.len + 1).min(QUEUED_MEMORY);
+    }
+
+    /// The `i`-th newest entry (`0` = newest); `i < len`.
+    fn newest(&self, i: usize) -> Queued {
+        self.entries[(self.head + 2 * QUEUED_MEMORY - 1 - i) % QUEUED_MEMORY]
+    }
+
+    /// Forgets the steps queued at or after `sample` (a flush dropped
+    /// them). Queued samples only grow, so they are the newest entries.
+    fn flush_from(&mut self, sample: u64) {
+        while self.len > 0 && self.newest(0).sample >= sample {
+            self.head = (self.head + QUEUED_MEMORY - 1) % QUEUED_MEMORY;
+            self.len -= 1;
+        }
+    }
+}
+
 /// Which clock drives the sequencer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClockMode {
@@ -78,6 +141,7 @@ pub struct Control {
     sent_gain: f32,
     sent_limiter: bool,
     last_now: u64,
+    queued: QueuedLog,
 }
 
 impl Control {
@@ -105,6 +169,7 @@ impl Control {
             sent_gain: 1.0,
             sent_limiter: false,
             last_now: 0,
+            queued: QueuedLog::new(),
         }
     }
 
@@ -137,19 +202,25 @@ impl Control {
     }
 
     /// Switches clock mode at `now`, keeping the beat continuous so a
-    /// running pattern does not jump.
+    /// running pattern does not jump. Switching between two following
+    /// precisions keeps the follower (and its lock); entering follow mode
+    /// starts a fresh follower on the current beat, which snaps to the
+    /// source on its first observation like any first lock.
     pub fn set_clock_mode(&mut self, mode: ClockMode, now: u64) {
         if mode == self.mode {
             return;
         }
         let beat = self.active().beat_at_sample(now as f64);
         let bpm = self.active().tempo_bpm();
-        match mode {
-            ClockMode::Internal => {
+        match (self.mode, mode) {
+            (_, ClockMode::Internal) => {
                 self.internal.set_tempo(bpm, now as f64);
                 self.internal.align(now as f64, beat);
             }
-            ClockMode::Follow(precision) => {
+            (ClockMode::Follow(_), ClockMode::Follow(precision)) => {
+                self.follower.set_precision(precision);
+            }
+            (ClockMode::Internal, ClockMode::Follow(precision)) => {
                 self.follower = FollowerClock::new(f64::from(self.sample_rate), bpm, precision);
                 self.follower.reset(now as f64, beat);
                 let _ = self.follower.take_discontinuity();
@@ -247,6 +318,7 @@ impl Control {
     /// `now`. Following: joins the external timeline in phase at the next
     /// step, so the pattern position matches the source's bar position.
     pub fn start(&mut self, now: u64) {
+        self.queued.clear();
         match self.mode {
             ClockMode::Internal => {
                 self.internal.reset(now as f64);
@@ -278,15 +350,30 @@ impl Control {
     }
 
     /// Feeds an external observation (sample-domain). Ignored unless
-    /// following.
+    /// following. Small corrections leave the schedule alone (the follower
+    /// slews); a snap flushes and realigns immediately.
     pub fn observe(&mut self, observation: &Observation, now: u64) {
-        if matches!(self.mode, ClockMode::Follow(_)) {
-            self.follower.observe(observation, now as f64);
+        if !matches!(self.mode, ClockMode::Follow(_)) {
+            return;
+        }
+        // The timeline before the observation tells which queued steps
+        // have already played if it snaps.
+        let before = self.follower.clone();
+        self.follower.observe(observation, now as f64);
+        if self.follower.take_discontinuity() {
+            self.realign_after_snap(now, &before);
         }
     }
 
-    /// Feeds a MIDI clock message received at `sample`.
+    /// Feeds a MIDI clock message received at `sample`. While following,
+    /// Start and Continue request a re-sync: the source's song position
+    /// jumped, so the next pulse snaps instead of slewing.
     pub fn midi(&mut self, message: MidiMessage, sample: f64, now: u64) {
+        if matches!(message, MidiMessage::Start | MidiMessage::Continue)
+            && matches!(self.mode, ClockMode::Follow(_))
+        {
+            self.follower.request_resync();
+        }
         if let Some(obs) = self.midi.handle(message, sample) {
             self.observe(&obs, now);
         }
@@ -307,7 +394,7 @@ impl Control {
                 self.internal.align(sample, beat.round());
                 self.realign(now);
             }
-            ClockMode::Follow(_) => self.follower.observe(&obs, now as f64),
+            ClockMode::Follow(_) => self.observe(&obs, now),
         }
     }
 
@@ -330,9 +417,62 @@ impl Control {
             return;
         }
         let _ = self.producer.push(Event::flush(now));
+        self.queued.flush_from(now);
         let active = self.active();
         let clock = AdjustedClock::new(&active, self.controls);
         let step = self.scheduler.first_step_at_or_after(&clock, now);
+        self.scheduler.start_at(step);
+    }
+
+    /// [`Control::realign`] after a follower snap. Nothing is heard twice:
+    /// no step already heard (queued before `now`) is scheduled again, and
+    /// nothing lands within half a step after the last step heard (a
+    /// forward jump of a whole number of steps renumbers that same musical
+    /// step). Within those limits a step the jump left just behind `now`
+    /// (by up to [`SNAP_GRACE_S`]) is played late instead of skipped.
+    ///
+    /// What was heard comes from [`QueuedLog`], the samples steps were
+    /// actually queued at: the follower re-plans its timeline at every
+    /// report, so by now even the pre-snap timeline (`before`) can put a
+    /// queued step on the other side of `now`. `before` is only the
+    /// fallback when the log does not reach back to `now`.
+    fn realign_after_snap(&mut self, now: u64, before: &FollowerClock) {
+        if !self.scheduler.is_playing() {
+            return;
+        }
+        let _ = self.producer.push(Event::flush(now));
+        // Walk back from the newest queued step: those at or after `now`
+        // were just flushed; the first one before `now` was the last heard.
+        let mut unplayed = self.scheduler.next_step();
+        let mut heard = None;
+        for i in 0..self.queued.len {
+            let q = self.queued.newest(i);
+            if q.sample < now {
+                heard = Some(q.sample as f64);
+                break;
+            }
+            unplayed = q.step;
+        }
+        if heard.is_none() && self.queued.len == QUEUED_MEMORY {
+            // Everything remembered is still ahead: estimate the boundary.
+            let old = AdjustedClock::new(before, self.controls);
+            unplayed = unplayed.min(self.scheduler.first_step_at_or_after(&old, now));
+            if let Some(last) = unplayed.checked_sub(1) {
+                heard = Some(old.sample_at_beat(self.scheduler.pattern().step_beat(last)));
+            }
+        }
+        self.queued.flush_from(now);
+        let grace = (SNAP_GRACE_S * f64::from(self.sample_rate)).round() as u64;
+        let mut from = now.saturating_sub(grace);
+        if let Some(heard) = heard {
+            let half_step = 0.5 * sequencer::BEATS_PER_STEP * self.follower.samples_per_beat();
+            from = from.max((heard + half_step).ceil().max(0.0) as u64);
+        }
+        let new = AdjustedClock::new(&self.follower, self.controls);
+        let step = self
+            .scheduler
+            .first_step_at_or_after(&new, from)
+            .max(unplayed);
         self.scheduler.start_at(step);
     }
 
@@ -457,8 +597,19 @@ impl Control {
         }
         let active = active_of(self.mode, &self.internal, &self.follower);
         let clock = AdjustedClock::new(&active, self.controls);
-        self.scheduler
-            .schedule(&clock, now + self.lookahead, &mut self.producer)
+        let first = self.scheduler.next_step();
+        let pushed = self
+            .scheduler
+            .schedule(&clock, now + self.lookahead, &mut self.producer);
+        // Remember where the new steps went (the scheduler's own rounding),
+        // for realigning after a snap.
+        let end = self.scheduler.next_step();
+        for step in first.max(end.saturating_sub(QUEUED_MEMORY as u64))..end {
+            let beat = self.scheduler.pattern().step_beat(step);
+            let sample = clock.sample_at_beat(beat).round().max(0.0) as u64;
+            self.queued.push(Queued { step, sample });
+        }
+        pushed
     }
 
     /// [`Control::tick`] at the renderer's published position, for shells
@@ -603,5 +754,224 @@ mod tests {
         assert!((ctl.nudge_ms() - 10.0).abs() < 1e-9);
         // 10 ms at 120 BPM = 0.02 beats.
         assert!((ctl.clock_controls().nudge_beats - 0.02).abs() < 1e-12);
+    }
+
+    fn sixteenths() -> Pattern {
+        let mut p = Pattern::empty();
+        *p.track_mut(VoiceId::ClosedHat) = Track::parse("xxxx xxxx xxxx xxxx").unwrap();
+        p
+    }
+
+    fn bar_obs(sample: f64, beat: f64, bpm: f64) -> Observation {
+        Observation {
+            sample,
+            phase: Phase::Bar(beat.rem_euclid(4.0)),
+            bpm: Some(bpm),
+        }
+    }
+
+    fn trigger_samples(events: &[Event]) -> Vec<u64> {
+        events
+            .iter()
+            .filter(|e| matches!(e.kind, EventKind::Trigger { .. }))
+            .map(|e| e.sample)
+            .collect()
+    }
+
+    #[test]
+    fn mode_switches_are_continuous() {
+        let (mut ctl, _c) = control();
+        ctl.set_tempo(126.0, 0);
+        let before = ctl.beat_at(50_000);
+        ctl.set_clock_mode(ClockMode::Follow(Precision::Fine), 50_000);
+        assert!((ctl.beat_at(50_000) - before).abs() < 1e-9);
+        assert!((ctl.tempo() - 126.0).abs() < 1e-9);
+        // Lock, then switch precision: same follower, still locked.
+        ctl.observe(&bar_obs(60_000.0, 3.0, 128.0), 60_000);
+        assert!(ctl.is_locked());
+        let before = ctl.beat_at(70_000);
+        ctl.set_clock_mode(ClockMode::Follow(Precision::Exact), 70_000);
+        assert!(ctl.is_locked());
+        assert!((ctl.beat_at(70_000) - before).abs() < 1e-9);
+        // And back to the internal clock at the followed tempo.
+        let before = ctl.beat_at(80_000);
+        ctl.set_clock_mode(ClockMode::Internal, 80_000);
+        assert!((ctl.beat_at(80_000) - before).abs() < 1e-9);
+        assert!((ctl.tempo() - 128.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn small_corrections_never_flush() {
+        let (mut ctl, mut c) = control();
+        ctl.set_pattern(sixteenths());
+        ctl.set_clock_mode(ClockMode::Follow(Precision::Fine), 0);
+        ctl.observe(&bar_obs(0.0, 0.0, 120.0), 0);
+        ctl.start(0);
+        let mut now = 0u64;
+        // A source 0.3 % fast with 1 ms of alternating jitter.
+        for k in 1..40u32 {
+            let jitter = if k % 2 == 0 { 48.0 } else { -48.0 };
+            let at = f64::from(k) * 24_000.0 / 1.003 + jitter;
+            while (now as f64) < at + 100.0 {
+                ctl.tick(now);
+                now += 256;
+            }
+            ctl.observe(&bar_obs(at, f64::from(k), 120.0 * 1.003), now);
+        }
+        let events = drain(&mut c);
+        assert!(events.iter().all(|e| !matches!(e.kind, EventKind::Flush)));
+        let samples = trigger_samples(&events);
+        assert!(
+            samples.windows(2).all(|w| w[1] > w[0]),
+            "strictly increasing"
+        );
+        assert_eq!(samples.len() as u64, ctl.scheduler().next_step());
+    }
+
+    #[test]
+    fn a_snap_flushes_and_never_replays_a_step() {
+        let (mut ctl, mut c) = control();
+        ctl.set_pattern(sixteenths());
+        ctl.set_clock_mode(ClockMode::Follow(Precision::Fine), 0);
+        ctl.observe(&bar_obs(0.0, 0.0, 120.0), 0);
+        ctl.start(0);
+        ctl.tick(0);
+        let first = trigger_samples(&drain(&mut c));
+        assert_eq!(first, vec![0]);
+        // Resync to a source 40 ms behind us (our step at 6 000 has played
+        // when the snap arrives at 7 000; on the new grid it would be at
+        // 7 920).
+        ctl.tick(6_000);
+        drain(&mut c);
+        ctl.resync(7_000);
+        ctl.observe(&bar_obs(1_920.0, 0.0, 120.0), 7_000);
+        ctl.tick(7_000);
+        ctl.tick(10_000);
+        let events = drain(&mut c);
+        assert!(matches!(events[0].kind, EventKind::Flush));
+        assert_eq!(events[0].sample, 7_000);
+        let samples = trigger_samples(&events);
+        // Step 1 is not played again; step 2 lands on the new grid.
+        assert_eq!(samples, vec![1_920 + 12_000]);
+    }
+
+    #[test]
+    fn a_forward_snap_plays_a_just_missed_step_late() {
+        let (mut ctl, mut c) = control();
+        ctl.set_pattern(sixteenths());
+        ctl.set_clock_mode(ClockMode::Follow(Precision::Fine), 0);
+        ctl.observe(&bar_obs(0.0, 0.0, 120.0), 0);
+        ctl.start(0);
+        ctl.tick(0);
+        drain(&mut c);
+        // At 5 000 the source turns out to be 31 ms ahead: step 1, at 6 000
+        // on the old grid, is at 4 480 on the new one, already behind us.
+        ctl.resync(5_000);
+        ctl.observe(&bar_obs(5_000.0, 0.25 + 520.0 / 24_000.0, 120.0), 5_000);
+        ctl.tick(5_000);
+        let samples = trigger_samples(&drain(&mut c));
+        assert_eq!(samples, vec![4_480], "played 520 samples late, not skipped");
+        ctl.tick(6_000);
+        assert_eq!(trigger_samples(&drain(&mut c)), vec![10_480]);
+    }
+
+    /// What the renderer would play from `events`: triggers in order, with
+    /// every flush dropping the triggers at or after its sample.
+    fn heard(events: &[Event]) -> Vec<u64> {
+        let mut out: Vec<u64> = Vec::new();
+        for e in events {
+            match e.kind {
+                EventKind::Trigger { .. } => out.push(e.sample),
+                EventKind::Flush => out.retain(|&s| s < e.sample),
+                EventKind::Param { .. } => {}
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// A slew re-plans the timeline after a step was queued, then a resync
+    /// snaps: the realign must judge "already played" by where the step was
+    /// actually queued, not by where the re-planned timeline puts it now.
+    fn slew_then_snap(ahead_beats: f64, snap_at: u64) -> Vec<u64> {
+        let (mut ctl, mut c) = control();
+        ctl.set_pattern(sixteenths());
+        ctl.set_clock_mode(ClockMode::Follow(Precision::Fine), 0);
+        ctl.observe(&bar_obs(0.0, 0.0, 120.0), 0);
+        ctl.start(0);
+        let mut events = Vec::new();
+        ctl.tick(0);
+        // Queues step 1 at 6 000.
+        ctl.tick(1_300);
+        events.extend(drain(&mut c));
+        // The source is a little off: a slew, no snap.
+        let ours = ctl.follower_clock().beat_at_sample(1_300.0);
+        ctl.observe(&bar_obs(1_300.0, ours + ahead_beats, 120.0), 1_300);
+        events.extend(drain(&mut c));
+        assert!(events.iter().all(|e| !matches!(e.kind, EventKind::Flush)));
+        // A resync with a source right on our timeline: a (tiny) snap.
+        ctl.resync(snap_at);
+        let ours = ctl.follower_clock().beat_at_sample(snap_at as f64);
+        ctl.observe(&bar_obs(snap_at as f64, ours + 0.000_1, 120.0), snap_at);
+        let mut now = snap_at;
+        while now < 40_000 {
+            ctl.tick(now);
+            now += 128;
+        }
+        events.extend(drain(&mut c));
+        heard(&events)
+    }
+
+    fn assert_steady(hits: &[u64]) {
+        for w in hits.windows(2) {
+            let d = w[1] - w[0];
+            assert!((4_500..=7_500).contains(&d), "hits {hits:?}");
+        }
+    }
+
+    #[test]
+    fn a_snap_does_not_drop_a_step_a_slew_moved_earlier() {
+        // Step 1 was queued at 6 000; the slew moved it to about 5 830 on
+        // the current plan; the snap at 5 900 flushes the queued one.
+        let hits = slew_then_snap(0.04, 5_900);
+        assert_eq!(hits[0], 0);
+        assert_steady(&hits);
+    }
+
+    #[test]
+    fn a_snap_does_not_double_a_step_a_slew_moved_later() {
+        // Step 1 was queued (and played) at 6 000; the slew moved it to
+        // about 6 190 on the current plan; the snap comes at 6 100.
+        let hits = slew_then_snap(-0.04, 6_100);
+        assert_eq!(hits[0], 0);
+        assert_steady(&hits);
+    }
+
+    #[test]
+    fn midi_start_puts_the_downbeat_on_the_first_pulse() {
+        let (mut ctl, _c) = control();
+        ctl.set_clock_mode(ClockMode::Follow(Precision::Jittery), 0);
+        // Clock running while the source is stopped: tempo only.
+        let mut t = 0.0;
+        for _ in 0..100 {
+            ctl.midi(MidiMessage::Clock, t, t as u64);
+            ctl.tick(t as u64);
+            t += 1_000.0; // 120 BPM
+        }
+        assert!(ctl.is_locked());
+        assert!((ctl.tempo() - 120.0).abs() < 1e-6);
+        // Start, then the first pulse at a sample that is not on our grid.
+        let first = t + 333.0;
+        ctl.midi(MidiMessage::Start, first - 500.0, (first - 500.0) as u64);
+        for k in 0..48 {
+            let at = first + f64::from(k) * 1_000.0;
+            ctl.midi(MidiMessage::Clock, at, at as u64);
+            ctl.tick(at as u64);
+        }
+        let beat = ctl.beat_at(first as u64);
+        assert!(
+            (beat - beat.round()).abs() < 1e-3 && beat.round().rem_euclid(4.0) == 0.0,
+            "{beat}"
+        );
     }
 }
