@@ -525,12 +525,13 @@ impl Control {
         let latency = self.controls.latency_ms * f64::from(self.sample_rate) / 1_000.0;
         let anchor = sample as f64 + latency - self.controls.nudge_beats * spb;
         self.internal.align(anchor, 0.0);
-        // Sub-sample rounding must not push step 0 before `sample`.
+        // Rounding must not move step 0 off `sample`.
         let active = self.active();
         let clock = AdjustedClock::new(&active, self.controls);
         let first = self.scheduler.step_sample(&clock, 0);
-        if first < sample {
-            self.internal.align(anchor + (sample - first) as f64, 0.0);
+        if first != sample {
+            self.internal
+                .align(anchor + sample as f64 - first as f64, 0.0);
         }
     }
 
