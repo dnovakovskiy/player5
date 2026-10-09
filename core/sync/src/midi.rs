@@ -676,6 +676,32 @@ mod tests {
         }
     }
 
+    /// One timestamp from a glitching clock mapping, far ahead or far
+    /// behind its neighbours: never a false tempo, never a lost count.
+    #[test]
+    fn a_single_wild_timestamp_never_reports_a_false_tempo() {
+        for wild in [3.0 * SR, 0.2 * SR, 1_200.0, -1_200.0, -0.5 * SR] {
+            let mut m = MidiClockFollower::new(SR);
+            m.handle(MidiMessage::Start, 0.0);
+            let mut worst: f64 = 0.0;
+            let mut reports_after = 0;
+            for k in 0..(24 * 12) {
+                let ideal = 1_000.0 + f64::from(k) * 1_000.0;
+                let stamp = if k == 100 { ideal + wild } else { ideal };
+                if let Some(obs) = m.handle(MidiMessage::Clock, stamp) {
+                    worst = worst.max((obs.bpm.unwrap() - 120.0).abs());
+                    let want = (f64::from(k) / 24.0).rem_euclid(4.0);
+                    assert_eq!(obs.phase, Phase::Bar(want), "{wild}: pulse {k}");
+                    if k > 200 {
+                        reports_after += 1;
+                    }
+                }
+            }
+            assert!(worst < 0.01, "{wild}: {worst:.3} BPM off");
+            assert!(reports_after > 80, "{wild}: reports resumed");
+        }
+    }
+
     #[test]
     fn follows_a_tempo_jump() {
         let mut m = MidiClockFollower::new(SR);

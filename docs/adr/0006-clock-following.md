@@ -120,15 +120,20 @@ The output jumps only on a snap, and every snap is reported once by
 1. **First lock** (after `new` or `reset`): the first `acquire` phase
    reports are averaged, then the timeline snaps to the average.
 2. **`request_resync()`** (quantized re-sync from the UI; MIDI Start and
-   Continue): the next phase report is snapped to directly.
+   Continue): acquisition starts afresh at the next phase report and the
+   timeline snaps as soon as it completes. For `Exact`, `Fine` and
+   `Jittery` (`acquire` = 1) that is the next report itself; `Coarse`
+   averages its 8 reports first, because one report is only good to
+   ±200 ms.
 3. **A jump of the source** (the DJ cued or jumped): a residual beyond the
    jump threshold is an outlier and is ignored by the estimate. If outliers
    with mutually consistent offsets persist for the hold time (beats *and*
    reports), the timeline snaps to their mean. A single late packet never
    snaps.
-4. **Re-acquisition** after lock loss, or after a precision change: the
-   next phase report snaps only if it is beyond the jump threshold;
-   otherwise tracking simply resumes.
+4. **Re-acquisition** after lock loss, or after a precision change: if the
+   next phase report is within the jump threshold, tracking simply resumes;
+   beyond it, the follower acquires afresh (averaging `acquire` reports, as
+   for a first lock) and then snaps.
 
 `Phase::Bar(p)` aligns our beat modulo 4 to `p` (bars line up);
 `Phase::Beat(p)` aligns modulo 1 (our bar count is kept); `TempoOnly`
@@ -147,14 +152,32 @@ tempo without slewing.
 
 ### 5. Engine integration (`engine::Control`)
 
-- `observe` keeps a copy of the follower from before the report. When the
-  report snaps, it pushes a `Flush` at `now` and restarts the scheduler at
-  the first step of the new timeline at or after `now − 20 ms`, but never
-  at a step the old timeline already played, and never within half a step
-  after the last step heard (a forward jump of a whole number of steps
-  renumbers that same musical step). So nothing plays twice, and a step a
-  forward jump left just behind (the downbeat after a MIDI Start) plays
-  20 ms late at most rather than not at all.
+- `Control` remembers the sample each recently scheduled step was queued
+  at. When a report snaps, it pushes a `Flush` at the *commit point* and
+  restarts the scheduler at the first step of the new timeline at or after
+  the commit point − 20 ms, but never within half a step after the last
+  step heard (a small jump either way, or a forward jump of a whole number
+  of steps, would otherwise repeat that same musical moment). Steps queued
+  before the commit point were heard and stay. So nothing plays twice, a
+  step a forward jump left just behind (the downbeat after a MIDI Start)
+  plays 20 ms late at most rather than not at all, and after a jump back
+  the step numbers follow the source back (it replays what it jumped over,
+  and so do we) instead of the pattern falling silent until our old step
+  number comes round again. "Heard" is judged from the queued samples, not
+  from a timeline: the follower re-plans its timeline at every report, so
+  even the pre-snap timeline can put an already-queued step on the other
+  side of `now`.
+- The commit point is `now` when control and render run in lockstep
+  (`Engine::render`, the web worklet). When they run on separate threads
+  (the `core/ffi` split API), `now` is the renderer's published block
+  start: the renderer has already pulled that block's triggers and is
+  playing them, and a flush reaches it only at its next pull. There the
+  commit point is two render blocks later (the block size is learned from
+  the published positions; at most half the lookahead). Triggers before it
+  keep their old stamps.
+- `start` while following, shortly after a stop or while playing, flushes
+  what is still queued from the earlier run and begins at least half a step
+  after the last step heard, so a quick restart never doubles a step.
 - `start` in follow mode joins the source's timeline at the next step, in
   bar phase. Internal → follow starts a fresh follower on the current beat
   (continuous; the first report snaps like any first lock); switching
@@ -190,7 +213,17 @@ test drives the follower with seeded xorshift noise.
   `Control` and `Renderer` and checks that every step is heard exactly once
   and on the source's grid (Fine within 4 ms, MIDI within 2 ms, Coarse
   within 120 ms at first and 50 ms later), and that a cue jump costs
-  exactly one realign.
+  exactly one realign. The same rig also runs control and render the way
+  two threads do (big render blocks, the control half one block behind),
+  with re-sync storms and cue jumps both ways: nothing doubles, nothing
+  drops out.
+- `Jittery`'s integral sits below critical damping (κ = 0.5), so a phase
+  step in a MIDI clock that comes without a Start (a master nudging its
+  pulse train) leaves a tail of roughly an eighth of the step that decays
+  over a few seconds (a 24 ms step: ≈ 3 ms after 2 s, < 1 ms after 8 s).
+  Critical damping trades that for a larger error in the first two
+  seconds; neither is clearly better, and MIDI masters rarely jump
+  without a Start.
 - A `Coarse` source takes 8 reports (about 4 s) to lock and tens of beats to
   follow a nudge below its 300 ms jump threshold. That is the price of a
   phase that is only good to ±200 ms; a source adapter that knows its error

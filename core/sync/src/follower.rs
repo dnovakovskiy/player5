@@ -327,8 +327,11 @@ impl FollowerClock {
         self.phase_error
     }
 
-    /// Asks for the next observation to be applied as a hard phase snap
-    /// (quantized re-sync) rather than a gradual correction.
+    /// Asks for a hard phase snap (quantized re-sync) rather than a gradual
+    /// correction: acquisition restarts at the next phase observation and
+    /// the timeline snaps as soon as it completes (on that observation for
+    /// every precision but [`Precision::Coarse`], which first averages as
+    /// many reports as a first lock).
     pub fn request_resync(&mut self) {
         self.resync_requested = true;
     }
@@ -519,9 +522,12 @@ impl FollowerClock {
         self.phase_error = out_err;
 
         if core::mem::take(&mut self.resync_requested) {
-            // Quantized re-sync: snap to this report (or, for a source whose
-            // tempo is still unknown, as soon as it is measured).
-            self.begin_acquire(s, ours + out_err, 1);
+            // Quantized re-sync: acquire afresh from this report and snap as
+            // soon as acquisition completes: at once for the precise
+            // sources, after as many reports as a first lock for Coarse
+            // (one report there is only good to +-200 ms), and for a source
+            // whose tempo is still unknown, as soon as it is measured.
+            self.begin_acquire(s, ours + out_err, self.tuning.acquire_obs);
             return;
         }
         match self.lock {
@@ -819,6 +825,8 @@ mod tests {
         /// `(from_s, to_s)`: the source sends nothing (lost, or the DJ
         /// stopped the deck); combine with `shift` to come back elsewhere.
         outage: Option<(f64, f64)>,
+        /// Seconds at which the DJ presses re-sync.
+        resync_at: Option<f64>,
         seed: u64,
     }
 
@@ -840,6 +848,7 @@ mod tests {
                 source_start: 0.0,
                 stall: None,
                 outage: None,
+                resync_at: None,
                 seed: 0x9E37_79B9_7F4A_7C15,
             }
         }
@@ -954,6 +963,12 @@ mod tests {
             }
             beat = beat1;
             now += TICK;
+            if sc
+                .resync_at
+                .is_some_and(|at| now / SR >= at && (now - TICK) / SR < at)
+            {
+                f.request_resync();
+            }
             if let Some((at, shift)) = sc.shift {
                 if !shifted && now / SR >= at {
                     shifted = true;
@@ -1569,6 +1584,57 @@ mod tests {
                 assert_eq!(r.snaps.len(), 2, "{p:?}: {:?}", r.snaps);
                 let worst = r.max_abs_error_after(r.snaps[1] + 1.0);
                 assert!(worst < tol, "{p:?}: {worst:.2} ms");
+            }
+        }
+    }
+
+    /// Re-sync on a Coarse source must not snap to a single report that
+    /// is only good to +-200 ms: it averages as many reports as a first
+    /// lock would, then snaps once, and the error stays well under the
+    /// source's noise. The precise ones still snap on the very next report.
+    #[test]
+    fn resync_on_a_coarse_source_averages_before_snapping() {
+        let mut sc = typical(Precision::Coarse);
+        sc.resync_at = Some(60.0);
+        sc.seconds = 120.0;
+        for r in seeds(sc) {
+            assert_eq!(r.snaps.len(), 2, "{:?}", r.snaps);
+            let delay = r.snaps[1] - 60.0;
+            // Eight reports at one per beat.
+            assert!(delay > 3.0 && delay < 5.0, "{delay}");
+            let worst = r.max_abs_error_after(60.0);
+            assert!(worst < 120.0, "{worst:.1} ms");
+        }
+        for p in [Precision::Exact, Precision::Fine, Precision::Jittery] {
+            let (_, tol) = bound(p);
+            let mut sc = typical(p);
+            sc.resync_at = Some(10.0);
+            for r in seeds(sc) {
+                assert_eq!(r.snaps.len(), 2, "{p:?}: {:?}", r.snaps);
+                let delay = r.snaps[1] - 10.0;
+                assert!(delay < 60.0 / sc.bpm * sc.every + 0.01, "{p:?}: {delay}");
+                let worst = r.max_abs_error_after(10.0);
+                assert!(worst < tol, "{p:?}: {worst:.2} ms");
+            }
+        }
+    }
+
+    /// The DJ cues an Opus Quad deck: with +-200 ms of noise on every
+    /// report, consecutive outliers disagree by up to 400 ms, yet the run
+    /// must still be recognised as one jump and snapped to once, and the
+    /// timeline must never jump on noise around it.
+    #[test]
+    fn a_coarse_cue_jump_snaps_once() {
+        for by in [1.0, 1.5, 2.0, -1.5] {
+            let mut sc = typical(Precision::Coarse);
+            sc.shift = Some((60.0, by));
+            sc.seconds = 120.0;
+            for r in seeds(sc) {
+                assert_eq!(r.snaps.len(), 2, "{by}: {:?}", r.snaps);
+                let delay = r.snaps[1] - 60.0;
+                assert!(delay < 12.0, "{by}: {delay} s");
+                let worst = r.max_abs_error_after(r.snaps[1] + 0.01);
+                assert!(worst < 120.0, "{by}: {worst:.1} ms");
             }
         }
     }
