@@ -439,7 +439,12 @@ fn handle_connection(
                         if verbose {
                             eprintln!("player5-bridge: refused WebSocket from origin {origin:?}");
                         }
-                        let _ = stream.write_all(&ws::close_frame(1008, ORIGIN_REFUSED));
+                        if stream
+                            .write_all(&ws::close_frame(1008, ORIGIN_REFUSED))
+                            .is_ok()
+                        {
+                            linger_for_close(&mut stream);
+                        }
                     }
                 }
             }
@@ -540,6 +545,33 @@ fn serve_static(
             let _ = http::respond(stream, 404, "Not Found", &[], b"not found\n", head_only);
         }
     }
+}
+
+/// After sending a close frame, waits briefly for the peer's close (or
+/// EOF) before dropping the socket. Dropping it with the peer's bytes
+/// unread makes the kernel send a reset, which can discard our close frame
+/// before the browser reads it (the page then sees 1006, not our code).
+fn linger_for_close(stream: &mut TcpStream) {
+    let _ = stream.flush();
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut buf = [0u8; 256];
+    while Instant::now() < deadline {
+        match stream.read(&mut buf) {
+            Ok(0) => return,
+            // The peer's close: finish our side, then drain to its EOF.
+            Ok(_) => {
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => return,
+        }
+    }
+    let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
 fn serve_websocket(

@@ -81,7 +81,7 @@ jobs:
       - name: Build (PWA)
         run: npm run build
       - name: Build (single file)
-        run: npm run build:single
+        run: npm run build:artifact
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
       - name: Playwright (instrument, runtimes, MIDI, bridge, offline, single file)

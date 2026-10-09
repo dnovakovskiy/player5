@@ -11,7 +11,6 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use engine::{split, ClockMode, Engine, PatternSpec};
 use sequencer::VoiceParam;
@@ -21,18 +20,20 @@ struct Counting;
 
 thread_local! {
     static COUNTING: Cell<bool> = const { Cell::new(false) };
+    // Per thread, so a test counting on another thread (the test harness
+    // runs them in parallel) never shows up in this one's tally.
+    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
 }
-static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 
 fn note() {
     if COUNTING.with(Cell::get) {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        ALLOCATIONS.with(|n| n.set(n.get() + 1));
     }
 }
 
 // SAFETY: forwards every call to the system allocator unchanged; the
-// bookkeeping touches only a const-initialised thread local and an atomic,
-// neither of which allocates.
+// bookkeeping touches only const-initialised thread locals, which do not
+// allocate.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         note();
@@ -61,11 +62,11 @@ static GLOBAL: Counting = Counting;
 
 /// Heap operations `f` performs on this thread.
 fn allocations_in(f: impl FnOnce()) -> u64 {
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    let before = ALLOCATIONS.with(Cell::get);
     COUNTING.with(|c| c.set(true));
     f();
     COUNTING.with(|c| c.set(false));
-    ALLOCATIONS.load(Ordering::Relaxed) - before
+    ALLOCATIONS.with(Cell::get) - before
 }
 
 /// Every voice, accents, flams, shuffle and the limiter.
