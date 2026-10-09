@@ -175,3 +175,14 @@ Constraints:
   https://midi.org/universal-midi-packet-ump-and-midi-2-0-protocol-specification
 - iOS multicast entitlement:
   https://developer.apple.com/documentation/bundleresources/entitlements/com_apple_developer_networking_multicast
+
+## Clarification (appended 2026-10-09, final review)
+
+The M2-104-UM link under Sources was not reachable from the build
+container (midi.org answers 403 there) and was not read. The UMP facts
+`MIDIClockInput` relies on (type nibble, one-word type-`0x1` system
+messages with the status byte in bits 16–23, sizes per type, walking a
+`MIDIEventList` by each packet's full `wordCount`) are digested in
+`docs/protocols/midi-clock.md` from Apple's CoreMIDI reference and headers
+and an independent UMP library, and are marked there for re-checking
+against M2-104-UM.
