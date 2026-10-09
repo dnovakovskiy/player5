@@ -4,7 +4,7 @@
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -20,6 +20,10 @@ use crate::ws::{self, Assembler, Event};
 
 /// Most simultaneous connections (HTTP and WebSocket together).
 pub const MAX_CONNECTIONS: usize = 64;
+/// Most simultaneous connections from one non-loopback address, so one
+/// machine on the LAN (or a slow-loris client) cannot take every slot. A
+/// browser opens about six at once.
+pub const MAX_PER_PEER: usize = 16;
 /// Timeline broadcast period (20 Hz).
 pub const TIMELINE_PERIOD: Duration = Duration::from_millis(50);
 /// A WebSocket client that sends nothing for this long is dropped (clients
@@ -39,6 +43,9 @@ pub struct Config {
     pub source: SourceKind,
     /// Source options.
     pub options: SourceOptions,
+    /// Extra page origins allowed to open the WebSocket
+    /// (`--allow-origin`; `*` = any). See [`http::origin_allowed`].
+    pub allowed_origins: Vec<String>,
     /// Log every connection.
     pub verbose: bool,
 }
@@ -51,6 +58,7 @@ impl Default for Config {
             web: None,
             source: SourceKind::Prolink,
             options: SourceOptions::default(),
+            allowed_origins: Vec::new(),
             verbose: false,
         }
     }
@@ -266,41 +274,111 @@ fn run_hub(
     }
 }
 
+/// Counts a connection while alive (also when its thread never starts).
+struct Slot {
+    active: Arc<Mutex<Counts>>,
+    peer: IpAddr,
+}
+
+#[derive(Default)]
+struct Counts {
+    total: usize,
+    per_peer: Vec<(IpAddr, usize)>,
+}
+
+impl Counts {
+    fn of(&self, peer: IpAddr) -> usize {
+        self.per_peer
+            .iter()
+            .find(|(p, _)| *p == peer)
+            .map_or(0, |(_, n)| *n)
+    }
+
+    /// Takes a slot for `peer` unless a cap is reached.
+    fn admit(&mut self, peer: IpAddr) -> bool {
+        if self.total >= MAX_CONNECTIONS || (!peer.is_loopback() && self.of(peer) >= MAX_PER_PEER) {
+            return false;
+        }
+        self.total += 1;
+        match self.per_peer.iter_mut().find(|(p, _)| *p == peer) {
+            Some((_, n)) => *n += 1,
+            None => self.per_peer.push((peer, 1)),
+        }
+        true
+    }
+
+    fn release(&mut self, peer: IpAddr) {
+        self.total = self.total.saturating_sub(1);
+        if let Some(i) = self.per_peer.iter().position(|(p, _)| *p == peer) {
+            self.per_peer[i].1 -= 1;
+            if self.per_peer[i].1 == 0 {
+                self.per_peer.swap_remove(i);
+            }
+        }
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .release(self.peer);
+    }
+}
+
 fn accept_loop(listener: &TcpListener, hub: &Arc<Hub>, stop: &AtomicBool, config: &Config) {
-    let active = Arc::new(AtomicUsize::new(0));
+    let active = Arc::new(Mutex::new(Counts::default()));
     let stop_flag = Arc::new(AtomicBool::new(false));
+    let origins: Arc<[String]> = config.allowed_origins.clone().into();
     while !stop.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, peer)) => {
                 let _ = stream.set_nonblocking(false);
                 let _ = stream.set_nodelay(true);
-                if active.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+                let admitted = active
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .admit(peer.ip());
+                if !admitted {
                     let mut stream = stream;
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
                     let _ = http::respond(
                         &mut stream,
                         503,
                         "Service Unavailable",
-                        &[("Content-Type", "text/plain")],
+                        &[("Content-Type", "text/plain"), ("Retry-After", "5")],
                         b"too many connections\n",
                         false,
                     );
                     continue;
                 }
-                active.fetch_add(1, Ordering::Relaxed);
+                let slot = Slot {
+                    active: Arc::clone(&active),
+                    peer: peer.ip(),
+                };
                 let hub = Arc::clone(hub);
-                let active = Arc::clone(&active);
                 let web = config.web.clone();
                 let verbose = config.verbose;
                 let stop_flag = Arc::clone(&stop_flag);
+                let origins = Arc::clone(&origins);
                 let spawned = std::thread::Builder::new()
                     .name("bridge-conn".into())
                     .spawn(move || {
+                        let _slot = slot;
                         if verbose {
                             eprintln!("player5-bridge: connection from {peer}");
                         }
-                        handle_connection(stream, &hub, web.as_deref(), &stop_flag, verbose);
-                        active.fetch_sub(1, Ordering::Relaxed);
+                        handle_connection(
+                            stream,
+                            &hub,
+                            web.as_deref(),
+                            &origins,
+                            &stop_flag,
+                            verbose,
+                        );
                     });
+                // On failure the closure (and with it the slot) is dropped.
                 if spawned.is_err() {
                     eprintln!("player5-bridge: could not spawn a connection thread");
                 }
@@ -322,6 +400,7 @@ fn handle_connection(
     mut stream: TcpStream,
     hub: &Hub,
     web: Option<&std::path::Path>,
+    origins: &[String],
     stop: &AtomicBool,
     verbose: bool,
 ) {
@@ -349,8 +428,19 @@ fn handle_connection(
     match req.path.as_str() {
         "/ws" => match http::websocket_accept(&req) {
             Ok(accept) => {
-                if http::respond_upgrade(&mut stream, &accept).is_ok() {
-                    serve_websocket(stream, rest, hub, stop, verbose);
+                if http::respond_upgrade(&mut stream, &accept).is_err() {
+                    return;
+                }
+                match http::origin_allowed(&req, origins) {
+                    Ok(()) => serve_websocket(stream, rest, hub, stop, verbose),
+                    Err(origin) => {
+                        // Upgrade, then close with a reason the page can
+                        // show (a refused handshake tells a page nothing).
+                        if verbose {
+                            eprintln!("player5-bridge: refused WebSocket from origin {origin:?}");
+                        }
+                        let _ = stream.write_all(&ws::close_frame(1008, ORIGIN_REFUSED));
+                    }
                 }
             }
             Err((status, reason)) => {
@@ -394,6 +484,10 @@ fn handle_connection(
     }
 }
 
+/// Close reason for a refused page origin (at most 123 bytes).
+pub const ORIGIN_REFUSED: &str =
+    "this page's origin may not use the bridge; start the bridge with --allow-origin <origin>";
+
 const LANDING: &str = "<!doctype html><meta charset=utf-8><title>player5 bridge</title>\
 <body style=\"font:16px ui-monospace,monospace;background:#0f1115;color:#e8e8e8;padding:2rem\">\
 <h1>player5 bridge</h1><p>The clock relay is running. Open the player5 web app, choose \
@@ -433,6 +527,10 @@ fn serve_static(
                     ("Content-Type", http::mime_type(&file)),
                     ("Cache-Control", http::cache_control(&file)),
                     ("X-Content-Type-Options", "nosniff"),
+                    // The served app may follow the booth clock; no other
+                    // page may frame it and click its controls.
+                    ("Content-Security-Policy", "frame-ancestors 'self'"),
+                    ("X-Frame-Options", "SAMEORIGIN"),
                 ],
                 &body,
                 head_only,
@@ -585,5 +683,53 @@ fn handle_client_message(text: &str, hub: &Hub) -> Option<String> {
             None
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_caps() {
+        let mut c = Counts::default();
+        let lan: IpAddr = [192, 168, 1, 9].into();
+        let other: IpAddr = [192, 168, 1, 10].into();
+        let local: IpAddr = [127, 0, 0, 1].into();
+        for _ in 0..MAX_PER_PEER {
+            assert!(c.admit(lan));
+        }
+        assert!(
+            !c.admit(lan),
+            "one LAN host cannot take more than its share"
+        );
+        assert!(c.admit(other));
+        // Loopback is not capped per peer (the browser on the bridge
+        // machine, local tests), only by the total.
+        while c.total < MAX_CONNECTIONS {
+            assert!(c.admit(local));
+        }
+        assert!(!c.admit(local));
+        assert!(!c.admit([10, 0, 0, 1].into()));
+        c.release(lan);
+        assert!(c.admit(lan));
+    }
+
+    #[test]
+    fn a_slot_is_released_when_dropped_unused() {
+        let active = Arc::new(Mutex::new(Counts::default()));
+        let peer: IpAddr = [192, 168, 1, 9].into();
+        assert!(active.lock().unwrap().admit(peer));
+        // The connection closure owns the slot; dropping it unrun (thread
+        // spawn failed) must give the slot back.
+        let slot = Slot {
+            active: Arc::clone(&active),
+            peer,
+        };
+        let job = move || drop(slot);
+        drop(job);
+        let counts = active.lock().unwrap();
+        assert_eq!(counts.total, 0);
+        assert_eq!(counts.of(peer), 0);
     }
 }

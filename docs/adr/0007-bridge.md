@@ -1,6 +1,6 @@
 # ADR-0007: A headless bridge serves the network clock (and the app) to browsers
 
-Status: Accepted
+Status: Accepted (amended by [ADR-0012](0012-bridge-origin-policy.md): page origins)
 
 ## Context
 

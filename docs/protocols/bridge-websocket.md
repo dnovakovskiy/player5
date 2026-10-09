@@ -16,6 +16,13 @@ design rationale is in ADR-0007. Version: **1**.
   static files from that directory (the built web app), so booth machines
   can open `http://<bridge-host>:17505/` and get app and clock from one
   origin (no mixed-content or private-network-access problems).
+- Pages from other origins are refused (ADR-0012): when the upgrade
+  request carries an `Origin` that is not a loopback host, not the
+  bridge's own host (IP literal, single-label or `.local` name, equal to
+  `Host`) and not listed with `--allow-origin`, the server completes the
+  upgrade and immediately closes with code **1008** and a reason that
+  names `--allow-origin`. Requests without `Origin` (non-browser clients)
+  are accepted.
 - Unknown message types must be ignored by both sides (forward
   compatibility). Numbers are JSON numbers; times are integers.
 
@@ -102,7 +109,10 @@ Clients send a burst of ~8 pings on connect, then one every 2 s.
 ```
 
 Selects which device the bridge follows (default `"master"`). Applies to
-all clients (one bridge, one booth).
+all clients (one bridge, one booth). When the followed device changes
+(this command, or a new tempo master), the next `timeline` carries the
+new `device` and that device's own bar at once; it is not a phase jump of
+the previous device.
 
 ## Client behaviour (web app)
 
@@ -113,3 +123,7 @@ all clients (one bridge, one booth).
    (`Bar` phase when `bar_aligned`, else `Beat`) with the timeline's BPM and
    precision.
 3. Show `locked`, the followed device and `status` messages in the UI.
+4. When following a specific device number, ignore timelines whose
+   `device` is another one (a restarted bridge follows the master until
+   the client's `follow` arrives). When the `device` of a locked timeline
+   changes, re-sync rather than slew: it is another deck's bar.

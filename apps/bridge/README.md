@@ -36,9 +36,11 @@ cargo run -p player5-bridge -- --source sim --sim-bpm 124 --web apps/web/dist
 | `--port <port>` | TCP port (default 17505) |
 | `--bind <address>` | Listen address (default all interfaces) |
 | `--web <dir>` | Serve the built web app from `<dir>` |
+| `--allow-origin <origin>` | Also let pages from `<origin>` (e.g. `https://example.org`) use the WebSocket; repeatable, `*` = any |
 | `--device-number <n>` | Pro DJ Link device number to claim (default 5) |
 | `--interface <ipv4>` | Address of the interface on the booth network |
 | `--passive` | Listen only; do not announce a virtual device |
+| `--prolink-port-base <port>` | Testing: Pro DJ Link on 127.0.0.1, ports `<port>`..`<port>+2` |
 | `--verbose` | Log connections and source messages |
 
 ## In the booth
@@ -56,6 +58,11 @@ cargo run -p player5-bridge -- --source sim --sim-bpm 124 --web apps/web/dist
   prone to dropouts under heavy UI load. For the best timing, run the
   browser on the bridge machine itself and open `http://localhost:17505/`:
   `localhost` counts as a secure context, so the full engine runs.
+- Only the app the bridge serves, pages on `localhost` and non-browser
+  clients may use the WebSocket; any other web page open on the laptop is
+  refused (it could otherwise switch the follow target mid-set). To use a
+  copy of the app hosted elsewhere, start the bridge with
+  `--allow-origin <that site's origin>` (ADR-0012).
 - Stop it with Ctrl-C.
 
 ## Endpoints
@@ -73,6 +80,10 @@ cargo test -p player5-bridge
 ```
 
 Unit tests cover SHA-1 (FIPS 180 vectors), base64 (RFC 4648 vectors), the
-RFC 6455 handshake and framing rules, request parsing and static-path
-traversal. Integration tests start a real server on a free port with the
+RFC 6455 handshake and framing rules, request parsing, static-path
+traversal, the origin policy and the connection caps. Integration tests start a real server on a free port with the
 simulated clock and drive it with a hand-rolled WebSocket client.
+
+`examples/fake_booth.rs` plays two Pro DJ Link players on loopback for a
+bridge started with `--prolink-port-base`; the web app's Playwright suite
+uses it to test the whole chain in a browser (`apps/web/README.md`).

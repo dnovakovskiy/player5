@@ -38,6 +38,8 @@ export class ClockPanel {
   private timeline: BridgeTimeline | null = null;
   private bridgeState = "closed";
   private bridgeStatus = "";
+  /** What the Follow menu asks the bridge for; survives device-list changes. */
+  private followTarget: "master" | number = "master";
   private midi: MidiClockInput | null = null;
   private midiPorts: MidiPort[] = [];
   private midiError = "";
@@ -136,7 +138,9 @@ export class ClockPanel {
       });
       this.el.bridgeFollow.addEventListener("change", () => {
         const v = this.el.bridgeFollow.value;
-        this.bridge?.follow(v === "master" ? "master" : Number(v));
+        this.followTarget = v === "master" ? "master" : Number(v);
+        this.bridge?.follow(this.followTarget);
+        this.renderStatus();
       });
     }
 
@@ -210,7 +214,9 @@ export class ClockPanel {
       onConnection: (state, detail) => {
         this.bridgeState = state;
         if (state === "closed") this.timeline = null;
-        if (detail && state === "closed") this.bridgeStatus = `closed (${detail})`;
+        // The bridge refuses pages from origins it does not trust and says
+        // how to allow one; fill in ours.
+        if (detail && state === "closed") this.bridgeStatus = `closed (${detail.replace("<origin>", location.origin)})`;
         this.renderStatus();
       },
       onHello: () => {
@@ -222,6 +228,7 @@ export class ClockPanel {
         this.host.audio.setClockMode(PRECISION_MODE[t.precision]);
         this.renderStatus();
       },
+      onDeviceChange: () => this.host.audio.resync(),
       onDevices: (devices) => this.renderDevices(devices),
       onStatus: (level, message) => {
         this.bridgeStatus = `${level}: ${message}`;
@@ -232,6 +239,9 @@ export class ClockPanel {
       },
     });
     this.bridge = client;
+    // A new connection (another URL, back from another source) asks for
+    // the device the menu shows, not the bridge's default.
+    if (this.followTarget !== "master") client.follow(this.followTarget);
     client.connect();
   }
 
@@ -270,16 +280,20 @@ export class ClockPanel {
       }),
     );
     // Follow targets: the master, or any player.
+    // The menu keeps showing the chosen device even while it is missing
+    // from the list (a bridge restart, a player rebooting): the client keeps
+    // asking the bridge for it, so the menu must not pretend otherwise.
     const select = this.el.bridgeFollow;
-    const current = select.value;
+    const current = String(this.followTarget);
     const options = [new Option("Tempo master", "master")];
     for (const d of devices) {
       if (d.kind === "player" || d.kind === "all-in-one") {
         options.push(new Option(`${d.number} · ${d.name || "player"}`, String(d.number)));
       }
     }
+    if (!options.some((o) => o.value === current)) options.push(new Option(`${current} · not seen`, current));
     select.replaceChildren(...options);
-    select.value = options.some((o) => o.value === current) ? current : "master";
+    select.value = current;
   }
 
   // ---- MIDI ----------------------------------------------------------
@@ -377,7 +391,8 @@ export class ClockPanel {
           const rtt = this.bridge?.bestRttMs;
           text =
             `${t.source} · ${t.locked ? "locked" : "searching"} · ${t.bpm.toFixed(2)} BPM · ${t.precision}` +
-            (t.device !== null ? ` · device ${t.device}` : "");
+            (t.device !== null ? ` · device ${t.device}` : "") +
+            (this.bridge && !this.bridge.onTarget ? ` · switching to device ${String(this.bridge.target)}` : "");
           if (typeof rtt === "number") detail = `rtt ${rtt.toFixed(1)} ms`;
         }
         if (this.bridgeStatus) text += ` — ${this.bridgeStatus}`;
@@ -395,7 +410,9 @@ export class ClockPanel {
         break;
       }
     }
-    if (this.following && !running) text += " Press Play to start the engine; it joins the source in phase.";
+    if (this.following && !running) {
+      text += `${/[.!?]$/.test(text) ? " " : ". "}Press Play to start the engine; it joins the source in phase.`;
+    }
     if (this.el.status.textContent !== text) this.el.status.textContent = text;
     const shown = detail ? ` · ${detail}` : "";
     if (this.el.statusDetail.textContent !== shown) this.el.statusDetail.textContent = shown;

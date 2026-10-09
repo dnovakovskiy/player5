@@ -39,12 +39,19 @@ function blocks(tag) {
 
 const title = head.match(/<title>[^<]*<\/title>/)?.[0];
 if (!title) throw new Error("no <title>");
+// The host's skeleton may not set a viewport: without one a phone lays the
+// page out 980 px wide and shrinks it. A <meta> in <body> still applies.
+const metas = ["viewport", "color-scheme"].map((name) => {
+  const tag = head.match(new RegExp(`<meta name="${name}"[^>]*>`))?.[0];
+  if (!tag) throw new Error(`no <meta name="${name}">`);
+  return tag;
+});
 const styles = blocks("style");
 const scripts = blocks("script");
 if (styles.length === 0 || scripts.length === 0) throw new Error("missing style or script");
 const body = html.slice(bodyStart, bodyEnd).trim();
 
-const fragment = [title, ...styles, body, ...scripts].join("\n");
+const fragment = [title, ...metas, ...styles, body, ...scripts].join("\n");
 if (fragment.slice(0, 8192).indexOf("<title>") < 0) throw new Error("title not in the first 8 KB");
 writeFileSync(out, fragment);
 console.log(`wrote ${out} (${(fragment.length / 1024).toFixed(0)} KB)`);

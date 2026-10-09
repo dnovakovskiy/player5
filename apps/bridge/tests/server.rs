@@ -19,6 +19,7 @@ fn server(web: Option<std::path::PathBuf>) -> player5_bridge::Server {
             sim_bpm: 124.0,
             ..SourceOptions::default()
         },
+        allowed_origins: Vec::new(),
         verbose: false,
     })
     .unwrap()
@@ -31,12 +32,17 @@ struct Client {
 
 impl Client {
     fn connect(addr: SocketAddr) -> Self {
+        Self::connect_with(addr, &addr.to_string(), "")
+    }
+
+    /// Handshake with this `Host` and extra header lines (each ending in CRLF).
+    fn connect_with(addr: SocketAddr, host: &str, extra: &str) -> Self {
         let mut stream = TcpStream::connect(addr).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_millis(200)))
             .unwrap();
         let req = format!(
-            "GET /ws HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            "GET /ws HTTP/1.1\r\nHost: {host}\r\n{extra}Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
         );
         stream.write_all(req.as_bytes()).unwrap();
         let mut buf = Vec::new();
@@ -268,6 +274,7 @@ fn unavailable_source_still_serves_with_an_error_status() {
         web: None,
         source: SourceKind::Link,
         options: SourceOptions::default(),
+        allowed_origins: Vec::new(),
         verbose: false,
     })
     .unwrap();
@@ -278,6 +285,93 @@ fn unavailable_source_still_serves_with_an_error_status() {
     let (t, _) = c.next_of("timeline", Duration::from_secs(2)).unwrap();
     assert_eq!(t["locked"], false);
     srv.stop();
+}
+
+/// A page from another origin (any site open on the DJ laptop) must not
+/// be able to drive the bridge: its WebSocket is closed with 1008 and a
+/// reason before any clock data, and its follow command never arrives.
+/// The app the bridge serves, local pages and non-browser clients work.
+#[test]
+fn foreign_page_origins_are_refused() {
+    let srv = server(None);
+    let addr = srv.local_addr();
+    let host = addr.to_string();
+
+    let mut foreign = Client::connect_with(addr, &host, "Origin: https://elsewhere.example\r\n");
+    let f = foreign
+        .next_frame(Duration::from_secs(2))
+        .expect("a close frame");
+    assert_eq!(f.opcode, Opcode::Close);
+    assert_eq!(u16::from_be_bytes([f.payload[0], f.payload[1]]), 1008);
+    assert!(String::from_utf8_lossy(&f.payload[2..]).contains("--allow-origin"));
+    let _ = foreign.stream.write_all(&ws::client_frame(
+        Opcode::Text,
+        true,
+        br#"{"type":"ping","id":1,"client_ms":0}"#,
+        [1, 2, 3, 4],
+    ));
+    assert!(foreign.next_frame(Duration::from_millis(300)).is_none());
+
+    // DNS rebinding: Origin and Host agree, but the name is public.
+    let mut rebound = Client::connect_with(
+        addr,
+        "rebound.elsewhere.example:17505",
+        "Origin: http://rebound.elsewhere.example:17505\r\n",
+    );
+    assert_eq!(
+        rebound.next_frame(Duration::from_secs(2)).unwrap().opcode,
+        Opcode::Close
+    );
+
+    // The bridge's own page, and a page on localhost (a dev server).
+    for origin in [
+        format!("http://{host}"),
+        "http://localhost:5173".to_string(),
+    ] {
+        let mut ok = Client::connect_with(addr, &host, &format!("Origin: {origin}\r\n"));
+        assert!(
+            ok.next_of("hello", Duration::from_secs(2)).is_some(),
+            "{origin}"
+        );
+        assert!(ok.next_of("timeline", Duration::from_secs(2)).is_some());
+    }
+    srv.stop();
+
+    // --allow-origin lets a hosted copy of the app in.
+    let srv = start(Config {
+        bind: "127.0.0.1".parse().unwrap(),
+        port: 0,
+        web: None,
+        source: SourceKind::Sim,
+        options: SourceOptions::default(),
+        allowed_origins: vec!["https://player5.example".into()],
+        verbose: false,
+    })
+    .unwrap();
+    let addr = srv.local_addr();
+    let mut hosted = Client::connect_with(
+        addr,
+        &addr.to_string(),
+        "Origin: https://player5.example\r\n",
+    );
+    assert!(hosted.next_of("hello", Duration::from_secs(2)).is_some());
+    srv.stop();
+}
+
+/// The served app may not be framed by other pages (clickjacking the
+/// follow menu would bypass the origin check).
+#[test]
+fn static_files_refuse_framing() {
+    let dir = std::env::temp_dir().join(format!("p5-bridge-frame-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.html"), "<p>app</p>").unwrap();
+    let srv = server(Some(dir.clone()));
+    let (status, head, _) = http_get(srv.local_addr(), "/");
+    assert_eq!(status, 200);
+    assert!(head.contains("frame-ancestors 'self'"), "{head}");
+    assert!(head.contains("X-Frame-Options: SAMEORIGIN"), "{head}");
+    srv.stop();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -316,6 +410,7 @@ fn follows_pro_dj_link_beat_packets() {
             prolink_port_base: Some(base),
             ..SourceOptions::default()
         },
+        allowed_origins: Vec::new(),
         verbose: false,
     })
     .unwrap();
