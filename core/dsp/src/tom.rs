@@ -366,7 +366,10 @@ impl Voice for Tom {
 
         // Attack: enveloped white noise through the low-pass.
         let noise = if self.noise_env > 0.0 {
-            let n = self.noise_lp.process(self.noise.tick() * self.noise_env).low;
+            let n = self
+                .noise_lp
+                .process(self.noise.tick() * self.noise_env)
+                .low;
             self.noise_env *= self.noise_coef;
             if self.noise_env < NOISE_OFF {
                 self.noise_env = 0.0;
@@ -631,7 +634,10 @@ mod tests {
                 energy(&out[4_800..7_200])
             };
             let (short, mid, long) = (tail(0.0), tail(0.5), tail(1.0));
-            assert!(long > mid * 4.0 && mid > short * 4.0, "{short} {mid} {long}");
+            assert!(
+                long > mid * 4.0 && mid > short * 4.0,
+                "{short} {mid} {long}"
+            );
 
             // In the linear tail the envelope falls at the nominal rate.
             let sr = 48_000.0;
@@ -935,7 +941,10 @@ mod tests {
             }
             let elapsed = start.elapsed();
             assert!(acc.is_finite() && acc > 0.0);
-            assert!(elapsed.as_millis() < 100, "{range:?}: 10 s took {elapsed:?}");
+            assert!(
+                elapsed.as_millis() < 100,
+                "{range:?}: 10 s took {elapsed:?}"
+            );
         }
     }
 
