@@ -51,8 +51,8 @@ alpha-beta tracker (a second-order loop: proportional and integral):
 - `Δ` for the gains is the running mean of *previous* spacings, not this
   report's own spacing. A late-stamped report has a longer spacing; using
   it would weight late reports more and bias the estimate late by about
-  `rate · jitter² / spacing` (27 ms at Opus-Quad noise levels in
-  simulation, gone with the running mean).
+  `rate · jitter² / spacing` (about 25 ms at Opus-Quad noise levels in
+  simulation, as that estimate predicts; gone with the running mean).
 - Sources that report no tempo: right after a snap the tempo is taken from
   the phase advance since the snap, and then the integral path refines
   `bpm` itself (not `drift`; two integrators would split one error).
@@ -94,7 +94,7 @@ without it, while a strong integral rings for seconds after a nudge.
 `Coarse` trusts the tempo almost completely, averages phase over tens of
 beats behind a wide deadband, and slews at most 1 %. `Jittery` (MIDI)
 averages many reports per beat; its integral is the strongest of the noisy
-ones because MIDI's own tempo estimate lags a pitch-fader move. Jump
+ones because MIDI's own tempo estimate can lag a pitch-fader move. Jump
 thresholds sit well above each source's noise (thresholds are capped at
 0.45 of the phase modulus).
 
@@ -107,7 +107,8 @@ Measured in `core/sync/src/follower.rs` tests (seeded jitter, 124 BPM,
   nudge is under 5 ms within 2.5 beats; +6 BPM over 4 s tracked within
   4 ms.
 - `Coarse`, ±200 ms: < 100 ms from the first lock, < 50 ms after a minute,
-  ≈ 10 ms rms; never a jump after lock; slew never beyond 1 %.
+  < 25 ms rms (≈ 10 ms in the tuning report); never a jump after lock;
+  slew never beyond 1 %.
 - `Jittery`, 24 ppqn ±1 ms: < 1 ms worst, < 0.5 ms rms; ramps within
   1.5 ms.
 

@@ -188,7 +188,7 @@ fn run(src: Source) -> Outcome {
     // The source has been playing for a while: arbitrary phase at sample 0.
     let mut beat: f64 = 13.37;
     let mut truth = vec![beat];
-    let mut pending: Vec<(f64, Event)> = Vec::new();
+    let mut pending: Vec<(f64, Report)> = Vec::new();
     // Reports are counted in integers (beats, or MIDI pulses) so the song
     // start falls exactly on a pulse.
     let per_beat = match src.feed {
@@ -216,7 +216,7 @@ fn run(src: Source) -> Outcome {
             let sample = at + rng.sym(src.jitter_s) * SR;
             let latency = (0.002 + 0.004 * rng.unit()) * SR;
             let event = match src.feed {
-                Feed::Beats => Event::Obs(Observation {
+                Feed::Beats => Report::Obs(Observation {
                     sample,
                     phase: Phase::Bar(next_report.rem_euclid(4.0)),
                     bpm: Some(src.reported_bpm(at / SR)),
@@ -224,9 +224,9 @@ fn run(src: Source) -> Outcome {
                 Feed::Midi => {
                     if next_index == origin_index {
                         let start = at - 0.001 * SR;
-                        pending.push((start, Event::Midi(MidiMessage::Start, start)));
+                        pending.push((start, Report::Midi(MidiMessage::Start, start)));
                     }
-                    Event::Midi(MidiMessage::Clock, sample)
+                    Report::Midi(MidiMessage::Clock, sample)
                 }
             };
             pending.push((at.max(sample) + latency, event));
@@ -246,8 +246,8 @@ fn run(src: Source) -> Outcome {
         pending.sort_by(|a, b| a.0.total_cmp(&b.0));
         while pending.first().is_some_and(|(due, _)| *due <= now as f64) {
             match pending.remove(0).1 {
-                Event::Obs(obs) => rig.control.observe(&obs, now),
-                Event::Midi(m, s) => rig.control.midi(m, s, now),
+                Report::Obs(obs) => rig.control.observe(&obs, now),
+                Report::Midi(m, s) => rig.control.midi(m, s, now),
             }
         }
         if start.is_none() && t >= src.start_s {
@@ -273,7 +273,8 @@ fn run(src: Source) -> Outcome {
     }
 }
 
-enum Event {
+/// Something the simulated source delivers.
+enum Report {
     Obs(Observation),
     Midi(MidiMessage, f64),
 }
