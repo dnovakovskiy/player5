@@ -22,6 +22,11 @@ pub const PPQN: u32 = 24;
 /// follower's phase loop absorbs that.
 const WINDOW: usize = 4 * PPQN as usize;
 
+/// How far (in standard deviations of the expected difference) the newest
+/// half-window's tempo must stray from the full window's before it counts
+/// as a tempo change in progress.
+const RAMP_SIGMAS: f64 = 4.0;
+
 /// Pulses needed before the first tempo report.
 const MIN_FIT: usize = 6;
 
@@ -70,11 +75,22 @@ pub struct MidiClockFollower {
     /// Pulses ever received (x axis of the tempo fit; never reset).
     index: u64,
     last_pulse: Option<f64>,
-    /// Ring of `(index, sample)` pairs used for the tempo fit.
-    fit: [(u64, f64); WINDOW],
+    /// Ring of pulses used for the tempo fit.
+    fit: [Point; WINDOW],
     len: usize,
     head: usize,
     rejected: u32,
+    /// Run number for new points: Start and Continue begin a new run,
+    /// because a source may restart its clock's phase there.
+    run: u32,
+}
+
+/// One pulse in the tempo fit.
+#[derive(Clone, Copy, Debug, Default)]
+struct Point {
+    index: u64,
+    sample: f64,
+    run: u32,
 }
 
 impl MidiClockFollower {
@@ -87,10 +103,11 @@ impl MidiClockFollower {
             pulses: 0,
             index: 0,
             last_pulse: None,
-            fit: [(0, 0.0); WINDOW],
+            fit: [Point::default(); WINDOW],
             len: 0,
             head: 0,
             rejected: 0,
+            run: 0,
         }
     }
 
@@ -119,10 +136,12 @@ impl MidiClockFollower {
             MidiMessage::Start => {
                 self.running = true;
                 self.pulses = 0;
+                self.run = self.run.wrapping_add(1);
                 None
             }
             MidiMessage::Continue => {
                 self.running = true;
+                self.run = self.run.wrapping_add(1);
                 None
             }
             MidiMessage::Stop => {
@@ -177,7 +196,8 @@ impl MidiClockFollower {
             }
         }
         if self.len >= MIN_FIT {
-            if let (Some(period), Some(predicted)) = (self.period(), self.predict(index)) {
+            if let (Some(period), Some(predicted)) = (self.period(), self.predict(index, self.run))
+            {
                 if (sample - predicted).abs() > OUTLIER_FRACTION * period {
                     self.rejected += 1;
                     if self.rejected < MAX_REJECTED {
@@ -189,7 +209,11 @@ impl MidiClockFollower {
             }
         }
         self.rejected = 0;
-        self.fit[self.head] = (index, sample);
+        self.fit[self.head] = Point {
+            index,
+            sample,
+            run: self.run,
+        };
         self.head = (self.head + 1) % WINDOW;
         self.len = (self.len + 1).min(WINDOW);
         true
@@ -200,48 +224,148 @@ impl MidiClockFollower {
         self.rejected = 0;
     }
 
-    fn points(&self) -> impl Iterator<Item = (u64, f64)> + '_ {
-        let start = (self.head + WINDOW - self.len) % WINDOW;
-        (0..self.len).map(move |i| self.fit[(start + i) % WINDOW])
+    /// The newest `count` points of the fit window, oldest first.
+    fn points(&self, count: usize) -> impl Iterator<Item = Point> + '_ {
+        let count = count.min(self.len);
+        let start = (self.head + WINDOW - count) % WINDOW;
+        (0..count).map(move |i| self.fit[(start + i) % WINDOW])
     }
 
-    /// Least-squares line `sample = a + b * index` over the window, centred
-    /// on the newest point for precision: `(newest index, a, b)`.
-    fn line(&self) -> Option<(u64, f64, f64)> {
-        if self.len < MIN_FIT {
+    /// Least-squares fit `sample = a_run + b * index` over the newest
+    /// `count` points: one slope (the period) shared by every run, one
+    /// intercept per run, so a phase restart at Start does not bend the
+    /// tempo. Coordinates are relative to the newest point for precision.
+    fn line(&self, count: usize) -> Option<Line> {
+        let count = count.min(self.len);
+        if count < MIN_FIT {
             return None;
         }
-        let (i0, s0) = self.fit[(self.head + WINDOW - 1) % WINDOW];
-        let n = self.len as f64;
-        let (mut sx, mut sy) = (0.0, 0.0);
-        for (i, s) in self.points() {
-            sx += i as f64 - i0 as f64;
-            sy += s - s0;
+        let newest = self.fit[(self.head + WINDOW - 1) % WINDOW];
+        // Pooled within-run sums; runs are contiguous in time.
+        let mut pooled = Pooled::default();
+        let mut run = RunSums::default();
+        let mut current = None;
+        for p in self.points(count) {
+            if current != Some(p.run) {
+                pooled.add(&run);
+                run = RunSums::default();
+                current = Some(p.run);
+            }
+            run.add(
+                p.index as f64 - newest.index as f64,
+                p.sample - newest.sample,
+            );
         }
-        let (mx, my) = (sx / n, sy / n);
-        let (mut sxx, mut sxy) = (0.0, 0.0);
-        for (i, s) in self.points() {
-            let dx = i as f64 - i0 as f64 - mx;
-            sxx += dx * dx;
-            sxy += dx * (s - s0 - my);
-        }
-        if sxx <= 0.0 {
+        pooled.add(&run);
+        if pooled.sxx <= 0.0 {
             return None;
         }
-        let b = sxy / sxx;
-        let a = s0 + my - b * mx;
-        Some((i0, a, b))
+        let b = pooled.sxy / pooled.sxx;
+        // `run` is the newest run: its own intercept.
+        let a = (run.sy - b * run.sx) / run.n;
+        Some(Line {
+            newest: newest.index,
+            origin: newest.sample,
+            run: newest.run,
+            a,
+            b,
+            rss: (pooled.syy - b * pooled.sxy).max(0.0),
+            n: count,
+            runs: pooled.runs,
+        })
     }
 
-    /// Fitted samples per pulse.
+    /// Samples per pulse now. Normally the full-window slope; but that is
+    /// the period half a window ago, so while the tempo is moving (the
+    /// newest half of the window disagrees with the whole by more than the
+    /// fit's own jitter explains) the trend is extrapolated to the newest
+    /// pulse instead.
     fn period(&self) -> Option<f64> {
-        self.line().map(|(_, _, b)| b).filter(|b| *b > 0.0)
+        let full = self.line(WINDOW)?;
+        let mut period = full.b;
+        if full.n == WINDOW {
+            if let Some(half) = self.line(WINDOW / 2) {
+                // Slope variance of an n-point fit with unit jitter.
+                let var = |n: f64| 12.0 / (n * (n * n - 1.0));
+                // Timestamps are whole samples at best.
+                let dof = (full.n - full.runs - 1).max(1) as f64;
+                let jitter = (full.rss / dof).sqrt().max(0.5);
+                let spread = jitter * (var(half.n as f64) - var(full.n as f64)).sqrt();
+                if (half.b - full.b).abs() > RAMP_SIGMAS * spread {
+                    // Centres lag the newest pulse by n/2: extrapolate the
+                    // half-window slope by its distance to the full one's.
+                    period = 2.0 * half.b - full.b;
+                }
+            }
+        }
+        (period > 0.0).then_some(period)
     }
 
-    fn predict(&self, index: u64) -> Option<f64> {
-        self.line()
-            .map(|(i0, a, b)| a + b * (index as f64 - i0 as f64))
+    /// Where pulse `index` of run `run` should land; `None` for a run the
+    /// fit has not seen yet (its phase is unknown).
+    fn predict(&self, index: u64, run: u32) -> Option<f64> {
+        self.line(WINDOW)
+            .filter(|l| l.run == run)
+            .map(|l| l.origin + l.a + l.b * (index as f64 - l.newest as f64))
     }
+}
+
+/// Sums over one run of the pooled fit.
+#[derive(Clone, Copy, Debug, Default)]
+struct RunSums {
+    n: f64,
+    sx: f64,
+    sy: f64,
+    sxx: f64,
+    sxy: f64,
+    syy: f64,
+}
+
+impl RunSums {
+    fn add(&mut self, x: f64, y: f64) {
+        self.n += 1.0;
+        self.sx += x;
+        self.sy += y;
+        self.sxx += x * x;
+        self.sxy += x * y;
+        self.syy += y * y;
+    }
+}
+
+/// Within-run (co)variances pooled over runs.
+#[derive(Clone, Copy, Debug, Default)]
+struct Pooled {
+    sxx: f64,
+    sxy: f64,
+    syy: f64,
+    runs: usize,
+}
+
+impl Pooled {
+    /// Adds a run's deviations from its own means.
+    fn add(&mut self, run: &RunSums) {
+        if run.n > 0.0 {
+            self.sxx += run.sxx - run.sx * run.sx / run.n;
+            self.sxy += run.sxy - run.sx * run.sy / run.n;
+            self.syy += run.syy - run.sy * run.sy / run.n;
+            self.runs += 1;
+        }
+    }
+}
+
+/// A least-squares fit of pulse time against pulse index.
+#[derive(Clone, Copy, Debug)]
+struct Line {
+    /// Index and sample of the newest point (the coordinate origin).
+    newest: u64,
+    origin: f64,
+    /// Run of the newest point; `a` is that run's intercept.
+    run: u32,
+    a: f64,
+    b: f64,
+    rss: f64,
+    n: usize,
+    runs: usize,
 }
 
 #[cfg(test)]
@@ -421,6 +545,52 @@ mod tests {
             m.handle(MidiMessage::Clock, t);
         }
         assert!((m.tempo_bpm().unwrap() - 240.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_clock_restarted_at_start_keeps_its_tempo() {
+        let mut m = MidiClockFollower::new(SR);
+        let mut t = 0.0;
+        for _ in 0..96 {
+            m.handle(MidiMessage::Clock, t);
+            t += 1_000.0;
+        }
+        // The source restarts its clock phase at Start: the first pulse
+        // comes 333 samples off the old grid. Not an outlier, not a ramp.
+        m.handle(MidiMessage::Start, t - 500.0);
+        t += 333.0;
+        for k in 0..60 {
+            let obs = m.handle(MidiMessage::Clock, t).expect("every pulse reports");
+            assert!((obs.bpm.unwrap() - 120.0).abs() < 1e-6, "pulse {k}: {obs:?}");
+            t += 1_000.0;
+        }
+    }
+
+    #[test]
+    fn a_pitch_fader_move_is_tracked_without_window_lag() {
+        // 120 -> 126 BPM over four seconds, ±1 ms jitter.
+        let mut rng = Rng(0x5EED);
+        let mut m = MidiClockFollower::new(SR);
+        m.handle(MidiMessage::Start, 0.0);
+        let (mut t, mut worst, mut inside) = (0.0, 0.0f64, 0.0f64);
+        while t < 9.0 * SR {
+            let bpm = 120.0 + 6.0 * ((t / SR - 2.0) / 4.0).clamp(0.0, 1.0);
+            t += pulse_samples(bpm);
+            let obs = m.handle(MidiMessage::Clock, t + rng.sym(0.001) * SR);
+            if t < SR {
+                continue; // the first beats are the fit warming up
+            }
+            let err = (obs.unwrap().bpm.unwrap() - bpm).abs();
+            worst = worst.max(err);
+            if t > 3.0 * SR && t < 6.0 * SR {
+                inside = inside.max(err);
+            }
+        }
+        // A plain four-beat fit lags two beats, about 1.5 BPM here, for the
+        // whole move. Extrapolating the trend removes that lag inside the
+        // move; only its kinks (start and end) cost a brief error.
+        assert!(inside < 0.3, "{inside:.3} BPM");
+        assert!(worst < 1.0, "{worst:.3} BPM");
     }
 
     #[test]

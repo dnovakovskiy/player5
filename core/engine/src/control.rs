@@ -363,9 +363,12 @@ impl Control {
     }
 
     /// [`Control::realign`] after a follower snap, where both timelines are
-    /// known: steps the old timeline already played (stamped before `now`)
-    /// are never scheduled again, and a step the jump left just behind
-    /// `now` (within [`SNAP_GRACE_S`]) is played late instead of skipped.
+    /// known. Nothing is heard twice: no step the old timeline already
+    /// played (stamped before `now`) is scheduled again, and nothing lands
+    /// within half a step after the last step already heard (a forward jump
+    /// of a whole number of steps renumbers that same musical step). Within
+    /// those limits a step the jump left just behind `now` (by up to
+    /// [`SNAP_GRACE_S`]) is played late instead of skipped.
     fn realign_after_snap(&mut self, now: u64, before: &FollowerClock) {
         if !self.scheduler.is_playing() {
             return;
@@ -377,10 +380,17 @@ impl Control {
             .first_step_at_or_after(&old, now)
             .min(self.scheduler.next_step());
         let grace = (SNAP_GRACE_S * f64::from(self.sample_rate)).round() as u64;
+        let mut from = now.saturating_sub(grace);
+        if let Some(last) = unplayed.checked_sub(1) {
+            let beat = self.scheduler.pattern().step_beat(last);
+            let heard = old.sample_at_beat(beat);
+            let half_step = 0.5 * sequencer::BEATS_PER_STEP * self.follower.samples_per_beat();
+            from = from.max((heard + half_step).ceil().max(0.0) as u64);
+        }
         let new = AdjustedClock::new(&self.follower, self.controls);
         let step = self
             .scheduler
-            .first_step_at_or_after(&new, now.saturating_sub(grace))
+            .first_step_at_or_after(&new, from)
             .max(unplayed);
         self.scheduler.start_at(step);
     }
@@ -652,5 +662,149 @@ mod tests {
         assert!((ctl.nudge_ms() - 10.0).abs() < 1e-9);
         // 10 ms at 120 BPM = 0.02 beats.
         assert!((ctl.clock_controls().nudge_beats - 0.02).abs() < 1e-12);
+    }
+
+    fn sixteenths() -> Pattern {
+        let mut p = Pattern::empty();
+        *p.track_mut(VoiceId::ClosedHat) = Track::parse("xxxx xxxx xxxx xxxx").unwrap();
+        p
+    }
+
+    fn bar_obs(sample: f64, beat: f64, bpm: f64) -> Observation {
+        Observation {
+            sample,
+            phase: Phase::Bar(beat.rem_euclid(4.0)),
+            bpm: Some(bpm),
+        }
+    }
+
+    fn trigger_samples(events: &[Event]) -> Vec<u64> {
+        events
+            .iter()
+            .filter(|e| matches!(e.kind, EventKind::Trigger { .. }))
+            .map(|e| e.sample)
+            .collect()
+    }
+
+    #[test]
+    fn mode_switches_are_continuous() {
+        let (mut ctl, _c) = control();
+        ctl.set_tempo(126.0, 0);
+        let before = ctl.beat_at(50_000);
+        ctl.set_clock_mode(ClockMode::Follow(Precision::Fine), 50_000);
+        assert!((ctl.beat_at(50_000) - before).abs() < 1e-9);
+        assert!((ctl.tempo() - 126.0).abs() < 1e-9);
+        // Lock, then switch precision: same follower, still locked.
+        ctl.observe(&bar_obs(60_000.0, 3.0, 128.0), 60_000);
+        assert!(ctl.is_locked());
+        let before = ctl.beat_at(70_000);
+        ctl.set_clock_mode(ClockMode::Follow(Precision::Exact), 70_000);
+        assert!(ctl.is_locked());
+        assert!((ctl.beat_at(70_000) - before).abs() < 1e-9);
+        // And back to the internal clock at the followed tempo.
+        let before = ctl.beat_at(80_000);
+        ctl.set_clock_mode(ClockMode::Internal, 80_000);
+        assert!((ctl.beat_at(80_000) - before).abs() < 1e-9);
+        assert!((ctl.tempo() - 128.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn small_corrections_never_flush() {
+        let (mut ctl, mut c) = control();
+        ctl.set_pattern(sixteenths());
+        ctl.set_clock_mode(ClockMode::Follow(Precision::Fine), 0);
+        ctl.observe(&bar_obs(0.0, 0.0, 120.0), 0);
+        ctl.start(0);
+        let mut now = 0u64;
+        // A source 0.3 % fast with 1 ms of alternating jitter.
+        for k in 1..40u32 {
+            let jitter = if k % 2 == 0 { 48.0 } else { -48.0 };
+            let at = f64::from(k) * 24_000.0 / 1.003 + jitter;
+            while (now as f64) < at + 100.0 {
+                ctl.tick(now);
+                now += 256;
+            }
+            ctl.observe(&bar_obs(at, f64::from(k), 120.0 * 1.003), now);
+        }
+        let events = drain(&mut c);
+        assert!(events.iter().all(|e| !matches!(e.kind, EventKind::Flush)));
+        let samples = trigger_samples(&events);
+        assert!(samples.windows(2).all(|w| w[1] > w[0]), "strictly increasing");
+        assert_eq!(samples.len() as u64, ctl.scheduler().next_step());
+    }
+
+    #[test]
+    fn a_snap_flushes_and_never_replays_a_step() {
+        let (mut ctl, mut c) = control();
+        ctl.set_pattern(sixteenths());
+        ctl.set_clock_mode(ClockMode::Follow(Precision::Fine), 0);
+        ctl.observe(&bar_obs(0.0, 0.0, 120.0), 0);
+        ctl.start(0);
+        ctl.tick(0);
+        let first = trigger_samples(&drain(&mut c));
+        assert_eq!(first, vec![0]);
+        // Resync to a source 40 ms behind us (our step at 6 000 has played
+        // when the snap arrives at 7 000; on the new grid it would be at
+        // 7 920).
+        ctl.tick(6_000);
+        drain(&mut c);
+        ctl.resync(7_000);
+        ctl.observe(&bar_obs(1_920.0, 0.0, 120.0), 7_000);
+        ctl.tick(7_000);
+        ctl.tick(10_000);
+        let events = drain(&mut c);
+        assert!(matches!(events[0].kind, EventKind::Flush));
+        assert_eq!(events[0].sample, 7_000);
+        let samples = trigger_samples(&events);
+        // Step 1 is not played again; step 2 lands on the new grid.
+        assert_eq!(samples, vec![1_920 + 12_000]);
+    }
+
+    #[test]
+    fn a_forward_snap_plays_a_just_missed_step_late() {
+        let (mut ctl, mut c) = control();
+        ctl.set_pattern(sixteenths());
+        ctl.set_clock_mode(ClockMode::Follow(Precision::Fine), 0);
+        ctl.observe(&bar_obs(0.0, 0.0, 120.0), 0);
+        ctl.start(0);
+        ctl.tick(0);
+        drain(&mut c);
+        // At 5 000 the source turns out to be 31 ms ahead: step 1, at 6 000
+        // on the old grid, is at 4 480 on the new one, already behind us.
+        ctl.resync(5_000);
+        ctl.observe(&bar_obs(5_000.0, 0.25 + 520.0 / 24_000.0, 120.0), 5_000);
+        ctl.tick(5_000);
+        let samples = trigger_samples(&drain(&mut c));
+        assert_eq!(samples, vec![4_480], "played 520 samples late, not skipped");
+        ctl.tick(6_000);
+        assert_eq!(trigger_samples(&drain(&mut c)), vec![10_480]);
+    }
+
+    #[test]
+    fn midi_start_puts_the_downbeat_on_the_first_pulse() {
+        let (mut ctl, _c) = control();
+        ctl.set_clock_mode(ClockMode::Follow(Precision::Jittery), 0);
+        // Clock running while the source is stopped: tempo only.
+        let mut t = 0.0;
+        for _ in 0..100 {
+            ctl.midi(MidiMessage::Clock, t, t as u64);
+            ctl.tick(t as u64);
+            t += 1_000.0; // 120 BPM
+        }
+        assert!(ctl.is_locked());
+        assert!((ctl.tempo() - 120.0).abs() < 1e-6);
+        // Start, then the first pulse at a sample that is not on our grid.
+        let first = t + 333.0;
+        ctl.midi(MidiMessage::Start, first - 500.0, (first - 500.0) as u64);
+        for k in 0..48 {
+            let at = first + f64::from(k) * 1_000.0;
+            ctl.midi(MidiMessage::Clock, at, at as u64);
+            ctl.tick(at as u64);
+        }
+        let beat = ctl.beat_at(first as u64);
+        assert!(
+            (beat - beat.round()).abs() < 1e-3 && beat.round().rem_euclid(4.0) == 0.0,
+            "{beat}"
+        );
     }
 }

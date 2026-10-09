@@ -156,7 +156,7 @@ impl Precision {
                 max_drift: 0.02,
                 slew_tau: 0.5,
                 max_slew: 0.02,
-                deadband_s: 0.000_5,
+                deadband_s: 0.000_25,
                 jump_s: 0.040,
                 jump_hold_beats: 1.0,
                 jump_hold_obs: 12,
