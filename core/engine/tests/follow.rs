@@ -439,6 +439,27 @@ impl Outcome {
         }
     }
 
+    /// No silence: consecutive hat hits are never more than one and a half
+    /// steps apart (a realign may stretch one interval by up to half a
+    /// step so nothing doubles, never more), from the first hit on.
+    fn assert_no_dropout(&self) {
+        let step = 0.25 * 60.0 * SR / self.source_bpm;
+        let hats: Vec<u64> = self
+            .hits
+            .iter()
+            .filter(|(_, v)| *v == VoiceId::ClosedHat)
+            .map(|h| h.0)
+            .collect();
+        for w in hats.windows(2) {
+            assert!(
+                ((w[1] - w[0]) as f64) < 1.6 * step,
+                "silent for {:.0} ms at {:.3} s",
+                (w[1] - w[0]) as f64 * 1_000.0 / SR,
+                w[0] as f64 / SR
+            );
+        }
+    }
+
     /// Kicks fall on source downbeats (not a beat away): our bar is the
     /// source's bar. Timing accuracy is checked separately.
     fn assert_bars_aligned(&self) {
@@ -614,6 +635,7 @@ fn a_resync_storm_never_drops_or_doubles_a_step() {
         );
         out.assert_every_step_once(0);
         out.assert_no_double_in_time();
+        out.assert_no_dropout();
         out.assert_bars_aligned();
     }
 }
@@ -647,6 +669,9 @@ fn a_backward_cue_realigns_once_without_doubling() {
         let out = run(src);
         assert_eq!(out.flushes_after_start(), 1, "{by}: one snap for one jump");
         out.assert_no_double_in_time();
+        // The source replays what it jumped back over; so do we, rather
+        // than falling silent until our old position comes round again.
+        out.assert_no_dropout();
         let snap = *out.flushes.last().unwrap();
         let worst = out.max_error_after(snap as f64 / SR + 0.1);
         assert!(worst < 4.0, "{by}: {worst:.3} ms");

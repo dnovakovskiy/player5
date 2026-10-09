@@ -455,11 +455,15 @@ impl Control {
     }
 
     /// [`Control::realign`] after a follower snap. Nothing is heard twice:
-    /// no step already heard (queued before `now`) is scheduled again, and
-    /// nothing lands within half a step after the last step heard (a
-    /// forward jump of a whole number of steps renumbers that same musical
-    /// step). Within those limits a step the jump left just behind `now`
-    /// (by up to [`SNAP_GRACE_S`]) is played late instead of skipped.
+    /// the steps already heard (queued before `now`) stay as they were,
+    /// and nothing new lands within half a step after the last of them (a
+    /// small jump either way, or a forward jump of a whole number of steps,
+    /// would otherwise repeat that same musical moment). Within that limit
+    /// a step the jump left just behind `now` (by up to [`SNAP_GRACE_S`])
+    /// is played late instead of skipped, and after a jump back the new
+    /// timeline's steps play at once: the source replays what it jumped
+    /// back over, and so do we, instead of falling silent until our old
+    /// step number comes round again.
     ///
     /// What was heard comes from [`QueuedLog`], the samples steps were
     /// actually queued at: the follower re-plans its timeline at every
@@ -491,10 +495,11 @@ impl Control {
             unplayed = q.step;
         }
         if heard.is_none() && self.queued.len == QUEUED_MEMORY {
-            // Everything remembered is still ahead: estimate the boundary.
+            // Everything remembered is still ahead: estimate the last step
+            // heard from the old timeline.
             let old = AdjustedClock::new(before, self.controls);
-            unplayed = unplayed.min(self.scheduler.first_step_at_or_after(&old, commit));
-            if let Some(last) = unplayed.checked_sub(1) {
+            let first_unplayed = unplayed.min(self.scheduler.first_step_at_or_after(&old, commit));
+            if let Some(last) = first_unplayed.checked_sub(1) {
                 heard = Some(old.sample_at_beat(self.scheduler.pattern().step_beat(last)));
             }
         }
@@ -506,10 +511,7 @@ impl Control {
             from = from.max((heard + half_step).ceil().max(0.0) as u64);
         }
         let new = AdjustedClock::new(&self.follower, self.controls);
-        let step = self
-            .scheduler
-            .first_step_at_or_after(&new, from)
-            .max(unplayed);
+        let step = self.scheduler.first_step_at_or_after(&new, from);
         self.scheduler.start_at(step);
     }
 

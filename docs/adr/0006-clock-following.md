@@ -155,12 +155,15 @@ tempo without slewing.
 - `Control` remembers the sample each recently scheduled step was queued
   at. When a report snaps, it pushes a `Flush` at the *commit point* and
   restarts the scheduler at the first step of the new timeline at or after
-  the commit point − 20 ms, but never at a step queued before the commit
-  point (those were heard), and never within half a step after the last
-  step heard (a forward jump of a whole number of steps renumbers that same
-  musical step). So nothing plays twice, and a step a forward jump left
-  just behind (the downbeat after a MIDI Start) plays 20 ms late at most
-  rather than not at all. "Heard" is judged from the queued samples, not
+  the commit point − 20 ms, but never within half a step after the last
+  step heard (a small jump either way, or a forward jump of a whole number
+  of steps, would otherwise repeat that same musical moment). Steps queued
+  before the commit point were heard and stay. So nothing plays twice, a
+  step a forward jump left just behind (the downbeat after a MIDI Start)
+  plays 20 ms late at most rather than not at all, and after a jump back
+  the step numbers follow the source back (it replays what it jumped over,
+  and so do we) instead of the pattern falling silent until our old step
+  number comes round again. "Heard" is judged from the queued samples, not
   from a timeline: the follower re-plans its timeline at every report, so
   even the pre-snap timeline can put an already-queued step on the other
   side of `now`.
