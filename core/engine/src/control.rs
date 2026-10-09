@@ -1462,4 +1462,34 @@ mod tests {
             assert_eq!(&hits[..5], &[0, 6_000, 9_984, 15_984, 21_984], "{hits:?}");
         }
     }
+
+    /// A restart between a queued step's grace note (heard) and its hit:
+    /// the old run's hit must not play after the new downbeat. (Deciding
+    /// "queued at or after the restart" by the grace note skipped the
+    /// flush altogether.)
+    #[test]
+    fn a_restart_between_grace_and_hit_drops_the_old_hit() {
+        for latency in [0.0, 7.5] {
+            let (mut ctl, mut c) = control();
+            ctl.set_pattern(flams());
+            ctl.set_latency_ms(latency);
+            ctl.start(0);
+            let mut events = Vec::new();
+            let mut now = 0;
+            while now < 30_000 {
+                if now == 4_992 {
+                    ctl.start(now);
+                }
+                ctl.tick(now);
+                events.extend(drain(&mut c));
+                now += 128;
+            }
+            let mains: Vec<u64> = heard_triggers(&events)
+                .iter()
+                .filter(|h| h.2 >= 0.65)
+                .map(|h| h.0)
+                .collect();
+            assert_eq!(&mains[..3], &[0, 4_992, 10_992], "{latency}: {mains:?}");
+        }
+    }
 }

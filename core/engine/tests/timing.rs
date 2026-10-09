@@ -543,27 +543,6 @@ fn check_follow(case: &FollowCase, run: &FollowRun) {
     // Nothing doubled or flammed in time, whatever happened.
     for w in hats.windows(2) {
         let d = (w[1].at - w[0].at) as f64;
-        if d <= 0.4 * min_step {
-            let a = w[0].at;
-            eprintln!(
-                "hats {:?}",
-                hats.iter()
-                    .filter(|h| h.at + 30_000 > a && h.at < a + 30_000)
-                    .map(|h| (
-                        h.stamp,
-                        h.at,
-                        (Truth::interp(&run.truth.beat, h.stamp) * 4.0)
-                    ))
-                    .collect::<Vec<_>>()
-            );
-            eprintln!(
-                "flushes {:?}",
-                run.flushes
-                    .iter()
-                    .filter(|&&f| f + 30_000 > a && f < a + 30_000)
-                    .collect::<Vec<_>>()
-            );
-        }
         assert!(
             d > 0.4 * min_step,
             "{what}: hats {d} samples apart at {:.3} s",
@@ -817,23 +796,6 @@ fn run_internal(split: bool, seed: u64) {
         assert!(!run.is_empty(), "{what}: run at {r} played nothing");
         for (k, h) in run.iter().enumerate() {
             let expected = r as f64 + k as f64 * step;
-            if (h.stamp as f64 - expected).abs() > 1.0 {
-                eprintln!("restarts {:?}", &restarts[i.saturating_sub(3)..i + 2]);
-                eprintln!(
-                    "stops {:?}",
-                    stops
-                        .iter()
-                        .filter(|&&s| s + 100_000 > r && s < r + 100_000)
-                        .collect::<Vec<_>>()
-                );
-                eprintln!(
-                    "hats {:?}",
-                    hats.iter()
-                        .filter(|h| h.stamp + 30_000 > r && h.stamp < r + 30_000)
-                        .map(|h| (h.stamp, h.at))
-                        .collect::<Vec<_>>()
-                );
-            }
             assert!(
                 (h.stamp as f64 - expected).abs() <= 1.0,
                 "{what}: run at {r} ({run_bpm:.2} BPM): hit {k} at {} not {expected:.1}",
