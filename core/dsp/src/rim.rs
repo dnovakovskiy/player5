@@ -36,9 +36,9 @@ const LOW_PING_HZ: f32 = 470.0;
 /// High ping frequency at `tune = 0.5`.
 const HIGH_PING_HZ: f32 = 1_660.0;
 /// Tune factor at `tune = 0` (½ octave down).
-const TUNE_LOW_FACTOR: f32 = 0.707_106_781;
+const TUNE_LOW_FACTOR: f32 = core::f32::consts::FRAC_1_SQRT_2;
 /// ln(2): `tune` spans one octave, ½ octave either side of the centre.
-const TUNE_LN_RATIO: f32 = 0.693_147_181;
+const TUNE_LN_RATIO: f32 = math::LN_2;
 
 /// Low-ping ring time (to −60 dB) at `decay = 0`.
 const DECAY_LOW_S: f32 = 0.022;
@@ -644,4 +644,3 @@ mod tests {
         assert!(elapsed.as_millis() < 100, "10 s took {elapsed:?}");
     }
 }
-
