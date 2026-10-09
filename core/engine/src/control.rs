@@ -18,6 +18,11 @@ pub const DEFAULT_LOOKAHEAD_SAMPLES: u64 = 4_800;
 /// skipped, e.g. the downbeat right after a MIDI Start. ADR-0006.
 const SNAP_GRACE_S: f64 = 0.02;
 
+/// Render blocks a realign keeps clear of when the control half runs on
+/// its own thread: the one the renderer is playing and, since the flush
+/// only reaches it at its next pull, the one it may start meanwhile.
+const COMMITTED_BLOCKS: u64 = 2;
+
 /// Steps remembered with the sample each was queued at. A 100 ms lookahead
 /// holds at most three steps even at the top tempo; the rest is margin for
 /// longer lookaheads.
@@ -142,6 +147,12 @@ pub struct Control {
     sent_limiter: bool,
     last_now: u64,
     queued: QueuedLog,
+    /// Newest render position seen in [`SharedTiming`].
+    published: u64,
+    /// Smallest step between two published render positions: the render
+    /// block (or more, if the control half looks less often). `0` until
+    /// two have been seen.
+    render_block: u64,
 }
 
 impl Control {
@@ -170,6 +181,8 @@ impl Control {
             sent_limiter: false,
             last_now: 0,
             queued: QueuedLog::new(),
+            published: 0,
+            render_block: 0,
         }
     }
 
@@ -317,17 +330,34 @@ impl Control {
     /// Starts playback at `now`. Internal clock: beat 0 and step 0 fall on
     /// `now`. Following: joins the external timeline in phase at the next
     /// step, so the pattern position matches the source's bar position.
+    ///
+    /// Following, a start shortly after a stop (or while playing) must not
+    /// replay what is still queued from before: those steps are flushed,
+    /// and the new run begins at least half a step after the last one
+    /// heard.
     pub fn start(&mut self, now: u64) {
-        self.queued.clear();
         match self.mode {
             ClockMode::Internal => {
+                self.queued.clear();
                 self.internal.reset(now as f64);
                 self.scheduler.start();
             }
             ClockMode::Follow(_) => {
+                let commit = self.commit_point(now);
+                if self.queued.len > 0 && self.queued.newest(0).sample >= commit {
+                    let _ = self.producer.push(Event::flush(commit));
+                }
+                let heard = self.last_heard_before(commit).map(|q| q.sample);
+                self.queued.flush_from(commit);
+                let mut from = now;
+                if let Some(heard) = heard {
+                    let half_step =
+                        0.5 * sequencer::BEATS_PER_STEP * self.follower.samples_per_beat();
+                    from = from.max((heard as f64 + half_step).ceil() as u64);
+                }
                 let active = self.active();
                 let clock = AdjustedClock::new(&active, self.controls);
-                let step = self.scheduler.first_step_at_or_after(&clock, now);
+                let step = self.scheduler.first_step_at_or_after(&clock, from);
                 self.scheduler.start_at(step);
             }
         }
@@ -436,18 +466,25 @@ impl Control {
     /// report, so by now even the pre-snap timeline (`before`) can put a
     /// queued step on the other side of `now`. `before` is only the
     /// fallback when the log does not reach back to `now`.
+    ///
+    /// "Already heard" means queued before the commit point
+    /// ([`Control::commit_point`]): `now` when control and render run in
+    /// lockstep, a little later when the renderer runs on its own thread
+    /// and may already be playing past `now`.
     fn realign_after_snap(&mut self, now: u64, before: &FollowerClock) {
         if !self.scheduler.is_playing() {
             return;
         }
-        let _ = self.producer.push(Event::flush(now));
-        // Walk back from the newest queued step: those at or after `now`
-        // were just flushed; the first one before `now` was the last heard.
+        let commit = self.commit_point(now);
+        let _ = self.producer.push(Event::flush(commit));
+        // Walk back from the newest queued step: those at or after the
+        // commit point were just flushed; the first one before it was the
+        // last heard.
         let mut unplayed = self.scheduler.next_step();
         let mut heard = None;
         for i in 0..self.queued.len {
             let q = self.queued.newest(i);
-            if q.sample < now {
+            if q.sample < commit {
                 heard = Some(q.sample as f64);
                 break;
             }
@@ -456,14 +493,14 @@ impl Control {
         if heard.is_none() && self.queued.len == QUEUED_MEMORY {
             // Everything remembered is still ahead: estimate the boundary.
             let old = AdjustedClock::new(before, self.controls);
-            unplayed = unplayed.min(self.scheduler.first_step_at_or_after(&old, now));
+            unplayed = unplayed.min(self.scheduler.first_step_at_or_after(&old, commit));
             if let Some(last) = unplayed.checked_sub(1) {
                 heard = Some(old.sample_at_beat(self.scheduler.pattern().step_beat(last)));
             }
         }
-        self.queued.flush_from(now);
+        self.queued.flush_from(commit);
         let grace = (SNAP_GRACE_S * f64::from(self.sample_rate)).round() as u64;
-        let mut from = now.saturating_sub(grace);
+        let mut from = commit.saturating_sub(grace);
         if let Some(heard) = heard {
             let half_step = 0.5 * sequencer::BEATS_PER_STEP * self.follower.samples_per_beat();
             from = from.max((heard + half_step).ceil().max(0.0) as u64);
@@ -474,6 +511,49 @@ impl Control {
             .first_step_at_or_after(&new, from)
             .max(unplayed);
         self.scheduler.start_at(step);
+    }
+
+    /// The newest queued step stamped before `sample`.
+    fn last_heard_before(&self, sample: u64) -> Option<Queued> {
+        (0..self.queued.len)
+            .map(|i| self.queued.newest(i))
+            .find(|q| q.sample < sample)
+    }
+
+    /// Learns the render block from the positions the renderer publishes.
+    fn note_render_position(&mut self) -> u64 {
+        let position = self.timing.read().position;
+        if position > self.published {
+            let block = position - self.published;
+            if self.published > 0 || self.render_block > 0 {
+                self.render_block = if self.render_block == 0 {
+                    block
+                } else {
+                    self.render_block.min(block)
+                };
+            }
+            self.published = position;
+        } else if position < self.published {
+            // The renderer was recreated or rewound.
+            self.published = position;
+        }
+        position
+    }
+
+    /// The first sample a flush issued at `now` can still take back. In
+    /// lockstep (`Engine::render`: tick, then render) the renderer has not
+    /// pulled anything past `now`, so that is `now`. With control and
+    /// render on separate threads, `now` is the renderer's published block
+    /// start: it has already pulled and is playing that block, and the
+    /// flush reaches it only at its next pull, so the steps up to
+    /// [`COMMITTED_BLOCKS`] blocks on are as good as heard.
+    fn commit_point(&mut self, now: u64) -> u64 {
+        let published = self.note_render_position();
+        if now > published {
+            return now;
+        }
+        let ahead = (COMMITTED_BLOCKS * self.render_block).min(self.lookahead / 2);
+        (published + ahead).max(now)
     }
 
     /// Queues a voice parameter change for sample `at`. Returns `false` if
@@ -589,6 +669,7 @@ impl Control {
     /// Returns the number of events pushed.
     pub fn tick(&mut self, now: u64) -> usize {
         self.last_now = now;
+        self.note_render_position();
         if matches!(self.mode, ClockMode::Follow(_)) {
             self.follower.advance(now as f64);
             if self.follower.take_discontinuity() {
@@ -973,5 +1054,41 @@ mod tests {
             (beat - beat.round()).abs() < 1e-3 && beat.round().rem_euclid(4.0) == 0.0,
             "{beat}"
         );
+    }
+
+    /// Following, stop and start again within the lookahead (or press
+    /// start while playing): the steps still queued from before must not
+    /// play on top of the new run's.
+    #[test]
+    fn a_quick_restart_while_following_never_doubles_a_step() {
+        for (stop_at, start_at) in [
+            (Some(10_000), 10_500),
+            (Some(10_000), 13_000),
+            (None, 10_000),
+        ] {
+            let (mut ctl, mut c) = control();
+            ctl.set_pattern(sixteenths());
+            ctl.set_clock_mode(ClockMode::Follow(Precision::Fine), 0);
+            ctl.observe(&bar_obs(0.0, 0.0, 120.0), 0);
+            ctl.start(0);
+            let mut events = Vec::new();
+            let mut now = 0;
+            while now < 40_000 {
+                if Some(now) == stop_at {
+                    ctl.stop();
+                }
+                if now == start_at {
+                    ctl.start(now);
+                }
+                ctl.tick(now);
+                events.extend(drain(&mut c));
+                now += 500;
+            }
+            let hits = heard(&events);
+            assert_eq!(hits.first(), Some(&0));
+            for w in hits.windows(2) {
+                assert_eq!(w[1] - w[0], 6_000, "{stop_at:?} {start_at}: {hits:?}");
+            }
+        }
     }
 }

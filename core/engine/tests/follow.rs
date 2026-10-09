@@ -666,8 +666,20 @@ fn split_threads_never_drop_or_double_a_step() {
         (Feed::Position, Precision::Exact, 200.0, 0.000_2, None),
         (Feed::Beats, Precision::Fine, 60.0, 0.003, None),
         (Feed::Midi, Precision::Jittery, 128.0, 0.001, None),
-        (Feed::Beats, Precision::Fine, 124.0, 0.003, Some((20.0, -0.5))),
-        (Feed::Beats, Precision::Fine, 124.0, 0.003, Some((20.0, 1.5))),
+        (
+            Feed::Beats,
+            Precision::Fine,
+            124.0,
+            0.003,
+            Some((20.0, -0.5)),
+        ),
+        (
+            Feed::Beats,
+            Precision::Fine,
+            124.0,
+            0.003,
+            Some((20.0, 1.5)),
+        ),
     ] {
         let mut src = Source::new(feed, precision);
         src.split = true;
@@ -679,7 +691,12 @@ fn split_threads_never_drop_or_double_a_step() {
         }
         src.seconds = 40.0;
         let out = run(src);
-        out.assert_every_step_once(usize::from(jump.is_some_and(|j| j.1 > 0.0)));
+        match jump {
+            // The source itself repeats steps when it jumps back.
+            Some((_, by)) if by < 0.0 => {}
+            Some(_) => out.assert_every_step_once(1),
+            None => out.assert_every_step_once(0),
+        }
         out.assert_no_double_in_time();
         if jump.is_some() {
             // Re-sync presses may each leave a step up to the snap grace

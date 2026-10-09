@@ -1573,7 +1573,6 @@ mod tests {
         }
     }
 
-
     #[test]
     #[ignore = "probe"]
     fn probe_jittery_nudge() {
