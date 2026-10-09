@@ -74,9 +74,16 @@ cannot change the session's tempo or grid.
 
 **What we do:** report `tempo()` as the observation's `bpm`.
 `LinkConfig::initial_bpm` only matters when no session exists, which is how
-TEMPO-2 works. `FollowerClock` accepts 20–400 BPM, so a session above
-400 BPM is clamped instead of being followed at a multiple. That part of
-TEMPO-4 is open.
+TEMPO-2 works. `FollowerClock` accepts 20–400 BPM
+(`FollowerClock::MAX_BPM`, exported as `link::MAX_FOLLOW_BPM`), so for
+TEMPO-4 a faster session is followed at half tempo (400–800 BPM) or
+quarter tempo (800–999 BPM): the reported `bpm` is the session tempo
+divided by 2 or 4, and the reported bar spans 2 or 4 session bars (see the
+next section for its phase). A `Status` says so whenever that divisor
+changes. Every Link tempo, 20–999 BPM, is then reported within 20–400.
+The network test of this (`follows_a_fast_session_at_half_tempo`) is
+`#[ignore]`d by default because it commits tempo changes, which would
+reach every Link app on the LAN; the arithmetic is tested offline.
 
 ## Quantum, beat and phase
 
@@ -101,7 +108,11 @@ TEMPO-4 is open.
 
 **What we do:** quantum 4, so the shared phase is the position in a 4-beat
 bar. The observation is
-`Phase::Bar(beatAtTime(t, 4).rem_euclid(4))`. `rem_euclid` handles negative
+`Phase::Bar(beatAtTime(t, 4).rem_euclid(4))`. When a fast session is
+followed at 1/k tempo (k = 2 or 4, see "Tempo"), the observation is
+`Phase::Bar((beatAtTime(t, 4k) / k).rem_euclid(4))`: the quantum is 4k
+because the phase with respect to whatever quantum is passed is the one
+all peers share, so the reported downbeat is a session downbeat. `rem_euclid` handles negative
 beats the way `phaseAtTime` does, and a result that rounds up to exactly
 4.0 becomes 0.0. Using Link as a sink for the booth clock (Pro DJ Link →
 Link via `forceBeatAtTime`) is possible but not built. It needs care: it
@@ -217,8 +228,8 @@ yet. Adding one is a separate change to `sync::net`.
 
 ## The `rusty_link` bindings
 
-- `rusty_link` wraps Ableton's official C wrapper `abl_link`, function for
-  function.
+- `rusty_link` wraps Ableton's official C wrapper `abl_link` and says it
+  sticks plainly to `abl_link`'s functionality.
   [README](https://docs.rs/crate/rusty_link/0.4.8/source/README.md)
 - It is licensed `GPL-2.0-or-later`, and its README says it has to be,
   because it builds Link.
@@ -235,7 +246,9 @@ yet. Adding one is a separate change to `sync::net`.
 - It uses Rust edition 2024, so building it needs Rust 1.85 or newer.
   [Cargo.toml](https://docs.rs/crate/rusty_link/0.4.8/source/Cargo.toml.orig)
 - 0.4.9 moves to Link 4.0.0b3, a beta.
-  [CHANGELOG](https://github.com/anzbert/rusty_link/blob/master/CHANGELOG.md#049)
+  [0.4.9 CHANGELOG](https://docs.rs/crate/rusty_link/0.4.9/source/CHANGELOG.md)
+  (read from the published 0.4.9 `.crate`; the CHANGELOG on the
+  repository's `master` branch had no 0.4.9 entry on 2026-10-09).
 - The `set_num_peers_callback`, `set_tempo_callback` and
   `set_start_stop_callback` methods pass `abl_link` a pointer to the
   closure argument, a local of the setter. The closure is dropped when the
@@ -287,14 +300,14 @@ should read "Ableton Link — Enabled/Disabled".
 |-------|------|---------|
 | `Status` | once at start | "Ableton Link enabled; N BPM until a session is joined" |
 | `Status` | peer count changed (and first poll) | "Ableton Link: no peers" / "1 peer" / "N peers" |
-| `Observation` | every poll (default 5 ms) | `host_ns`, `Phase::Bar(0..4)`, `bpm: Some(tempo)`, `Precision::Exact`, `device: None` |
+| `Status` | session crosses 400 or 800 BPM | "Ableton Link: session at X BPM; following at half/quarter tempo (Y BPM)", or "… following the session at full tempo" when it comes back |
+| `Observation` | every poll (default 5 ms) | `host_ns`, `Phase::Bar(0..4)`, `bpm: Some(tempo)` (÷2 or ÷4 above 400 BPM), `Precision::Exact`, `device: None` |
 
 `SourceCommand::Follow` is accepted and ignored: a Link session has no
 devices to choose between.
 
 ## Open items
 
-- TEMPO-4: follow sessions above 400 BPM at a sub-multiple.
 - Start/stop sync, once `SourceEvent` can carry transport state.
 - The bridge and FFI expose Link only through a feature that forwards
   `sync/ableton-link`; any such build is a GPL build (ADR-0005).
