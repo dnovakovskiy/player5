@@ -783,6 +783,78 @@ mod tests {
         assert_eq!(trigger_samples(&drain(&mut c)), vec![10_480]);
     }
 
+    /// What the renderer would play from `events`: triggers in order, with
+    /// every flush dropping the triggers at or after its sample.
+    fn heard(events: &[Event]) -> Vec<u64> {
+        let mut out: Vec<u64> = Vec::new();
+        for e in events {
+            match e.kind {
+                EventKind::Trigger { .. } => out.push(e.sample),
+                EventKind::Flush => out.retain(|&s| s < e.sample),
+                EventKind::Param { .. } => {}
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    /// A slew re-plans the timeline after a step was queued, then a resync
+    /// snaps: the realign must judge "already played" by where the step was
+    /// actually queued, not by where the re-planned timeline puts it now.
+    fn slew_then_snap(ahead_beats: f64, snap_at: u64) -> Vec<u64> {
+        let (mut ctl, mut c) = control();
+        ctl.set_pattern(sixteenths());
+        ctl.set_clock_mode(ClockMode::Follow(Precision::Fine), 0);
+        ctl.observe(&bar_obs(0.0, 0.0, 120.0), 0);
+        ctl.start(0);
+        let mut events = Vec::new();
+        ctl.tick(0);
+        // Queues step 1 at 6 000.
+        ctl.tick(1_300);
+        events.extend(drain(&mut c));
+        // The source is a little off: a slew, no snap.
+        let ours = ctl.follower_clock().beat_at_sample(1_300.0);
+        ctl.observe(&bar_obs(1_300.0, ours + ahead_beats, 120.0), 1_300);
+        events.extend(drain(&mut c));
+        assert!(events.iter().all(|e| !matches!(e.kind, EventKind::Flush)));
+        // A resync with a source right on our timeline: a (tiny) snap.
+        ctl.resync(snap_at);
+        let ours = ctl.follower_clock().beat_at_sample(snap_at as f64);
+        ctl.observe(&bar_obs(snap_at as f64, ours + 0.000_1, 120.0), snap_at);
+        let mut now = snap_at;
+        while now < 40_000 {
+            ctl.tick(now);
+            now += 128;
+        }
+        events.extend(drain(&mut c));
+        heard(&events)
+    }
+
+    fn assert_steady(hits: &[u64]) {
+        for w in hits.windows(2) {
+            let d = w[1] - w[0];
+            assert!((4_500..=7_500).contains(&d), "hits {hits:?}");
+        }
+    }
+
+    #[test]
+    fn a_snap_does_not_drop_a_step_a_slew_moved_earlier() {
+        // Step 1 was queued at 6 000; the slew moved it to about 5 830 on
+        // the current plan; the snap at 5 900 flushes the queued one.
+        let hits = slew_then_snap(0.04, 5_900);
+        assert_eq!(hits[0], 0);
+        assert_steady(&hits);
+    }
+
+    #[test]
+    fn a_snap_does_not_double_a_step_a_slew_moved_later() {
+        // Step 1 was queued (and played) at 6 000; the slew moved it to
+        // about 6 190 on the current plan; the snap comes at 6 100.
+        let hits = slew_then_snap(-0.04, 6_100);
+        assert_eq!(hits[0], 0);
+        assert_steady(&hits);
+    }
+
     #[test]
     fn midi_start_puts_the_downbeat_on_the_first_pulse() {
         let (mut ctl, _c) = control();

@@ -774,6 +774,12 @@ mod tests {
         start_offset: f64,
         /// Whether observations carry the tempo.
         reports_bpm: bool,
+        /// The source's true beat at sample 0 (negative: counting in).
+        source_start: f64,
+        /// `(period_s, length_s)`: delivery stalls for `length_s` at the
+        /// start of every `period_s` (a congested network); what was due
+        /// arrives in one burst when the stall ends.
+        stall: Option<(f64, f64)>,
         seed: u64,
     }
 
@@ -792,6 +798,8 @@ mod tests {
                 shift: None,
                 start_offset: 0.37,
                 reports_bpm: true,
+                source_start: 0.0,
+                stall: None,
                 seed: 0x9E37_79B9_7F4A_7C15,
             }
         }
@@ -860,8 +868,8 @@ mod tests {
         let _ = f.take_discontinuity();
         let modulus = if sc.kind == Kind::Bar { 4.0 } else { 1.0 };
         // True source beat at our sample `now`.
-        let mut beat = 0.0;
-        let mut next_obs = 0.0;
+        let mut beat = sc.source_start;
+        let mut next_obs = (sc.source_start / sc.every).ceil() * sc.every;
         let mut pending: Vec<(f64, Observation)> = Vec::new();
         let mut errors = Vec::new();
         let mut snaps = Vec::new();
@@ -891,7 +899,14 @@ mod tests {
                     phase,
                     bpm: sc.reports_bpm.then(|| sc.reported_bpm(at / SR)),
                 };
-                pending.push((at + sc.latency_s * SR, obs));
+                let mut due = at + sc.latency_s * SR;
+                if let Some((period, length)) = sc.stall {
+                    let phase = (due / SR).rem_euclid(period);
+                    if phase < length {
+                        due += (length - phase) * SR;
+                    }
+                }
+                pending.push((due, obs));
                 next_obs += sc.every;
             }
             beat = beat1;
@@ -1281,6 +1296,95 @@ mod tests {
         feed_perfect(&mut f, 4, 8);
         assert!(!f.take_discontinuity());
         assert!((f.beat_at_sample(100_000.0) - before).abs() < 1e-9);
+    }
+
+    #[test]
+    #[ignore = "exploration"]
+    fn explore_adversarial() {
+        type Edit = fn(&mut Scenario);
+        let edits: [(&str, Edit); 12] = [
+            ("steady", |_| {}),
+            ("60bpm", |sc| sc.bpm = 60.0),
+            ("200bpm", |sc| sc.bpm = 200.0),
+            ("ramp120-128/8s", |sc| {
+                sc.bpm = 120.0;
+                sc.ramp = Some((10.0, 18.0, 128.0));
+            }),
+            ("ramp128-120/8s", |sc| {
+                sc.bpm = 128.0;
+                sc.ramp = Some((10.0, 18.0, 120.0));
+            }),
+            ("stall300ms/2s", |sc| sc.stall = Some((2.0, 0.3))),
+            ("stall300ms/0.7s", |sc| sc.stall = Some((0.7, 0.3))),
+            ("half-beat", |sc| sc.shift = Some((10.0, 0.5))),
+            ("half-beat-Beat", |sc| {
+                sc.kind = Kind::Beat;
+                sc.shift = Some((10.0, 0.5));
+            }),
+            ("negative", |sc| sc.source_start = -7.3),
+            ("bar-wrap 2 beats", |sc| sc.shift = Some((10.0, 2.0))),
+            ("no-bpm 60", |sc| {
+                sc.reports_bpm = false;
+                sc.bpm = 60.0;
+            }),
+        ];
+        for p in [
+            Precision::Exact,
+            Precision::Fine,
+            Precision::Coarse,
+            Precision::Jittery,
+        ] {
+            for (name, edit) in edits {
+                let mut sc = typical(p);
+                edit(&mut sc);
+                let mut worst = [0.0f64; 4];
+                let mut snaps = (usize::MAX, 0);
+                let mut bpm_err: f64 = 0.0;
+                for r in seeds(sc) {
+                    worst[0] = worst[0].max(r.max_abs_error_between(3.0, 10.0));
+                    worst[1] = worst[1].max(r.max_abs_error_after(10.0));
+                    worst[2] = worst[2].max(r.max_abs_error_after(sc.seconds - 5.0));
+                    worst[3] = worst[3].max(r.max_rate_dev);
+                    snaps.0 = snaps.0.min(r.snaps.len());
+                    snaps.1 = snaps.1.max(r.snaps.len());
+                    let want = sc.reported_bpm(sc.seconds);
+                    bpm_err = bpm_err.max((r.follower.tempo_bpm() - want).abs());
+                }
+                println!(
+                    "{p:?} {name}: 3-10s {:.2} ms, after 10s {:.2} ms, end {:.2} ms, rate dev {:.4}, snaps {:?}, bpm err {:.4}",
+                    worst[0], worst[1], worst[2], worst[3], snaps, bpm_err
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "exploration"]
+    fn explore_no_bpm() {
+        let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
+        f.reset(0.0, 0.37);
+        let _ = f.take_discontinuity();
+        for k in 0..12u32 {
+            let s = f64::from(k) * 48_000.0 + 100.0;
+            f.observe(
+                &Observation {
+                    sample: s,
+                    phase: Phase::Bar(f64::from(k % 4)),
+                    bpm: None,
+                },
+                s + 96.0,
+            );
+            f.advance(s + 200.0);
+            println!(
+                "k {k}: bpm {:.4} snap {} ours {:.4} err {:.4} lock {:?} upd {}",
+                f.tempo_bpm(),
+                f.take_discontinuity(),
+                f.beat_at_sample(s),
+                f.phase_error(),
+                f.lock,
+                f.updates
+            );
+        }
     }
 
     // ---- tuning report (not a test) -----------------------------------------
