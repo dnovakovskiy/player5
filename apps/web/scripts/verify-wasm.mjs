@@ -30,7 +30,9 @@ function renderSpec(api, spec) {
   const r = spec.render ?? {};
   const bars = r.bars ?? 2;
   const sampleRate = r.sample_rate ?? 48000;
-  const tail = r.tail_seconds ?? 0.5;
+  // tail_seconds is an f32 in the Rust spec: widen the f32 value, like
+  // f64::from(tail_seconds) in PatternSpec::render_frames.
+  const tail = Math.fround(r.tail_seconds ?? 0.5);
   const blockSize = r.block_size ?? 256;
   const bpm = spec.bpm ?? 120;
   const beats = bars * STEP_COUNT * 0.25;

@@ -6,7 +6,9 @@ import { expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { expectPhoneLayout, expectPlayheadAdvances, guard, peakDb, play, step } from "./support/helpers";
+import { expectClean, expectPhoneLayout, expectPlayheadAdvances, guard, peakDb, play, step } from "./support/helpers";
+
+test.afterEach(({ page }) => expectClean(page));
 
 const FILE = join(import.meta.dirname, "../dist-single/player5.html");
 const CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'";
@@ -139,6 +141,47 @@ test("pattern code: Share exports it, Import (paste or link) brings it back", as
   await page.locator("#import").fill(`player5.example/#p=${code}`);
   await page.locator("#import").press("Enter");
   await expect(step(page, "rim", 3)).toHaveAttribute("data-state", "on");
+  expect(requests).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("inside a sandboxed iframe (opaque origin, strict CSP): plays, edits, shares", async ({ page }) => {
+  // The viewer case: no allow-same-origin, so localStorage and the
+  // clipboard throw; the page must not care.
+  const errors = guard(page);
+  const requests = recordRequests(page);
+  await page.setContent("<!doctype html><title>viewer</title><body style='margin:0'></body>");
+  await page.evaluate(
+    ({ source, csp }) => {
+      const frame = document.createElement("iframe");
+      frame.setAttribute("sandbox", "allow-scripts");
+      frame.setAttribute("allow", "autoplay");
+      frame.style.cssText = "width:390px;height:800px;border:0";
+      frame.srcdoc = source.replace("<head>", `<head><meta http-equiv="Content-Security-Policy" content="${csp}">`);
+      document.body.append(frame);
+    },
+    { source: html(), csp: CSP },
+  );
+  const frame = page.frameLocator("iframe");
+  await expect(frame.locator("#status")).toHaveText(/press Play/);
+  await frame.locator(".step[data-voice='cowbell'][data-step='3']").click();
+  await expect(frame.locator(".step[data-voice='cowbell'][data-step='3']")).toHaveAttribute("data-state", "on");
+  await frame.getByRole("button", { name: "Play", exact: true }).click();
+  await expect(frame.locator("#status")).toHaveAttribute("data-state", "running", { timeout: 15_000 });
+  await expect(frame.locator("#app")).toHaveAttribute("data-engine", "js");
+  const seen = new Set<string>();
+  await expect
+    .poll(
+      async () => {
+        seen.add((await frame.locator("#app").getAttribute("data-playing-step")) ?? "-1");
+        seen.delete("-1");
+        return seen.size;
+      },
+      { timeout: 10_000, intervals: [40] },
+    )
+    .toBeGreaterThanOrEqual(4);
+  await frame.getByRole("button", { name: "Share" }).click();
+  await expect(frame.locator("#share-msg")).toContainText("Pattern code");
   expect(requests).toEqual([]);
   expect(errors).toEqual([]);
 });

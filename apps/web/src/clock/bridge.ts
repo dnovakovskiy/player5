@@ -90,6 +90,7 @@ export class BridgeClient {
   private burstTimers: ReturnType<typeof setTimeout>[] = [];
   private observeTimer: ReturnType<typeof setInterval> | null = null;
   private nextPingId = 1;
+  private followTarget: "master" | number | null = null;
   private samples: { rtt: number; offsetUs: number }[] = [];
   /** server_us − client_us from the lowest-RTT recent exchange. */
   offsetUs: number | null = null;
@@ -126,8 +127,13 @@ export class BridgeClient {
     this.setConnection("closed");
   }
 
-  /** Selects the followed device: "master" or a device number. */
+  /**
+   * Selects the followed device: "master" or a device number. Re-sent
+   * after a reconnect, so a restarted bridge (which starts on "master")
+   * follows what this page shows.
+   */
   follow(target: "master" | number): void {
+    this.followTarget = target;
     this.sendJson({ type: "follow", target });
   }
 
@@ -212,6 +218,7 @@ export class BridgeClient {
           this.events.onStatus("warn", `bridge speaks protocol ${String(msg.protocol)}, expected 1`);
         }
         this.events.onHello?.(msg as { app?: string; version?: string; source?: string });
+        if (this.followTarget !== null) this.sendJson({ type: "follow", target: this.followTarget });
         break;
       case "pong":
         this.onPong(msg);

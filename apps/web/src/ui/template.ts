@@ -7,6 +7,8 @@ export interface TemplateOptions {
   single: boolean;
   bridge: boolean;
   midi: boolean;
+  /** window.isSecureContext: Web MIDI (and the AudioWorklet) need it. */
+  secure: boolean;
 }
 
 const knob = (id: string, label: string, min = 0, max = 1, step = 0.01) => `
@@ -24,7 +26,9 @@ export function template(o: TemplateOptions): string {
     : !o.bridge && !o.midi
       ? "Bridge and MIDI clock are not available in this browser."
       : !o.midi
-        ? "MIDI clock needs a browser with Web MIDI (Chrome, Edge)."
+        ? o.secure
+          ? "MIDI clock needs a browser with Web MIDI (Chrome, Edge)."
+          : "MIDI clock needs a secure page: open the app over https or from localhost."
         : "";
   return `
   <a class="skip" href="#grid">Skip to the pattern</a>
@@ -118,7 +122,7 @@ export function template(o: TemplateOptions): string {
         <output id="clock-beat" class="beat-num" aria-label="Beat in bar">–</output>
       </div>
     </div>
-    <p id="source-status" class="source-status" aria-live="polite"></p>
+    <p class="source-status"><span id="source-status" aria-live="polite"></span><span id="source-detail" class="source-detail"></span></p>
 
     <div class="source-panel" data-for="tap">
       <button id="tap-pad" type="button" class="tap-pad" aria-keyshortcuts="T">Tap the beat</button>

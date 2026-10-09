@@ -43,6 +43,12 @@ the first that works (or the one forced with `?engine=`):
   host and processor sources (Vite `?raw`), joined into a `Blob` URL for
   `audioWorklet.addModule`. The compiled `WebAssembly.Module` travels in
   `processorOptions`.
+- The core is compiled when the page loads (no audio until Play). After
+  that nothing is fetched to start audio, so an open tab keeps working even
+  after a new deploy replaced the service worker's cache.
+- A runtime that dies (worklet processor error, an exception in the
+  ScriptProcessor callback) is torn down with its AudioContext; the next
+  Play builds a fresh one instead of leaving a dead graph behind.
 - In the fallbacks the audio callback is still the engine's clock: the
   scheduler runs in lockstep with rendering and keeps its 100 ms
   lookahead, so timing stays sample-accurate. Main-thread jank can cause
@@ -68,7 +74,8 @@ the first that works (or the one forced with `?engine=`):
   that block (`AudioWorkletGlobalScope.currentFrame`, or
   `playbackTime × sampleRate` in a ScriptProcessor) and reports
   `offset = contextFrame − enginePosition` whenever it changes (it is
-  constant while the graph runs).
+  constant while the graph runs) and in every status message, so a lost
+  message cannot leave the clock sources without a mapping.
 - **Main thread:** `AudioContext.getOutputTimestamp()` pairs
   `{contextTime, performanceTime}`: the context time being heard at that
   performance time. For an event at performance time `t` (ms):
@@ -81,11 +88,21 @@ the first that works (or the one forced with `?engine=`):
   audible at `t`; the latency-offset control covers the rest of the path
   (interface, mixer). Clock messages (`observe`, `midi`, `tap`) carry
   engine samples and are applied by the host between blocks.
+- The same mapping runs backwards for the display: status messages report
+  the beat at the render position, which leads the speakers by the output
+  latency (tens of ms in a worklet, ~100 ms in a ScriptProcessor). The
+  bar readout and the playhead show the beat *heard* now, extrapolated
+  from the latest status at its tempo; the host sends a fresh status
+  right after anything that moves the timeline (start, tempo, re-sync).
 - **BridgeClock** (`docs/protocols/bridge-websocket.md`): ping burst then
   one ping every 2 s, offset from the lowest-RTT recent exchange; every
   timeline and a 50 ms timer produce an observation for "now"
   (`Bar` phase when `bar_aligned`, else `Beat`) with the timeline's
-  precision as clock mode. Reconnects with exponential backoff.
+  precision as clock mode. Reconnects with exponential backoff and re-sends
+  the chosen follow target (a restarted bridge starts on `"master"`).
+  Discovery (`GET /bridge.json` on the page's origin) runs the first time
+  Bridge is chosen without a saved URL, not on every load: on a plain
+  static host it is a 404 in the console.
 - **WebMidiClock:** Start/Continue/Stop/Clock with the event's own
   `timeStamp` go to `p5_engine_midi`; follow mode `jittery`.
 - **Tap:** the pointer event's `timeStamp` goes to `p5_engine_tap`; the
@@ -101,6 +118,14 @@ the first that works (or the one forced with `?engine=`):
   cached shell as offline fallback; hashed assets and other precached
   files are cache-first (matching ignores `Vary`, which static servers set
   for CORS). Registered only in production builds on http(s) origins.
+- Nothing the app needs to run is cache-first under a stable name: the
+  wasm module is emitted content-hashed (`assets/player5-<hash>.wasm`)
+  next to the hashed JS and CSS, so the network-first `index.html` of a
+  new deploy can never be paired with a cached core of an older build
+  (the first visit after a deploy is still served by the old worker).
+  The offline shell is refreshed only from navigations to the app itself
+  (`./`, `./index.html`), never from another page in scope such as the
+  published `player5-standalone.html`.
   Manifest icons (192, 512, maskable 512) are drawn procedurally and
   PNG-encoded with Node's zlib at build time.
 - `npm run build:single` → `dist-single/player5.html`: one file with all
@@ -128,7 +153,8 @@ written at most every 120 ms (browsers throttle `history.replaceState`).
   that cannot run WebAssembly still plays the same instrument, proven
   bit-identical by CI.
 - The JS core is ~290 KB minified (a lazy chunk in the PWA, inline in the
-  single file). It is regenerated whenever `public/player5.wasm` is newer.
+  single file). It is regenerated whenever `public/player5.wasm` changes
+  (the wasm's sha256 is stamped into the generated file).
 - `apps/bridge --web` serves the app over plain `http://` on the LAN: no
   AudioWorklet, service worker or Web MIDI there, so the app runs in
   `script` mode. Booths that want the worklet open the app from

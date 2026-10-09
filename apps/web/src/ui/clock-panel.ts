@@ -34,6 +34,7 @@ export class ClockPanel {
   private bridge: BridgeClient | null = null;
   private bridgeUrl: string;
   private bridgeUrlFromUser: boolean;
+  private discovered = false;
   private timeline: BridgeTimeline | null = null;
   private bridgeState = "closed";
   private bridgeStatus = "";
@@ -49,6 +50,7 @@ export class ClockPanel {
     beat: HTMLOutputElement;
     beats: HTMLElement[];
     status: HTMLElement;
+    statusDetail: HTMLElement;
     nudge: HTMLOutputElement;
     latency: HTMLInputElement;
     bridgeUrl: HTMLInputElement;
@@ -69,6 +71,7 @@ export class ClockPanel {
       beat: $(root, "#clock-beat"),
       beats: [...root.querySelectorAll<HTMLElement>(".beats i")],
       status: $(root, "#source-status"),
+      statusDetail: $(root, "#source-detail"),
       nudge: $(root, "#nudge-out"),
       latency: $(root, "#latency"),
       bridgeUrl: $(root, "#bridge-url"),
@@ -119,14 +122,6 @@ export class ClockPanel {
       this.bridgeUrlFromUser = savedUrl !== null;
       this.bridgeUrl = savedUrl ?? DEFAULT_BRIDGE_URL;
       this.el.bridgeUrl.value = this.bridgeUrl;
-      if (!this.bridgeUrlFromUser) {
-        void discoverBridgeUrl().then((url) => {
-          if (url && !this.bridgeUrlFromUser) {
-            this.bridgeUrl = url;
-            this.el.bridgeUrl.value = url;
-          }
-        });
-      }
       const connect = () => {
         const url = this.el.bridgeUrl.value.trim() || DEFAULT_BRIDGE_URL;
         this.el.bridgeUrl.value = url;
@@ -195,6 +190,22 @@ export class ClockPanel {
     this.stopBridge();
     this.timeline = null;
     this.bridgeStatus = "";
+    if (!this.bridgeUrlFromUser && !this.discovered) {
+      // First use without a saved URL: ask the page's own server whether it
+      // is a bridge (GET /bridge.json). Only now, not on every page load:
+      // on a plain static host that request is a 404 in the console.
+      this.discovered = true;
+      this.bridgeState = "discovering";
+      this.renderStatus();
+      void discoverBridgeUrl().then((url) => {
+        if (url && !this.bridgeUrlFromUser) {
+          this.bridgeUrl = url;
+          this.el.bridgeUrl.value = url;
+        }
+        if (this.source === "bridge" && !this.bridge) this.startBridge();
+      });
+      return;
+    }
     const client = new BridgeClient(this.bridgeUrl, {
       onConnection: (state, detail) => {
         this.bridgeState = state;
@@ -326,18 +337,28 @@ export class ClockPanel {
     this.el.root.dataset.lock = lock;
     this.el.tempo.textContent = running ? status.tempo.toFixed(2) : "—";
     this.el.root.dataset.tempo = running ? status.tempo.toFixed(3) : "";
-    this.el.root.dataset.beat = running ? status.beat.toFixed(4) : "";
+    // The beat as heard now (the status reports the render position, ahead
+    // of the speakers by the output latency).
+    const beat = running ? (this.host.audio.beatHeardAt(performance.now()) ?? status.beat) : NaN;
+    this.el.root.dataset.beat = running ? beat.toFixed(4) : "";
+    this.el.root.dataset.beatAt = running ? performance.now().toFixed(2) : "";
     this.el.lock.textContent =
       lock === "off" ? "audio off" : lock === "internal" ? "internal" : lock === "locked" ? "locked" : "searching";
     let pos = -1;
-    if (running && Number.isFinite(status.beat)) pos = Math.floor((((status.beat % 4) + 4) % 4) + 1e-9);
+    if (running && Number.isFinite(beat)) pos = Math.floor((((beat % 4) + 4) % 4) + 1e-9);
     this.el.beat.textContent = pos >= 0 ? String(pos + 1) : "–";
     this.el.beats.forEach((b, i) => b.classList.toggle("on", i === pos));
     this.renderStatus();
   }
 
+  /**
+   * The source line is a polite live region: it changes only when the
+   * state does. Counters that tick (MIDI clocks, bridge round trip) go to
+   * a separate, non-live span so a screen reader is not flooded.
+   */
   private renderStatus(): void {
     let text = "";
+    let detail = "";
     const running = this.audioState === "running";
     switch (this.source) {
       case "internal":
@@ -348,15 +369,16 @@ export class ClockPanel {
         break;
       case "bridge": {
         const t = this.timeline;
-        if (this.bridgeState === "connecting") text = `Connecting to ${this.bridgeUrl}…`;
+        if (this.bridgeState === "discovering") text = "Looking for a bridge…";
+        else if (this.bridgeState === "connecting") text = `Connecting to ${this.bridgeUrl}…`;
         else if (this.bridgeState === "closed") text = `Bridge offline (${this.bridgeUrl}); retrying.`;
         else if (!t) text = "Connected; waiting for a timeline.";
         else {
           const rtt = this.bridge?.bestRttMs;
           text =
             `${t.source} · ${t.locked ? "locked" : "searching"} · ${t.bpm.toFixed(2)} BPM · ${t.precision}` +
-            (t.device !== null ? ` · device ${t.device}` : "") +
-            (typeof rtt === "number" ? ` · rtt ${rtt.toFixed(1)} ms` : "");
+            (t.device !== null ? ` · device ${t.device}` : "");
+          if (typeof rtt === "number") detail = `rtt ${rtt.toFixed(1)} ms`;
         }
         if (this.bridgeStatus) text += ` — ${this.bridgeStatus}`;
         this.el.root.dataset.bridge = this.bridgeState;
@@ -367,12 +389,15 @@ export class ClockPanel {
         else if (!this.midiPorts.length) text = "No MIDI inputs found.";
         else {
           const port = this.midiPorts.find((p) => p.id === this.midi?.selectedId);
-          text = port ? `Listening to ${port.name} · ${this.midi?.clocks ?? 0} clocks` : "Pick a MIDI input.";
+          text = port ? `Listening to ${port.name}` : "Pick a MIDI input.";
+          if (port) detail = `${this.midi?.clocks ?? 0} clocks`;
         }
         break;
       }
     }
     if (this.following && !running) text += " Press Play to start the engine; it joins the source in phase.";
-    this.el.status.textContent = text;
+    if (this.el.status.textContent !== text) this.el.status.textContent = text;
+    const shown = detail ? ` · ${detail}` : "";
+    if (this.el.statusDetail.textContent !== shown) this.el.statusDetail.textContent = shown;
   }
 }

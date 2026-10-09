@@ -14,6 +14,7 @@ import {
   parsePatternInput,
   sanitize,
   specBytes,
+  STEP_COUNT,
   toggleFlam,
   type PatternSpec,
 } from "./spec";
@@ -47,7 +48,11 @@ function initialSpec(): PatternSpec {
 let spec: PatternSpec = initialSpec();
 let selected: VoiceId = "kick";
 let flamMode = false;
+/** Step being heard (the playhead). */
 let playingStep = -1;
+/** Step at the engine's render position, as posted by the audio runtime. */
+let renderedStep = -1;
+let playheadFrame = 0;
 const undoStack: string[] = [];
 const redoStack: string[] = [];
 let lastCheckpoint = { key: "", at: 0 };
@@ -57,7 +62,8 @@ let bpmEditing = false;
 // ---- DOM ----
 
 const app = document.getElementById("app")!;
-app.innerHTML = template({ single: SINGLE, bridge: bridgeOk, midi: midiOk });
+const secure = typeof isSecureContext === "boolean" ? isSecureContext : true;
+app.innerHTML = template({ single: SINGLE, bridge: bridgeOk, midi: midiOk, secure });
 if (SINGLE) app.dataset.build = "single";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -82,8 +88,10 @@ const shareMsg = $<HTMLParagraphElement>("share-msg");
 const audio = new AudioEngine({
   onState: (state, detail) => renderStatus(state, detail),
   onStep: (step) => {
-    playingStep = audio.playing ? step : -1;
+    renderedStep = audio.playing ? step : -1;
+    if (renderedStep < 0) playingStep = -1;
     renderPlayhead();
+    if (renderedStep >= 0 && !playheadFrame) playheadFrame = requestAnimationFrame(followPlayhead);
   },
   onStatus: (status) => onEngineStatus(status),
 });
@@ -208,9 +216,35 @@ function renderControls(): void {
   undoBtn.disabled = undoStack.length === 0;
 }
 
+/** Steps per beat in the core (sequencer::BEATS_PER_STEP = 0.25). */
+const STEPS_PER_BEAT = 4;
+/**
+ * The playhead shows the step being *heard*. The runtime posts the step at
+ * its render position, which runs ahead of the speakers by the output
+ * latency (tens of ms in a worklet, ~100 ms in the ScriptProcessor
+ * fallbacks); the heard beat is the same quantity the core's playing_step
+ * uses, taken at the moment the audio leaves the output.
+ */
+function followPlayhead(): void {
+  playheadFrame = 0;
+  if (!audio.playing || renderedStep < 0) {
+    playingStep = -1;
+    renderPlayhead();
+    return;
+  }
+  const beat = audio.beatHeardAt(performance.now());
+  const step =
+    beat === null ? renderedStep : beat < 0 ? -1 : Math.floor(beat * STEPS_PER_BEAT) % STEP_COUNT;
+  if (step !== playingStep) {
+    playingStep = step;
+    renderPlayhead();
+  }
+  playheadFrame = requestAnimationFrame(followPlayhead);
+}
+
 function renderPlayhead(): void {
   grid.setPlayhead(playingStep);
-  app.dataset.playingStep = String(playingStep);
+  if (app.dataset.playingStep !== String(playingStep)) app.dataset.playingStep = String(playingStep);
   const playing = audio.playing;
   playBtn.textContent = playing ? "Stop" : "Play";
   playBtn.setAttribute("aria-pressed", String(playing));
@@ -513,6 +547,13 @@ if (!SINGLE) {
 
 // ---- keyboard ----
 
+// The skip link moves focus into the grid without touching location.hash
+// (a "#grid" fragment would replace the #p= pattern in the address bar).
+app.querySelector<HTMLAnchorElement>(".skip")?.addEventListener("click", (e) => {
+  e.preventDefault();
+  app.querySelector<HTMLButtonElement>('#grid .step[tabindex="0"]')?.focus();
+});
+
 function isTextEntry(t: EventTarget | null): boolean {
   if (!(t instanceof HTMLElement)) return false;
   if (t.isContentEditable || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement) return true;
@@ -554,6 +595,7 @@ window.addEventListener("keyup", (e) => {
 // ---- boot ----
 
 if (!SINGLE) setupPwa($<HTMLButtonElement>("install"));
+audio.prepare(); // compile the core now; audio itself waits for Play
 commit();
 renderPlayhead();
 renderStatus("idle");

@@ -58,7 +58,16 @@ npm test                       # Playwright (needs both builds)
 Runtimes (ADR-0010): the default is WebAssembly in an AudioWorklet. If the
 worklet cannot load (insecure origin, CSP) the same host renders on the
 main thread in a ScriptProcessorNode; if WebAssembly is blocked, it uses the
-wasm2js build of the same core. The header shows which one is active.
+wasm2js build of the same core. The header shows which one is active. The
+core is compiled when the page loads; audio starts only from Play (or
+Space). In the PWA build the wasm ships content-hashed
+(`assets/player5-<hash>.wasm`), like the JS, so the service worker can
+never pair one build's JavaScript with another build's core.
+
+The bar readout and the playhead show what is *heard*: the runtime reports
+the render position, which leads the speakers by the output latency, and
+`AudioEngine.beatHeardAt()` maps it back through the same time mapping the
+clock sources use.
 
 The single-file build has no service worker, manifest or network code at
 all; Bridge and MIDI are hidden there. It is published next to the PWA as
@@ -70,10 +79,18 @@ all; Bridge and MIDI are hidden there. It is published next to the PWA as
 and against `dist-single/player5.html` (via `file://` and under a strict
 CSP with `page.setContent`). Headless Chromium plays real audio with
 `--autoplay-policy=no-user-gesture-required`. Covered: every voice, flams,
-mute, presets, undo, old links, master, share/import, phone layout, all
-three runtimes, MIDI clock (fake `requestMIDIAccess` at 125 BPM), the
-bridge protocol (an in-test RFC 6455 server at 128 BPM, including phase),
-reconnect, offline reload through the service worker, and the single-file
-page making zero requests. A pre-installed Chromium at
+mute, presets, undo, old links, garbage in the hash and the import field,
+master, share/import, phone layout, the skip link, all three runtimes (the
+playhead steps forward one step at a time in each), Play then Stop while
+audio is still starting, an insecure LAN origin like `apps/bridge --web`
+(ScriptProcessor, MIDI hidden with the reason), MIDI clock (fake
+`requestMIDIAccess` at 125 BPM: tempo, lock and phase), the bridge
+protocol (an in-test RFC 6455 server at 128 BPM: lock, phase within 0.1
+beat in the worklet and the ScriptProcessor, devices, follow, reconnect
+with the follow target re-sent, discovery only on demand), offline reload
+through the service worker, a new deploy winning over the cache, and the
+single-file page making zero requests. Every test fails on page errors,
+console errors (except ones it expects, like a refused bridge connection)
+and alert/confirm/prompt dialogs. A pre-installed Chromium at
 `/opt/pw-browsers/chromium` is used when present (or `PW_CHROMIUM`); CI
 installs Playwright's own.

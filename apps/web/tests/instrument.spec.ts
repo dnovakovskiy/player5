@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import {
   app,
   base64Url,
+  expectClean,
   expectPhoneLayout,
   expectPlayheadAdvances,
   guard,
@@ -12,6 +13,8 @@ import {
   step,
   VOICE_IDS,
 } from "./support/helpers";
+
+test.afterEach(({ page }) => expectClean(page));
 
 test("plays: playhead advances, meter shows a level, Stop clears", async ({ page }) => {
   const errors = guard(page);
@@ -257,4 +260,80 @@ test("tap tempo sets the BPM and reaches the engine", async ({ page }) => {
   await expect
     .poll(async () => Number(await page.locator("#clock").getAttribute("data-tempo")))
     .toBeCloseTo(Number(await page.locator("#bpm").inputValue()), 1);
+});
+
+test("garbage in the hash or the import field never breaks the page", async ({ page }) => {
+  const errors = guard(page);
+  const hostile = {
+    bpm: "fast",
+    shuffle: 7,
+    accent: -3,
+    flam: null,
+    voices: {
+      kick: { steps: 42, tune: "x", level: 1e999 },
+      snare: { steps: "<img src=x onerror=alert(1)> XXXX", mute: "yes" },
+      cymbal: { steps: "xxxx" },
+    },
+    render: { output_gain: -5, limiter: "yes", bars: 99 },
+  };
+  const hashes = [
+    "#p=!!!",
+    "#p=A",
+    "#p=AAAA",
+    `#p=${base64Url("[]")}`,
+    `#p=${base64Url("null")}`,
+    `#p=${base64Url('"a string"')}`,
+    `#p=${base64Url('{"__proto__":{"polluted":1},"voices":{"__proto__":{"steps":"xxxx"}}}')}`,
+    `#p=${base64Url(JSON.stringify(hostile))}`,
+    `#p=${"A".repeat(100_000)}`,
+  ];
+  for (const hash of hashes) {
+    await page.goto("about:blank");
+    await page.goto(`/${hash}`);
+    await expect(page.locator("#bpm"), hash.slice(0, 40)).toHaveValue(/^\d+(\.\d+)?$/);
+    // The page settles on a valid pattern and writes it back to the URL.
+    const code = await page.locator("#share-code").inputValue();
+    expect(code).toMatch(/^[A-Za-z0-9_-]+$/);
+    await expect.poll(() => page.url()).toContain(`#p=${code}`);
+    expect(await page.evaluate(() => "polluted" in ({} as object))).toBe(false);
+  }
+  // The hostile object, sanitised: defaults and clamps, no stray markup.
+  await page.goto("about:blank");
+  await page.goto(`/#p=${base64Url(JSON.stringify(hostile))}`);
+  await expect(page.locator("#bpm")).toHaveValue("120");
+  await expect(page.locator("#shuffle-out")).toHaveText("100%");
+  await expect(page.locator("#accent-out")).toHaveText("0%");
+  await expect(page.locator("#gain-out")).toHaveText("−∞ dB");
+  await expect(page.locator("#limiter")).not.toBeChecked();
+  await expect(page.locator(".row.muted")).toHaveCount(0);
+  await expect(page.locator("#app img")).toHaveCount(0);
+  const states = await page
+    .locator('.step[data-voice="snare"]')
+    .evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.state));
+  expect(states).toHaveLength(16);
+  for (const s of states) expect(["off", "on", "accent"]).toContain(s);
+  // ...and the core accepts it.
+  await play(page);
+  await expectPlayheadAdvances(page, 3);
+  // The import field rejects junk without touching the pattern.
+  const before = await page.locator("#share-code").inputValue();
+  for (const junk of ["   ", "#p=", "p=%%%", "https://example.com/#p=@@@", "x".repeat(5000)]) {
+    await page.locator("#import").fill(junk);
+    await page.locator("#import").press("Enter");
+    await expect(page.locator("#share-msg")).toContainText("not a player5 pattern");
+    await expect(page.locator("#share-code")).toHaveValue(before);
+  }
+  expect(errors).toEqual([]);
+});
+
+test("the skip link focuses the grid and keeps the pattern in the URL", async ({ page }) => {
+  guard(page);
+  await page.goto("/");
+  const url = await settledUrl(page);
+  await page.keyboard.press("Tab");
+  const skip = page.getByRole("link", { name: "Skip to the pattern" });
+  await expect(skip).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(step(page, "kick", 1)).toBeFocused();
+  expect(page.url()).toBe(url);
 });

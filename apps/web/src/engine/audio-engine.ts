@@ -19,6 +19,7 @@ import workletSource from "./worklet.js?raw";
 import { EngineHost, type CoreApi, type HostEvent, type HostMessage } from "./host.js";
 import { TimeMap } from "./timemap";
 import wasmBase64 from "virtual:player5/wasm";
+import wasmUrl from "virtual:player5/wasm-url";
 
 export type EngineMode = "worklet" | "script" | "js";
 export type AudioState = "idle" | "starting" | "running" | "failed";
@@ -56,7 +57,9 @@ async function compileWasm(): Promise<WebAssembly.Module> {
     if (!wasmBase64) throw new Error("wasm not embedded");
     return WebAssembly.compile(base64ToBytes(wasmBase64));
   } else {
-    const url = new URL("player5.wasm", document.baseURI).href;
+    // Content-hashed in a build (assets/player5-<hash>.wasm): JS and wasm
+    // of one build always travel together, also through the service worker.
+    const url = new URL(wasmUrl, document.baseURI).href;
     try {
       return await WebAssembly.compileStreaming(fetch(url));
     } catch (err) {
@@ -87,8 +90,10 @@ export class AudioEngine {
   private ctx: AudioContext | null = null;
   private node: AudioNode | null = null;
   private worklet: AudioWorkletNode | null = null;
+  private script: ScriptProcessorNode | null = null;
   private host: EngineHost | null = null;
   private startPromise: Promise<void> | null = null;
+  private wasm: Promise<WebAssembly.Module> | null = null;
   private timeMap: TimeMap | null = null;
   // Desired state, replayed whenever a runtime comes up.
   private patternBytes: Uint8Array | null = null;
@@ -96,6 +101,8 @@ export class AudioEngine {
   private nudgeMs = 0;
   private latencyMs = 0;
   private wantPlaying = false;
+  /** What the current runtime was last told (start/stop). */
+  private runtimePlaying = false;
 
   state: AudioState = "idle";
   mode: EngineMode | null = null;
@@ -113,6 +120,30 @@ export class AudioEngine {
 
   get running(): boolean {
     return this.state === "running";
+  }
+
+  /**
+   * Starts compiling the core right away, before the first Play: no audio
+   * yet, but nothing left to fetch later (an open tab keeps working after
+   * a new deploy replaced the service worker's cache) and Play is faster.
+   */
+  prepare(): void {
+    if (requestedMode() === "js") return;
+    this.wasmModule().catch(() => {
+      /* reported when Play falls back to another runtime */
+    });
+  }
+
+  /** The compiled core, compiled once. A failed fetch is retried; a refused compile (CSP) is not. */
+  private wasmModule(): Promise<WebAssembly.Module> {
+    if (!this.wasm) {
+      const pending = compileWasm();
+      this.wasm = pending;
+      pending.catch((err: unknown) => {
+        if (this.wasm === pending && !(err instanceof WebAssembly.CompileError)) this.wasm = null;
+      });
+    }
+    return this.wasm;
   }
 
   /**
@@ -134,10 +165,8 @@ export class AudioEngine {
       }
       this.ctx = ctx;
       this.startPromise = this.boot(ctx).catch((err: unknown) => {
-        this.startPromise = null;
-        this.ctx = null;
-        void ctx.close().catch(() => {});
-        this.setState("failed", err instanceof Error ? err.message : String(err));
+        // Also drops a runtime that attached before the failure.
+        this.teardown(err instanceof Error ? err.message : String(err));
         throw err;
       });
     }
@@ -154,7 +183,7 @@ export class AudioEngine {
     let wasmError: unknown = null;
     if (forced !== "js") {
       try {
-        module = await compileWasm();
+        module = await this.wasmModule();
       } catch (err) {
         wasmError = err;
         if (forced) throw err;
@@ -221,7 +250,7 @@ export class AudioEngine {
       throw err;
     });
     node.port.onmessage = (e: MessageEvent<HostEvent>) => this.onHostEvent(e.data);
-    node.onprocessorerror = () => this.setState("failed", "audio worklet crashed");
+    node.onprocessorerror = () => this.teardown("audio worklet crashed; press Play to restart");
     node.connect(ctx.destination);
     this.worklet = node;
     this.node = node;
@@ -232,12 +261,50 @@ export class AudioEngine {
     const node = ctx.createScriptProcessor(SCRIPT_BUFFER, 0, 2);
     node.onaudioprocess = (e: AudioProcessingEvent) => {
       const out = e.outputBuffer;
-      const mono = host.process(out.length, Math.round(e.playbackTime * ctx.sampleRate));
+      let mono: Float32Array;
+      try {
+        mono = host.process(out.length, Math.round(e.playbackTime * ctx.sampleRate));
+      } catch (err) {
+        // Like a crashed worklet: stop calling into a broken core.
+        node.onaudioprocess = null;
+        queueMicrotask(() => this.teardown(`engine error: ${err instanceof Error ? err.message : String(err)}`));
+        return;
+      }
       for (let c = 0; c < out.numberOfChannels; c++) out.getChannelData(c).set(mono);
     };
     node.connect(ctx.destination);
     this.host = host;
+    this.script = node;
     this.node = node;
+  }
+
+  /** Drops a dead runtime so the next Play builds a fresh one. */
+  private teardown(detail: string): void {
+    const ctx = this.ctx;
+    if (this.worklet) {
+      this.worklet.port.onmessage = null;
+      this.worklet.onprocessorerror = null;
+    }
+    if (this.script) this.script.onaudioprocess = null;
+    try {
+      this.node?.disconnect();
+    } catch {
+      /* already disconnected */
+    }
+    this.worklet = null;
+    this.script = null;
+    this.host = null;
+    this.node = null;
+    this.timeMap = null;
+    this.ctx = null;
+    this.startPromise = null;
+    this.mode = null;
+    this.lastStatus = null;
+    this.wantPlaying = false;
+    this.runtimePlaying = false;
+    if (ctx) void ctx.close().catch(() => {});
+    this.events.onStep(-1);
+    this.setState("failed", detail);
   }
 
   /** Sends the desired state to a fresh runtime. */
@@ -246,7 +313,20 @@ export class AudioEngine {
     this.send({ type: "latency", ms: this.latencyMs });
     this.send({ type: "nudge", ms: this.nudgeMs });
     this.send({ type: "clock-mode", mode: this.clockMode });
-    if (this.wantPlaying) this.send({ type: "start" });
+    this.runtimePlaying = false;
+    this.syncTransport();
+  }
+
+  /**
+   * Tells the runtime to start or stop only when that differs from what it
+   * was last told. A second "start" restarts the bar (and could trigger the
+   * first step twice); a Play that resolves after a Stop must not start.
+   */
+  private syncTransport(): void {
+    if (!this.worklet && !this.host) return;
+    if (this.wantPlaying === this.runtimePlaying) return;
+    this.runtimePlaying = this.wantPlaying;
+    this.send({ type: this.wantPlaying ? "start" : "stop" });
   }
 
   private send(msg: HostMessage): void {
@@ -263,14 +343,21 @@ export class AudioEngine {
         this.events.onStep(this.wantPlaying ? msg.step : -1);
         break;
       case "status": {
-        const { type: _t, ...status } = msg;
+        const { type: _t, offset, ...status } = msg;
         this.lastStatus = status;
-        this.timeMap?.sample();
+        // Also in every status: a lost "offset" message must not leave
+        // the clock sources without a time mapping.
+        if (this.timeMap) {
+          this.timeMap.offset = offset;
+          this.timeMap.sample();
+        }
         this.events.onStatus(status);
         break;
       }
       case "error":
-        this.setState("failed", msg.message);
+        // A rejected pattern leaves the engine running on the previous one.
+        if (msg.fatal === false) console.warn("player5:", msg.message);
+        else this.teardown(msg.message);
         break;
       case "ready":
         break;
@@ -286,18 +373,20 @@ export class AudioEngine {
 
   async play(): Promise<void> {
     this.wantPlaying = true;
+    this.syncTransport();
     try {
       await this.ensureStarted();
     } catch (err) {
       this.wantPlaying = false;
       throw err;
     }
-    this.send({ type: "start" });
+    // A fresh runtime was started by replay(); Stop may have come since.
+    this.syncTransport();
   }
 
   stop(): void {
     this.wantPlaying = false;
-    this.send({ type: "stop" });
+    this.syncTransport();
     this.events.onStep(-1);
   }
 
@@ -325,6 +414,20 @@ export class AudioEngine {
   /** Engine sample heard at performance time `ms`, or null before audio runs. */
   engineSampleAt(ms: number): number | null {
     return this.state === "running" ? (this.timeMap?.engineSampleAt(ms) ?? null) : null;
+  }
+
+  /**
+   * The engine's beat being heard at performance time `ms`. Status
+   * messages report the beat at the render position, which runs ahead of
+   * the speakers by the output latency (and the status is up to 50 ms
+   * old); this extrapolates it at the reported tempo. Null before audio.
+   */
+  beatHeardAt(ms: number): number | null {
+    const s = this.lastStatus;
+    const sample = this.engineSampleAt(ms);
+    const sr = this.sampleRate;
+    if (!s || sample === null || !sr) return null;
+    return s.beat + ((sample - s.position) / sr) * (s.tempo / 60);
   }
 
   /** Observation from an external clock at performance time `ms`. */

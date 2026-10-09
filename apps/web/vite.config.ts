@@ -31,6 +31,8 @@ export default defineConfig(({ mode }) => {
           sourcemap: true,
         },
     server: { port: 5173, strictPort: true },
-    preview: { host: "127.0.0.1", port: 4173, strictPort: true },
+    // booth.test: tests/insecure.spec.ts maps it to 127.0.0.1 to load the
+    // app from an insecure (non-loopback) origin, like apps/bridge --web.
+    preview: { host: "127.0.0.1", port: 4173, strictPort: true, allowedHosts: ["booth.test"] },
   };
 });

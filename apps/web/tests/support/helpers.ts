@@ -19,10 +19,28 @@ export const step = (page: Page, voice: string, n: number) =>
 
 export const app = (page: Page) => page.locator("#app");
 
-/** Fails the test on page errors and on any alert/confirm/prompt dialog. */
-export function guard(page: Page): string[] {
+const guarded = new WeakMap<Page, string[]>();
+
+/** For `test.afterEach`: a page passed to `guard` logged nothing bad. */
+export function expectClean(page: Page): void {
+  const errors = guarded.get(page);
+  if (errors) expect(errors, "page errors, console errors or dialogs").toEqual([]);
+}
+
+/**
+ * Collects page errors, console errors and any alert/confirm/prompt dialog
+ * (tests assert the list stays empty). `allowConsole` matches console
+ * errors a test expects, e.g. the CSP refusal that selects the JS core.
+ */
+export function guard(page: Page, allowConsole: RegExp[] = []): string[] {
   const errors: string[] = [];
+  guarded.set(page, errors);
   page.on("pageerror", (e) => errors.push(e.message));
+  page.on("console", (m) => {
+    if (m.type() !== "error") return;
+    const text = m.text();
+    if (!allowConsole.some((re) => re.test(text))) errors.push(`console error: ${text}`);
+  });
   page.on("dialog", (d) => {
     errors.push(`unexpected ${d.type()} dialog: ${d.message()}`);
     void d.dismiss();

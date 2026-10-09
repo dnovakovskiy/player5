@@ -4,7 +4,10 @@
 //   * install: precache the built shell into a cache named by build version
 //   * activate: drop caches of older versions, take control of open pages
 //   * navigations: network first (fresh deploys win), cached shell offline
-//   * hashed assets (assets/*) and other precached files: cache first
+//   * hashed assets (assets/*: JS, CSS, the JS core and the wasm module)
+//     and other precached files: cache first. The wasm URL is
+//     content-hashed, so an index.html from the network never meets a
+//     cached core from another build.
 //   * anything else (bridge.json, cross-origin): straight to the network
 
 /* global self, caches */
@@ -38,12 +41,24 @@ const MATCH = { ignoreSearch: true, ignoreVary: true };
 /** A navigation waits this long for the network before using the cached shell. */
 const NETWORK_TIMEOUT_MS = 4000;
 
+/** True for a navigation to the app shell itself ("./" or "./index.html", any query). */
+function isShell(url) {
+  const scope = new URL(self.registration.scope).pathname;
+  return url.pathname === scope || url.pathname === scope + "index.html";
+}
+
 async function networkFirst(request) {
   const cache = await caches.open(CACHE);
   const fromCache = async () => (await cache.match(request, MATCH)) || (await cache.match(SHELL, MATCH));
   let timer;
   const network = fetch(request).then((response) => {
-    if (response.ok) cache.put(SHELL, response.clone());
+    // Refresh the offline shell only from the shell itself: another page
+    // in scope (player5-standalone.html, a 200 fallback page on some
+    // static hosts) must not replace it. Redirected responses cannot be
+    // served for navigations later, so they are not stored either.
+    if (response.ok && !response.redirected && response.type === "basic" && isShell(new URL(request.url))) {
+      cache.put(SHELL, response.clone());
+    }
     return response;
   });
   network.catch(() => {}); // handled below; avoid an unhandled rejection when the timeout wins

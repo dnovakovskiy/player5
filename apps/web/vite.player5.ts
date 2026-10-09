@@ -1,6 +1,8 @@
 // Build plugin for apps/web (ADR-0010).
 //
 // Normal build (`vite build` → dist/):
+//   * virtual:player5/wasm-url → public/player5.wasm emitted as a
+//     content-hashed asset (assets/player5-<hash>.wasm);
 //   * virtual:player5/core-js → src/generated/core.js, regenerated from
 //     public/player5.wasm with wasm2js when stale (a lazy chunk; loaded only
 //     when WebAssembly is blocked);
@@ -15,7 +17,7 @@
 //   * The build fails if the output could make a network request.
 
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { Connect, Plugin, ResolvedConfig } from "vite";
 // @ts-expect-error -- plain .mjs build script without type declarations
@@ -24,6 +26,7 @@ import { corePath, generateCore, wasmPath } from "./scripts/gen-core.mjs";
 import { iconSet } from "./scripts/icons.mjs";
 
 const WASM_ID = "virtual:player5/wasm";
+const WASM_URL_ID = "virtual:player5/wasm-url";
 const CORE_ID = "virtual:player5/core-js";
 
 /** Strings that would mean a network request in the single-file output. */
@@ -49,6 +52,7 @@ export function player5(options: { single: boolean }): Plugin[] {
     },
     async resolveId(id) {
       if (id === WASM_ID) return "\0" + WASM_ID;
+      if (id === WASM_URL_ID) return "\0" + WASM_URL_ID;
       if (id === CORE_ID) {
         await generateCore({ quiet: true });
         return corePath as string;
@@ -56,11 +60,29 @@ export function player5(options: { single: boolean }): Plugin[] {
       return null;
     },
     load(id) {
+      if (id === "\0" + WASM_URL_ID) {
+        // Dev server: public/player5.wasm as is. Build: a content-hashed
+        // copy under assets/, so a page can never pair its JavaScript with
+        // a different build's wasm (the service worker serves assets/
+        // cache-first). The single file embeds the bytes instead.
+        if (config.command !== "build" || single) return `export default "player5.wasm";`;
+        if (!existsSync(wasmPath)) this.error(`${wasmPath} is missing: run scripts/build-wasm.sh first`);
+        const ref = this.emitFile({ type: "asset", name: "player5.wasm", source: readFileSync(wasmPath) });
+        return `export default import.meta.ROLLUP_FILE_URL_${ref};`;
+      }
       if (id !== "\0" + WASM_ID) return null;
       if (!single) return "export default null;";
       if (!existsSync(wasmPath)) this.error(`${wasmPath} is missing: run scripts/build-wasm.sh first`);
       this.addWatchFile(wasmPath);
       return `export default ${JSON.stringify(readFileSync(wasmPath).toString("base64"))};`;
+    },
+    writeBundle: {
+      order: "post",
+      handler(opts) {
+        // Vite copied public/player5.wasm next to the hashed copy; nothing
+        // references the unhashed one in a build.
+        if (config.command === "build" && !single && opts.dir) rmSync(join(opts.dir, "player5.wasm"), { force: true });
+      },
     },
   };
 
@@ -101,7 +123,9 @@ export function player5(options: { single: boolean }): Plugin[] {
         }
         // Vite copies public/ separately; precache those files too.
         const publicDir = config.publicDir;
+        // (Not public/player5.wasm: the build ships the hashed copy only.)
         for (const name of listFiles(publicDir)) {
+          if (name === "player5.wasm") continue;
           if (!files.has(name)) files.set(name, readFileSync(join(publicDir, name)));
         }
         const names = [...files.keys()].filter((n) => n !== "sw.js").sort();

@@ -55,8 +55,11 @@ export type HostEvent =
       beat: number;
       locked: boolean;
       position: number;
+      /** Context frame minus engine position (as in "offset"). */
+      offset: number;
     }
-  | { type: "error"; message: string };
+  /** `fatal: false`: the engine keeps running (e.g. a rejected pattern). */
+  | { type: "error"; message: string; fatal?: boolean };
 
 export declare class EngineHost {
   constructor(api: CoreApi, sampleRate: number, post: (msg: HostEvent) => void);

@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
-import { chooseSource, engineTempo, expectPlayheadAdvances, guard, play } from "./support/helpers";
+import { chooseSource, engineTempo, expectClean, expectPlayheadAdvances, guard, play } from "./support/helpers";
+
+test.afterEach(({ page }) => expectClean(page));
 
 // A fake Web MIDI input that sends Start, then Timing Clock at 125 BPM
 // (24 ppqn = one pulse every 20 ms). Each message carries its ideal
@@ -26,6 +28,7 @@ test("MIDI clock at 125 BPM: engine follows and locks", async ({ page }) => {
       const now = performance.now();
       if (t0 === null) {
         t0 = now;
+        (window as unknown as { __midiStart: number }).__midiStart = t0;
         send({ data: new Uint8Array([0xfa]), timeStamp: now });
       }
       while (t0 + k * period <= now) {
@@ -48,6 +51,9 @@ test("MIDI clock at 125 BPM: engine follows and locks", async ({ page }) => {
   await chooseSource(page, "MIDI");
   await expect(page.locator("#midi-input")).toHaveValue("fake-clock");
   await expect(page.locator("#source-status")).toContainText("Fake Clock");
+  // The pulse counter ticks outside the polite live region.
+  await expect(page.locator("#source-detail")).toContainText(/\d+ clocks/);
+  await expect(page.locator("#source-status")).not.toContainText("clocks");
   await expect
     .poll(async () => Math.abs((await engineTempo(page)) - 125), { timeout: 20_000 })
     .toBeLessThan(0.5);
@@ -56,6 +62,28 @@ test("MIDI clock at 125 BPM: engine follows and locks", async ({ page }) => {
   // While following, the tempo field shows the source and is read-only.
   await expect(page.locator("#bpm")).toBeDisabled();
   await expect.poll(async () => Number(await page.locator("#bpm").inputValue())).toBeCloseTo(125, 0);
+  // In phase: Start, then the first Clock is the first pulse of beat 0, so
+  // the source's beat at time t is (t - start) / beat length. The engine's
+  // beat as heard (data-beat at data-beat-at, extrapolated) must match it.
+  await expect
+    .poll(
+      async () => {
+        const d = await page.evaluate(() => {
+          const el = document.getElementById("clock")!;
+          const now = performance.now();
+          const beatMs = 60_000 / 125;
+          const ours = Number(el.dataset.beat) + (now - Number(el.dataset.beatAt)) / beatMs;
+          const theirs = (now - (window as unknown as { __midiStart: number }).__midiStart) / beatMs;
+          return ours - theirs;
+        });
+        let m = d % 4;
+        if (m > 2) m -= 4;
+        if (m < -2) m += 4;
+        return Math.abs(m);
+      },
+      { timeout: 20_000 },
+    )
+    .toBeLessThan(0.1);
   await expectPlayheadAdvances(page, 4);
   // Back to internal: the followed tempo is kept.
   await chooseSource(page, "Internal");

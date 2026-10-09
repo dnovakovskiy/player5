@@ -17,9 +17,10 @@
 // since the engine was created. process() takes the context frame of the
 // block it renders (AudioWorkletGlobalScope.currentFrame, or the
 // ScriptProcessor's playbackTime * sampleRate) and reports
-// `offset = contextFrame - enginePosition` whenever it changes; it is
-// constant while the graph runs. The main thread maps event times onto
-// engine samples with it (src/engine/timemap.ts).
+// `offset = contextFrame - enginePosition` whenever it changes (and in
+// every status message); it is constant while the graph runs. The main
+// thread maps event times onto engine samples with it
+// (src/engine/timemap.ts).
 
 /** Decaying peak meter: about 20 dB per second fall. */
 const METER_FALL_DB_PER_S = 20;
@@ -67,7 +68,8 @@ export class EngineHost {
         new Uint8Array(api.memory.buffer, ptr, bytes.length).set(bytes);
         const rc = api.p5_engine_load_pattern_json(e, ptr);
         api.p5_free(ptr, bytes.length);
-        if (rc !== 0) this.post({ type: "error", message: "pattern rejected (" + rc + ")" });
+        // Not fatal: the engine keeps playing the previous pattern.
+        if (rc !== 0) this.post({ type: "error", fatal: false, message: "pattern rejected (" + rc + ")" });
         break;
       }
       case "start":
@@ -102,6 +104,11 @@ export class EngineHost {
         this.alive = false;
         break;
     }
+    // Anything that can move the timeline (start, tempo, re-sync, tap,
+    // mode, nudge) gets a fresh status after the next block, so the main
+    // thread's heard-beat estimate never runs on a stale timeline. Clock
+    // observations stream continuously and keep the regular rate.
+    if (msg.type !== "observe" && msg.type !== "midi") this.sinceStatus = this.statusEvery;
   }
 
   /**
@@ -165,6 +172,7 @@ export class EngineHost {
         beat: api.p5_engine_beat(e),
         locked: api.p5_engine_clock_locked(e) === 1,
         position: position + frames,
+        offset: offset,
       });
     }
     return out;

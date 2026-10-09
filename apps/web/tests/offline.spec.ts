@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
-import { expectPlayheadAdvances, guard, play } from "./support/helpers";
+import { expectClean, expectPlayheadAdvances, guard, play } from "./support/helpers";
+
+test.afterEach(({ page }) => expectClean(page));
 
 test("service worker: works offline after the first visit", async ({ page, context }) => {
   guard(page);
@@ -15,7 +17,10 @@ test("service worker: works offline after the first visit", async ({ page, conte
     const cache = await caches.open(name!);
     return (await cache.keys()).map((r) => new URL(r.url).pathname);
   }, cacheName);
-  expect(cached).toContain("/player5.wasm");
+  // The core ships content-hashed, never under a stable name a cache could
+  // pair with another build's JavaScript.
+  expect(cached.some((p) => /\/assets\/player5-[\w-]+\.wasm$/.test(p))).toBe(true);
+  expect(cached).not.toContain("/player5.wasm");
   expect(cached).toContain("/icons/icon-192.png");
   expect(cached.some((p) => /\/assets\/core-.*\.js$/.test(p))).toBe(true);
 
@@ -30,6 +35,44 @@ test("service worker: works offline after the first visit", async ({ page, conte
     await expect(page.locator("#bpm")).toHaveValue("130");
     await play(page); // the lazily loaded JS core is precached as well
     await expectPlayheadAdvances(page, 3);
+  } finally {
+    await context.setOffline(false);
+  }
+});
+
+test("service worker: a new deploy wins, other pages never replace the shell", async ({ page, context }) => {
+  guard(page);
+  await page.goto("/");
+  await page.waitForFunction(() => navigator.serviceWorker.controller !== null, null, { timeout: 15_000 });
+
+  // The next deploy's index.html (simulated on the wire): navigations are
+  // network first, so the controlled page gets it, through the worker.
+  const root = (url: URL) => url.pathname === "/";
+  await context.route(root, async (route) => {
+    const res = await route.fetch();
+    const body = (await res.text()).replace("<title>player5</title>", "<title>player5 next</title>");
+    await route.fulfill({ response: res, body });
+  });
+  const next = await page.reload();
+  expect(next?.fromServiceWorker()).toBe(true);
+  await expect(page).toHaveTitle("player5 next");
+  await context.unroute(root);
+
+  // Another page in the worker's scope (pages.yml publishes
+  // player5-standalone.html next to the app) must not become the offline
+  // shell.
+  await context.route("**/other-page.html", (route) =>
+    route.fulfill({ contentType: "text/html", body: "<!doctype html><title>other page</title>" }),
+  );
+  await page.goto("/other-page.html");
+  await expect(page).toHaveTitle("other page");
+  await context.setOffline(true);
+  try {
+    // The offline shell is the newest index.html the network served.
+    await page.goto("/#p=" + "eyJicG0iOjEyNn0");
+    await expect(page).toHaveTitle("player5 next");
+    await expect(page.locator("#bpm")).toHaveValue("126");
+    await expect(page.getByRole("button", { name: "Play", exact: true })).toBeVisible();
   } finally {
     await context.setOffline(false);
   }
