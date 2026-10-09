@@ -40,8 +40,12 @@
 //! kit.
 //!
 //! Retriggering while the drum still rings (flams, rolls) restarts the hit
-//! cleanly: the previous output is carried as an offset that fades out over
-//! a couple of milliseconds, so the waveform never jumps. A safety knee at
+//! cleanly. The body restarts its phases, so its previous output is carried
+//! as an offset that fades out over a couple of milliseconds and the
+//! waveform never jumps. The noise needs no such help: its filters keep
+//! running, so only its envelope restarts, exactly as on a fresh hit (and
+//! the old noise is not frozen into the offset, which would stack the old
+//! and new snaps on top of each other). A safety knee at
 //! the output (exactly transparent below −3 dBFS) keeps even the most
 //! extreme settings inside full scale without a hard clip.
 
@@ -224,9 +228,12 @@ pub struct Snare {
     blip_env: f32,
     noise_env: f32,
     snap_env: f32,
+    /// Retrigger declick: the body output the previous hit left behind,
+    /// fading out.
     offset: f32,
     level_now: f32,
-    last_out: f32,
+    /// Body output (with the offset) of the last sample, before the knee.
+    last_body: f32,
 }
 
 impl Snare {
@@ -264,7 +271,7 @@ impl Snare {
             snap_env: 0.0,
             offset: 0.0,
             level_now: 0.0,
-            last_out: 0.0,
+            last_body: 0.0,
         };
         snare.set_sample_rate(sample_rate);
         snare
@@ -310,7 +317,7 @@ impl Snare {
         self.noise_lp.reset();
         self.active = false;
         self.offset = 0.0;
-        self.last_out = 0.0;
+        self.last_body = 0.0;
     }
 }
 
@@ -348,9 +355,10 @@ impl Voice for Snare {
         let sr = self.sample_rate;
         let p = self.params;
 
-        // Carry whatever is sounding now; it fades out under the new hit.
+        // Carry the body's current output; it fades out under the new hit.
+        // The noise path stays continuous by itself (see the module docs).
         if self.active {
-            self.offset = self.last_out;
+            self.offset = self.last_body;
         } else {
             self.offset = 0.0;
             self.level_now = p.level;
@@ -432,7 +440,9 @@ impl Voice for Snare {
         if (self.params.level - self.level_now).abs() < FLUSH_THRESHOLD {
             self.level_now = self.params.level;
         }
-        let out = safety_knee((body + wires) * self.hit_gain * self.level_now + self.offset);
+        let gain = self.hit_gain * self.level_now;
+        let body_out = body * gain + self.offset;
+        let out = safety_knee(body_out + wires * gain);
 
         // Advance envelopes.
         self.low_env = flush(self.low_env * self.low_coef);
@@ -449,7 +459,7 @@ impl Voice for Snare {
         {
             self.go_idle();
         } else {
-            self.last_out = out;
+            self.last_body = body_out;
         }
 
         out
@@ -971,6 +981,137 @@ mod tests {
             let (step, normal) = retrigger_steps(0.5, at, 0.42);
             assert!(step < normal * 1.3, "full, at {at}: {step} vs {normal}");
         }
+    }
+
+    /// Largest peak of `hits` consecutive hits, each retriggered `gap`
+    /// samples after a first hit (or left alone when `gap` is `None`).
+    fn worst_peak(p: VoiceParams, gap: Option<usize>, hits: usize) -> f32 {
+        let mut s = Snare::new(SR);
+        s.apply_params(&p);
+        let mut worst = 0.0f32;
+        for _ in 0..hits {
+            s.trigger(1.0);
+            let mut out = Vec::new();
+            if let Some(gap) = gap {
+                out = render(&mut s, gap);
+                s.trigger(1.0);
+            }
+            out.extend(render(&mut s, 2_400));
+            worst = worst.max(peak(&out));
+            render(&mut s, 30_000); // let it go idle
+        }
+        worst
+    }
+
+    #[test]
+    fn retrigger_does_not_stack_the_snaps() {
+        // Only the body needs the declick offset: the noise filters run on
+        // through a retrigger. Freezing the old noise into the offset as well
+        // stacked a whole extra snap on top of the new one (a fast roll at
+        // default controls peaked about 3.5 dB above any single hit, and the
+        // hottest settings ran into the safety knee).
+        let hot = VoiceParams {
+            tune: 1.0,
+            tone: 0.0,
+            snappy: 1.0,
+            decay: 1.0,
+            level: 1.0,
+        };
+        for (name, p, ceiling) in [
+            ("default", VoiceParams::default(), None),
+            ("hot", hot, Some(SAFETY_KNEE)),
+        ] {
+            let single = worst_peak(p, None, 400);
+            let mut worst = 0.0f32;
+            for ms in 1..=40 {
+                worst = worst.max(worst_peak(p, Some(ms * 48), 10));
+            }
+            assert!(worst < single * 1.3, "{name}: {worst} vs {single}");
+            if let Some(ceiling) = ceiling {
+                assert!(worst < ceiling, "{name}: {worst} reaches the knee");
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_and_finite_at_extreme_sample_rates() {
+        for sr in [
+            8_000.0,
+            22_050.0,
+            192_000.0,
+            384_000.0,
+            1.0,
+            0.0,
+            -1.0,
+            f32::NAN,
+            f32::INFINITY,
+        ] {
+            let mut s = Snare::new(sr);
+            let n = ((s.sample_rate * 0.3) as usize).clamp(16, 120_000);
+            for corner in 0..32u32 {
+                let bit = |b: u32| if corner & (1 << b) != 0 { 1.0 } else { 0.0 };
+                s.apply_params(&VoiceParams {
+                    tune: bit(0),
+                    decay: bit(1),
+                    tone: bit(2),
+                    snappy: bit(3),
+                    level: bit(4),
+                });
+                for velocity in [0.1, 0.7, 1.0] {
+                    s.trigger(velocity);
+                    let mut out = render(&mut s, n / 30);
+                    s.trigger(velocity);
+                    out.extend(render(&mut s, n));
+                    for x in out {
+                        assert!(x.is_finite() && x.abs() <= 1.0, "{sr} Hz {corner:05b}: {x}");
+                    }
+                }
+            }
+        }
+        // A real low rate still sounds like the same drum.
+        let low = hit(8_000.0, 1.0, |p| p.snappy = 0.0);
+        let f = dominant_hz(&hann(&low[160..800]), 8_000.0, 80.0, 600.0);
+        assert!((f - 180.0).abs() < 180.0 * 0.03, "8 kHz body at {f} Hz");
+    }
+
+    #[test]
+    fn no_dc_offset() {
+        // A decaying sine started at phase zero carries a little DC, and so
+        // does a retrigger's declick offset; both must stay a tiny share of
+        // the drum's energy (the kick's share is about 1e-4).
+        for snappy in [0.0, 0.5, 1.0] {
+            let single = hit(SR, 1.0, |p| p.snappy = snappy);
+            let mut s = snare_with(SR, |p| p.snappy = snappy);
+            s.trigger(1.0);
+            let mut roll = render(&mut s, 600);
+            s.trigger(1.0);
+            roll.extend(render(&mut s, 23_400));
+            for out in [single, roll] {
+                let n = out.len() as f64;
+                let mean = out.iter().map(|&x| f64::from(x)).sum::<f64>() / n;
+                let share = mean * mean / (energy(&out) / n);
+                assert!(share < 1e-3, "snappy {snappy}: DC share {share}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_folded_energy_near_nyquist() {
+        // The brightest, accented hit: the noise low-pass sits below Nyquist
+        // and the body is a pair of low sines, so 44.1 kHz must not carry
+        // more 18–21.5 kHz content (relative to the wires' main band) than
+        // the same drum at 96 kHz, where nothing can fold back.
+        let top_share = |sr: f32| {
+            let out = hit(sr, 1.0, |p| {
+                p.tone = 1.0;
+                p.snappy = 1.0;
+            });
+            let n = (sr * 0.1) as usize;
+            band_power(&out[..n], sr, 18_000.0, 21_500.0)
+                / band_power(&out[..n], sr, 2_000.0, 10_000.0)
+        };
+        let (cd, hi) = (top_share(44_100.0), top_share(96_000.0));
+        assert!(cd < 0.1 && cd < hi * 0.5, "44.1 kHz {cd}, 96 kHz {hi}");
     }
 
     #[test]
