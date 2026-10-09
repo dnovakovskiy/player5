@@ -300,7 +300,8 @@ Choices of ours, with the reasoning:
   unit.
 - **Device number.** `0x17`; on conflict the first free number in
   `0x13`–`0x27`, as beat-link does, but immediately rather than after a
-  4 s watch.
+  4 s watch. When the other device is also named `rekordbox`, only the one
+  with the higher MAC moves, so two player5s settle instead of leapfrogging.
 - **Deck numbers.** 9–12 map to decks 1–4; 1–4 are kept as they are (in
   case of dysentery's numbering); anything else is ignored, because
   beat-link's `& 7` would alias dysentery's mixer ID 33 to deck 1.

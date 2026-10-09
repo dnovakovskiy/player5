@@ -504,13 +504,33 @@ fn ignores_its_own_echo_and_defends_its_number() {
     let devices = s.devices();
     assert_eq!(devices.len(), 1);
     assert_eq!(devices[0].kind, DeviceKind::Rekordbox);
+    // Another player5 with a higher MAC on our new number yields to us.
+    let higher = KeepAlive::rekordbox(0x13, [0x0a, 0, 0, 0, 0, 1], Ipv4Addr::new(192, 168, 2, 31));
+    s.on_announce(
+        &higher.to_bytes(),
+        SocketAddrV4::new(higher.ip, ANNOUNCE_PORT),
+        2 * MS,
+        &mut out,
+    );
+    assert_eq!(s.device_number(), 0x13);
+    // A player on it does not.
+    let mut cdj = higher.clone();
+    cdj.name = "CDJ-3000".into();
+    cdj.mac = [0x0a, 0, 0, 0, 0, 2];
+    s.on_announce(
+        &cdj.to_bytes(),
+        SocketAddrV4::new(cdj.ip, ANNOUNCE_PORT),
+        2 * MS,
+        &mut out,
+    );
+    assert_eq!(s.device_number(), 0x14);
     out.clear();
     s.tick(3 * MS, &mut out);
     let sent = out.iter().find_map(|a| match a {
         Action::Send { bytes, .. } => Some(bytes.clone()),
         Action::Event(_) => None,
     });
-    assert_eq!(KeepAlive::parse(&sent.unwrap()).unwrap().number, 0x13);
+    assert_eq!(KeepAlive::parse(&sent.unwrap()).unwrap().number, 0x14);
 }
 
 #[test]

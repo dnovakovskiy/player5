@@ -20,6 +20,9 @@ pub const EXPIRY_NS: u64 = 10_000_000_000;
 /// membership changes.
 pub const DEVICES_MIN_INTERVAL_NS: u64 = 250_000_000;
 
+/// Most other devices tracked (a booth has a handful).
+pub const MAX_PEERS: usize = 64;
+
 /// After this long without seeing the unit, say so once.
 pub const WAITING_WARNING_NS: u64 = 5_000_000_000;
 
@@ -151,6 +154,7 @@ pub struct Session {
     published_at: u64,
     warned_waiting: bool,
     warned_interface: bool,
+    warned_number: bool,
 }
 
 impl Session {
@@ -177,6 +181,7 @@ impl Session {
             published_at: 0,
             warned_waiting: false,
             warned_interface: false,
+            warned_number: false,
         };
         if let Some(ip) = s.settings.interface {
             s.adopt_interface(ip);
@@ -280,17 +285,19 @@ impl Session {
             self.see_unit(*from.ip(), now, out);
         } else {
             let addr = *from.ip();
+            let full = self.peers.len() >= MAX_PEERS;
             match self.peers.iter_mut().find(|p| p.info.mac == ka.mac) {
                 Some(p) => {
                     p.info = ka;
                     p.addr = addr;
                     p.last_seen = now;
                 }
-                None => self.peers.push(Peer {
+                None if !full => self.peers.push(Peer {
                     info: ka,
                     addr,
                     last_seen: now,
                 }),
+                None => {}
             }
             self.defend_number(out);
         }
@@ -298,12 +305,19 @@ impl Session {
     }
 
     /// Picks another device number if a peer uses ours (opus-quad.md,
-    /// "Device number").
+    /// "Device number"). Between two rekordbox-named devices the one with
+    /// the lower MAC keeps the number, so two player5s cannot leapfrog
+    /// each other forever.
     fn defend_number(&mut self, out: &mut Vec<Action>) {
-        let used = |n: u8| self.peers.iter().any(|p| p.info.number == n);
-        if !used(self.number) {
+        let ours = self.mac;
+        let must_yield = self.peers.iter().any(|p| {
+            p.info.number == self.number
+                && (p.info.name != REKORDBOX_NAME || ours.map_or(true, |m| p.info.mac < m))
+        });
+        if !must_yield {
             return;
         }
+        let used = |n: u8| self.peers.iter().any(|p| p.info.number == n);
         match FALLBACK_DEVICE_NUMBERS.clone().find(|&n| !used(n)) {
             Some(n) => {
                 Self::status(
@@ -314,14 +328,18 @@ impl Session {
                 self.number = n;
                 self.next_announce = None;
             }
-            None => Self::status(
-                out,
-                true,
-                format!(
-                    "device number {} is taken and no other is free",
-                    self.number
-                ),
-            ),
+            None if !self.warned_number => {
+                self.warned_number = true;
+                Self::status(
+                    out,
+                    true,
+                    format!(
+                        "device number {} is taken and no other is free",
+                        self.number
+                    ),
+                );
+            }
+            None => {}
         }
     }
 
