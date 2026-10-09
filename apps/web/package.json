@@ -6,14 +6,17 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:single": "vite build --mode single",
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
     "check": "tsc --noEmit",
+    "gen-core": "node scripts/gen-core.mjs",
     "verify-wasm": "node scripts/verify-wasm.mjs",
     "test": "playwright test"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
     "@types/node": "^22.20.1",
+    "binaryen": "132.0.0",
     "typescript": "^5.9.3",
     "vite": "^6.4.3"
   }
