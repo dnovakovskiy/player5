@@ -209,5 +209,44 @@ final class FFISmokeTests: XCTestCase {
             XCTAssertEqual(MIDIClockInput.code(forStatus: 0xFB), 2)
             XCTAssertNil(MIDIClockInput.code(forStatus: 0x90))
         }
+
+        /// A packet longer than the 64 words `MIDIEventPacket` declares is
+        /// read whole, and the next packet is found after all its words
+        /// (`MIDIEventPacketNext` uses the full `wordCount`).
+        func testMIDIScanHandlesPacketsLongerThan64Words() {
+            let size = 1_024
+            let raw = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: 8)
+            defer { raw.deallocate() }
+            raw.initializeMemory(as: UInt8.self, repeating: 0, count: size)
+            raw.storeBytes(of: Int32(1), toByteOffset: 0, as: Int32.self)
+            raw.storeBytes(of: UInt32(2), toByteOffset: 4, as: UInt32.self)
+            var offset = 8
+            func packet(_ time: UInt64, _ words: [UInt32]) {
+                raw.storeBytes(of: time, toByteOffset: offset, as: UInt64.self)
+                raw.storeBytes(of: UInt32(words.count), toByteOffset: offset + 8, as: UInt32.self)
+                for (i, word) in words.enumerated() {
+                    raw.storeBytes(of: word, toByteOffset: offset + 12 + 4 * i, as: UInt32.self)
+                }
+                offset += 12 + 4 * words.count
+            }
+            // 32 two-word SysEx messages (64 words), then Clock and Stop:
+            // 66 words in one packet.
+            var long: [UInt32] = []
+            for _ in 0..<32 {
+                long.append(contentsOf: [0x3016_0000, 0])
+            }
+            long.append(contentsOf: [0x10F8_0000, 0x10FC_0000])
+            packet(1_000, long)
+            packet(2_000, [0x10FA_0000])
+
+            var seen: [(Int32, UInt64)] = []
+            let list = UnsafePointer(raw.assumingMemoryBound(to: MIDIEventList.self))
+            MIDIClockInput.scan(list) { code, time in
+                seen.append((code, time))
+            }
+            XCTAssertEqual(seen.map { $0.0 }, [0, 3, 1])
+            XCTAssertEqual(seen.first?.1, HostClock.nanoseconds(fromTicks: 1_000))
+            XCTAssertEqual(seen.last?.1, HostClock.nanoseconds(fromTicks: 2_000))
+        }
     #endif
 }
