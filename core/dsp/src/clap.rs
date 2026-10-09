@@ -649,6 +649,63 @@ mod tests {
     }
 
     #[test]
+    fn hits_start_on_the_trigger_sample_and_bursts_are_sample_accurate() {
+        // Timing is the product: sound on the trigger sample itself, and
+        // the flutter lands on the same sample offsets from idle and on a
+        // retrigger mid-tail, at every rate.
+        for sr in crate::SUPPORTED_SAMPLE_RATES {
+            let expected: Vec<usize> = BURST_SCHEDULE
+                .iter()
+                .map(|&(t, _)| (f64::from(t) * f64::from(sr)).round() as usize)
+                .collect();
+            let mut clap = clap_with(sr, 0.5, 1.0, 1.0);
+            for hit in 0..2 {
+                clap.trigger(1.0);
+                let mut onsets = Vec::new();
+                for n in 0..(sr * 0.06) as usize {
+                    let before = clap.next_burst;
+                    let s = clap.process();
+                    if n == 0 {
+                        assert!(s != 0.0, "{sr} Hz hit {hit}: silent trigger sample");
+                    }
+                    if clap.next_burst != before {
+                        onsets.push(n);
+                    }
+                }
+                assert_eq!(onsets, expected, "{sr} Hz hit {hit}");
+                assert!(clap.is_active(), "the second hit retriggers a ringing tail");
+            }
+        }
+    }
+
+    #[test]
+    fn tone_changes_colour_not_level() {
+        // The noise paths are normalised to a fixed RMS, so the tone
+        // extremes peak close to the default calibration (within the
+        // hit-to-hit spread of the noise) and carry the same energy.
+        for sr in crate::SUPPORTED_SAMPLE_RATES {
+            let mut energies = Vec::new();
+            for tone in [0.0, 0.5, 1.0] {
+                let mut clap = clap_with(sr, tone, 0.5, 1.0);
+                let mut total = 0.0;
+                for hit in 0..8 {
+                    let out = full_hit(&mut clap, 1.0, (sr * 0.3) as usize);
+                    let p = db(peak(&out));
+                    assert!(
+                        (-12.0..=-8.0).contains(&p),
+                        "{sr} Hz tone {tone} hit {hit}: {p} dBFS"
+                    );
+                    total += energy(&out);
+                }
+                energies.push(10.0 * (total / f64::from(sr)).log10());
+            }
+            let lo = energies.iter().copied().fold(f64::MAX, f64::min);
+            let hi = energies.iter().copied().fold(f64::MIN, f64::max);
+            assert!(hi - lo < 1.0, "{sr} Hz: energy by tone {energies:?} dB");
+        }
+    }
+
+    #[test]
     fn tone_raises_spectral_centroid() {
         let centroid = |tone: f32| {
             let mut clap = clap_with(SR, tone, 0.5, 1.0);
@@ -799,6 +856,83 @@ mod tests {
             "{:.2e} of the power below 100 Hz",
             low / total
         );
+    }
+
+    #[test]
+    fn invalid_rates_and_controls_are_safe() {
+        // Hosts can hand over nonsense; the voice must stay finite, bounded
+        // and must still go idle.
+        let rates = [
+            0.0,
+            -48_000.0,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            1.0,
+            8_000.0,
+            192_000.0,
+            1.0e7,
+        ];
+        let wild = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0, 2.0];
+        for sr in rates {
+            for &x in &wild {
+                let mut clap = Clap::new(sr);
+                clap.apply_params(&VoiceParams {
+                    tune: x,
+                    decay: x,
+                    tone: x,
+                    snappy: x,
+                    level: x,
+                });
+                let p = clap.params();
+                for v in [p.tune, p.decay, p.tone, p.snappy, p.level] {
+                    assert!((0.0..=1.0).contains(&v), "{sr} Hz, control {x}: {p:?}");
+                }
+                for velocity in [x, 1.0] {
+                    clap.trigger(velocity);
+                    let mut n = 0usize;
+                    while clap.is_active() {
+                        let s = clap.process();
+                        assert!(s.is_finite() && s.abs() <= 1.0, "{sr} Hz, {x}: {s}");
+                        n += 1;
+                        assert!(n < 2_000_000, "{sr} Hz, {x}: never idle");
+                    }
+                    assert_eq!(clap.process(), 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn random_play_stays_bounded_and_ends_in_silence() {
+        // Deterministic fuzz: random controls, velocities and retrigger
+        // gaps from a flam's 8 ms up to a long ring-out, at every rate.
+        let mut rng = Noise::new(0x1234_5678);
+        let mut unit_rand = move || 0.5 * (rng.tick() + 1.0);
+        for sr in crate::SUPPORTED_SAMPLE_RATES {
+            let mut clap = Clap::new(sr);
+            let mut loudest = 0.0f32;
+            for _ in 0..400 {
+                clap.apply_params(&VoiceParams {
+                    tune: unit_rand(),
+                    decay: unit_rand(),
+                    tone: unit_rand(),
+                    snappy: unit_rand(),
+                    level: unit_rand(),
+                });
+                clap.trigger(unit_rand());
+                let gap = (sr * (0.008 + 0.3 * unit_rand() * unit_rand())) as usize;
+                for _ in 0..gap {
+                    let s = clap.process();
+                    assert!(s.is_finite() && s.abs() <= 1.0, "{sr} Hz: {s}");
+                    loudest = loudest.max(s.abs());
+                }
+            }
+            assert!(db(loudest) < -6.0, "{sr} Hz: {} dBFS", db(loudest));
+            let tail = render(&mut clap, sr as usize);
+            assert!(!clap.is_active(), "{sr} Hz: still active after 1 s");
+            assert!(tail[tail.len() - 1_000..].iter().all(|&s| s == 0.0));
+        }
     }
 
     #[test]
