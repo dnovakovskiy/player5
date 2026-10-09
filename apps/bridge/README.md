@@ -50,6 +50,12 @@ cargo run -p player5-bridge -- --source sim --sim-bpm 124 --web apps/web/dist
 - Browsers on other machines must use `http://` to the bridge (an `https://`
   page cannot open a plain `ws://` connection to another host). That is why
   the bridge serves the app itself.
+- Plain `http://` from another machine is not a *secure context*, so the
+  browser withholds AudioWorklet, Web MIDI and the offline service worker.
+  The app still plays, using its main-thread audio fallback, which is more
+  prone to dropouts under heavy UI load. For the best timing, run the
+  browser on the bridge machine itself and open `http://localhost:17505/`:
+  `localhost` counts as a secure context, so the full engine runs.
 - Stop it with Ctrl-C.
 
 ## Endpoints
