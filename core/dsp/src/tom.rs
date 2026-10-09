@@ -123,10 +123,13 @@ const NOISE_CUTOFF_LN_RATIO: f32 = 1.609_437_912;
 const NOISE_CUTOFF_VELOCITY_BASE: f32 = 0.6;
 /// Butterworth: no resonant peak, so the attack stays a breath, not a ping.
 const NOISE_Q: f32 = 0.707;
-/// Noise level relative to the body at `tone = 0.5`; `tone` moves it by
-/// ±25 %.
-const NOISE_GAIN: f32 = 0.3;
+/// Noise level relative to the body at `tone = 0.5` and full velocity.
+/// `tone` moves it by ±25 %; lower velocities scale it by
+/// `base + (1 − base) · velocity` on top of the body's own velocity curve,
+/// so an accent brings the stick forward.
+const NOISE_GAIN: f32 = 0.8;
 const NOISE_GAIN_TONE: f32 = 0.5;
+const NOISE_VELOCITY_BASE: f32 = 0.5;
 /// Noise envelope level below which the attack path switches off.
 const NOISE_OFF: f32 = 1e-6;
 
@@ -312,8 +315,10 @@ impl Voice for Tom {
         self.amp_coef = math::decay_coefficient(self.decay_seconds(), self.sample_rate);
         self.noise_lp
             .set(self.noise_cutoff_hz(velocity), NOISE_Q, self.sample_rate);
-        let noise_level =
-            strike * NOISE_GAIN * (1.0 - 0.5 * NOISE_GAIN_TONE + NOISE_GAIN_TONE * self.params.tone);
+        let noise_level = strike
+            * NOISE_GAIN
+            * (1.0 - 0.5 * NOISE_GAIN_TONE + NOISE_GAIN_TONE * self.params.tone)
+            * (NOISE_VELOCITY_BASE + (1.0 - NOISE_VELOCITY_BASE) * velocity);
         let depth = SWEEP_DEPTH_BASE + SWEEP_DEPTH_VELOCITY * velocity;
 
         if self.active {
@@ -462,8 +467,8 @@ mod tests {
         (c.len() - 1) as f64 * f64::from(sr) / (c[c.len() - 1] - c[0])
     }
 
-    /// Power-weighted mean frequency of a Hann-windowed DFT.
-    fn spectral_centroid(samples: &[f32], sr: f32) -> f64 {
+    /// `(frequency, power)` per bin of a Hann-windowed DFT (DC excluded).
+    fn power_spectrum(samples: &[f32], sr: f32) -> Vec<(f64, f64)> {
         let n = samples.len();
         let w: Vec<f64> = samples
             .iter()
@@ -473,19 +478,38 @@ mod tests {
                 f64::from(s) * hann
             })
             .collect();
-        let (mut num, mut den) = (0.0, 0.0);
-        for k in 1..n / 2 {
-            let (mut re, mut im) = (0.0, 0.0);
-            for (i, x) in w.iter().enumerate() {
-                let ph = std::f64::consts::TAU * (k * i) as f64 / n as f64;
-                re += x * ph.cos();
-                im -= x * ph.sin();
-            }
-            let p = re * re + im * im;
-            num += p * k as f64 * f64::from(sr) / n as f64;
-            den += p;
-        }
+        (1..n / 2)
+            .map(|k| {
+                let (mut re, mut im) = (0.0, 0.0);
+                for (i, x) in w.iter().enumerate() {
+                    let ph = std::f64::consts::TAU * ((k * i) % n) as f64 / n as f64;
+                    re += x * ph.cos();
+                    im -= x * ph.sin();
+                }
+                (k as f64 * f64::from(sr) / n as f64, re * re + im * im)
+            })
+            .collect()
+    }
+
+    /// Power-weighted mean frequency over the bins at or above `min_hz`.
+    fn spectral_centroid(samples: &[f32], sr: f32, min_hz: f64) -> f64 {
+        let (num, den) = power_spectrum(samples, sr)
+            .into_iter()
+            .filter(|&(f, _)| f >= min_hz)
+            .fold((0.0, 0.0), |(n, d), (f, p)| (n + f * p, d + p));
         num / den
+    }
+
+    /// Fraction of the power at or above `split_hz`.
+    fn power_above(samples: &[f32], sr: f32, split_hz: f64) -> f64 {
+        let spectrum = power_spectrum(samples, sr);
+        let total: f64 = spectrum.iter().map(|&(_, p)| p).sum();
+        let high: f64 = spectrum
+            .iter()
+            .filter(|&&(f, _)| f >= split_hz)
+            .map(|&(_, p)| p)
+            .sum();
+        high / total
     }
 
     #[test]
@@ -508,18 +532,455 @@ mod tests {
     }
 
     #[test]
-    fn report() {
+    fn full_hit_peaks_near_minus_8_dbfs() {
         for range in RANGES {
             for sr in crate::SUPPORTED_SAMPLE_RATES {
                 for tune in [0.0, 0.5, 1.0] {
                     let out = hit(sr, range, 1.0, |p| p.tune = tune);
-                    eprintln!("{range:?} sr {sr} tune {tune}: peak {:.2} dB", db(peak(&out)));
+                    let d = db(peak(&out));
+                    assert!(
+                        (-9.5..=-6.5).contains(&d),
+                        "{range:?} at {sr} Hz, tune {tune}: peak {d} dBFS"
+                    );
                 }
             }
-            for v in [1.0, 0.7, 0.42, 0.1] {
-                let out = hit(48_000.0, range, v, |_| {});
-                eprintln!("{range:?} v {v}: peak {:.2} dB", db(peak(&out)));
+        }
+    }
+
+    #[test]
+    fn output_is_finite_and_bounded() {
+        for sr in crate::SUPPORTED_SAMPLE_RATES {
+            for range in RANGES {
+                for combo in 0..32u32 {
+                    let bit = |b: u32| if combo & (1 << b) != 0 { 1.0 } else { 0.0 };
+                    let params = VoiceParams {
+                        tune: bit(0),
+                        decay: bit(1),
+                        tone: bit(2),
+                        snappy: bit(3),
+                        level: bit(4),
+                    };
+                    for velocity in [0.1, 0.7, 1.0] {
+                        let mut tom = Tom::new(sr, range);
+                        tom.apply_params(&params);
+                        tom.trigger(velocity);
+                        let mut out = render(&mut tom, (sr * 0.01) as usize);
+                        // Hammer it: retriggers pile energy into the body.
+                        for _ in 0..8 {
+                            tom.trigger(1.0);
+                            out.extend(render(&mut tom, (sr * 0.008) as usize));
+                        }
+                        out.extend(render(&mut tom, (sr * 0.1) as usize));
+                        for s in out {
+                            assert!(
+                                s.is_finite() && s.abs() <= 1.0,
+                                "{range:?} {sr} {params:?} v{velocity}: {s}"
+                            );
+                        }
+                    }
+                }
             }
+        }
+    }
+
+    #[test]
+    fn decays_to_silence_and_goes_idle() {
+        for range in RANGES {
+            for (decay, limit_s) in [(0.0, 0.4), (1.0, 2.4)] {
+                let sr = 48_000.0;
+                let mut tom = tom_with(sr, range, |p| p.decay = decay);
+                tom.trigger(1.0);
+                let n = (sr * limit_s) as usize;
+                let out = render(&mut tom, n);
+                assert!(!tom.is_active(), "{range:?} decay {decay} still active");
+                let idle_at = out.iter().rposition(|&s| s != 0.0).unwrap() + 1;
+                assert!(out[idle_at - 1].abs() < 1e-5, "{}", out[idle_at - 1]);
+                assert!(out[idle_at..].iter().all(|&s| s == 0.0));
+                assert!(render(&mut tom, 4_800).iter().all(|&s| s == 0.0));
+                // Every state that could linger is cleared.
+                assert_eq!(tom.amp_env, 0.0);
+                assert_eq!(tom.noise_env, 0.0);
+                assert_eq!(tom.pitch_env, 0.0);
+                assert_eq!(tom.ramp, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn small_states_flush_to_zero_while_ringing() {
+        for range in RANGES {
+            let mut tom = tom_with(48_000.0, range, |p| p.decay = 1.0);
+            tom.trigger(1.0);
+            render(&mut tom, 24_000);
+            assert!(tom.is_active());
+            assert_eq!(tom.noise_env, 0.0);
+            assert_eq!(tom.pitch_env, 0.0);
+        }
+    }
+
+    #[test]
+    fn decay_sets_ring_time() {
+        for range in RANGES {
+            let tail = |decay: f32| {
+                let out = hit(48_000.0, range, 1.0, |p| p.decay = decay);
+                energy(&out[4_800..7_200])
+            };
+            let (short, mid, long) = (tail(0.0), tail(0.5), tail(1.0));
+            assert!(long > mid * 4.0 && mid > short * 4.0, "{short} {mid} {long}");
+
+            // In the linear tail the envelope falls at the nominal rate.
+            let sr = 48_000.0;
+            let tom = tom_with(sr, range, |p| p.decay = 0.5);
+            let t60 = tom.decay_seconds();
+            let out = hit(sr, range, 1.0, |p| p.decay = 0.5);
+            let at = |t: f32| {
+                let i = (t * sr) as usize;
+                peak(&out[i..i + 1_200])
+            };
+            let fall_db = db(at(0.2)) - db(at(0.4));
+            let expect = 60.0 * 0.2 / t60;
+            assert!(
+                (fall_db - expect).abs() < expect * 0.1,
+                "{range:?}: fell {fall_db} dB in 0.2 s, expected {expect}"
+            );
+        }
+    }
+
+    /// Settled pitch, measured well after the glide.
+    fn settled_frequency(sr: f32, range: TomRange, tune: f32) -> f64 {
+        let out = hit(sr, range, 1.0, |p| {
+            p.tune = tune;
+            p.decay = 1.0;
+        });
+        let from = (sr * 0.15) as usize;
+        let to = (sr * 0.45) as usize;
+        frequency(&out[from..to], sr)
+    }
+
+    #[test]
+    fn tune_maps_to_expected_frequencies() {
+        let table = [
+            (TomRange::Low, [70.0, 91.652, 120.0]),
+            (TomRange::Mid, [110.0, 140.712, 180.0]),
+            (TomRange::High, [170.0, 218.174, 280.0]),
+        ];
+        for sr in crate::SUPPORTED_SAMPLE_RATES {
+            for (range, expect) in table {
+                for (tune, want) in [0.0, 0.5, 1.0].into_iter().zip(expect) {
+                    let f = settled_frequency(sr, range, tune);
+                    assert!(
+                        (f / want - 1.0).abs() < 0.005,
+                        "{range:?} tune {tune} at {sr}: {f} Hz, expected {want}"
+                    );
+                    let nominal = tom_with(sr, range, |p| p.tune = tune).tuned_frequency_hz();
+                    assert!((f64::from(nominal) / want - 1.0).abs() < 1e-4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ranges_are_ordered_at_equal_tune() {
+        for tune in [0.0, 0.5, 1.0] {
+            let low = settled_frequency(48_000.0, TomRange::Low, tune);
+            let mid = settled_frequency(48_000.0, TomRange::Mid, tune);
+            let high = settled_frequency(48_000.0, TomRange::High, tune);
+            assert!(low < mid && mid < high, "tune {tune}: {low} {mid} {high}");
+        }
+    }
+
+    #[test]
+    fn pitch_glides_down_and_settles() {
+        let sr = 48_000.0;
+        for range in RANGES {
+            let out = hit(sr, range, 1.0, |p| p.decay = 1.0);
+            let settled = settled_frequency(sr, range, 0.5);
+            // The first half cycle starts at sample 0 (a rising zero
+            // crossing); time it to the first falling crossing.
+            let half = out
+                .windows(2)
+                .position(|w| w[0] > 0.0 && w[1] <= 0.0)
+                .map(|i| {
+                    let (a, b) = (f64::from(out[i]), f64::from(out[i + 1]));
+                    i as f64 + a / (a - b)
+                })
+                .unwrap();
+            let early = 0.5 * f64::from(sr) / half;
+            let ratio = early / settled;
+            assert!(
+                (1.3..=1.6).contains(&ratio),
+                "{range:?}: starts at {ratio}x the settled pitch"
+            );
+            // Settled within 80 ms.
+            let late = frequency(&out[(sr * 0.08) as usize..(sr * 0.18) as usize], sr);
+            assert!(
+                (late / settled - 1.0).abs() < 0.01,
+                "{range:?}: {late} Hz at 80 ms vs settled {settled}"
+            );
+            // Still clearly gliding over the first 30 ms.
+            let early_mean = frequency(&out[..(sr * 0.03) as usize], sr);
+            assert!(
+                early_mean > settled * 1.05,
+                "{range:?}: {early_mean} vs {settled}"
+            );
+        }
+    }
+
+    /// The first ~10 ms of a hit, centred in a 1024-sample frame so the
+    /// analysis window does not taper the attack away.
+    fn attack_frame(out: &[f32]) -> Vec<f32> {
+        let mut frame = vec![0.0; 512];
+        frame.extend_from_slice(&out[..512]);
+        frame
+    }
+
+    /// Spectral centroid of the attack, over bins from `min_hz` up. Above
+    /// 1 kHz the body's fundamental and low harmonics drop out and the
+    /// attack's colour shows.
+    fn attack_centroid(range: TomRange, velocity: f32, tone: f32, min_hz: f64) -> f64 {
+        let sr = 48_000.0;
+        let out = hit(sr, range, velocity, |p| p.tone = tone);
+        spectral_centroid(&attack_frame(&out), sr, min_hz)
+    }
+
+    #[test]
+    fn tone_brightens_the_attack() {
+        for range in RANGES {
+            let dark = attack_centroid(range, 1.0, 0.0, 1_000.0);
+            let mid = attack_centroid(range, 1.0, 0.5, 1_000.0);
+            let bright = attack_centroid(range, 1.0, 1.0, 1_000.0);
+            assert!(
+                bright > mid * 1.1 && mid > dark * 1.1,
+                "{range:?}: {dark} {mid} {bright}"
+            );
+            // Whole-band centroid moves the same way, if only a little:
+            // the body dominates the energy.
+            let dark = attack_centroid(range, 1.0, 0.0, 0.0);
+            let bright = attack_centroid(range, 1.0, 1.0, 0.0);
+            assert!(bright > dark, "{range:?}: {dark} {bright}");
+        }
+    }
+
+    #[test]
+    fn velocity_raises_level_and_brightness() {
+        for range in RANGES {
+            let p = |v: f32| peak(&hit(48_000.0, range, v, |_| {}));
+            let (full, normal, grace) = (p(1.0), p(0.7), p(0.42));
+            let accent_db = db(full) - db(normal);
+            assert!(
+                (2.0..=5.0).contains(&accent_db),
+                "{range:?}: accent adds {accent_db} dB"
+            );
+            assert!(grace < normal * 0.6, "{range:?}: {grace} vs {normal}");
+            // Accent glides further (whole-band centroid rises), saturates
+            // harder and opens the attack filter (more power above 1 kHz).
+            let soft = attack_centroid(range, 0.4, 0.5, 0.0);
+            let hard = attack_centroid(range, 1.0, 0.5, 0.0);
+            assert!(hard > soft * 1.03, "{range:?}: centroid {soft} vs {hard}");
+            let hf = |v: f32| {
+                let out = hit(48_000.0, range, v, |_| {});
+                power_above(&attack_frame(&out), 48_000.0, 1_000.0)
+            };
+            let (soft, hard) = (hf(0.4), hf(1.0));
+            eprintln!("{range:?}: HF share {soft} vs {hard}");
+            assert!(hard > soft * 1.5, "{range:?}: HF share {soft} vs {hard}");
+        }
+    }
+
+    #[test]
+    fn level_scales_output_and_snappy_is_ignored() {
+        for range in RANGES {
+            let full = hit(48_000.0, range, 1.0, |_| {});
+            let half = hit(48_000.0, range, 1.0, |p| p.level = 0.5);
+            for (a, b) in full.iter().zip(&half) {
+                assert!((a * 0.5 - b).abs() < 1e-6);
+            }
+            let silent = hit(48_000.0, range, 1.0, |p| p.level = 0.0);
+            assert!(silent.iter().all(|&s| s == 0.0));
+            let snappy = hit(48_000.0, range, 1.0, |p| p.snappy = 1.0);
+            assert_eq!(full, snappy);
+        }
+    }
+
+    #[test]
+    fn level_change_mid_ring_is_smooth() {
+        for range in RANGES {
+            let mut tom = Tom::new(48_000.0, range);
+            tom.trigger(1.0);
+            let before = render(&mut tom, 4_800);
+            tom.apply_params(&VoiceParams {
+                level: 0.0,
+                ..VoiceParams::default()
+            });
+            let after = render(&mut tom, 4_800);
+            let jump = (after[0] - before[before.len() - 1]).abs();
+            let swing = max_step(&before[before.len() - 960..]);
+            assert!(jump <= swing * 1.1, "{range:?}: {jump} vs {swing}");
+            assert!(peak(&after[2_400..]) < 1e-3 * peak(&before));
+        }
+    }
+
+    fn max_step(samples: &[f32]) -> f32 {
+        samples
+            .windows(2)
+            .fold(0.0f32, |m, w| m.max((w[1] - w[0]).abs()))
+    }
+
+    #[test]
+    fn retrigger_mid_ring_has_no_discontinuity() {
+        let sr = 48_000.0;
+        for range in RANGES {
+            let fresh = hit(sr, range, 1.0, |_| {});
+            let (fresh_peak, fresh_step) = (peak(&fresh), max_step(&fresh));
+            let mut hard_reset_worst = 0.0f32;
+            for (first, second) in [(0.42, 0.7), (0.6, 1.0), (1.0, 1.0), (1.0, 0.42)] {
+                for at_ms in [3.0, 8.0, 13.0, 21.0, 40.0, 77.0, 150.0] {
+                    let mut tom = Tom::new(sr, range);
+                    tom.trigger(first);
+                    let at = (sr * at_ms / 1_000.0) as usize;
+                    let mut out = render(&mut tom, at);
+                    // What the ring would have done next without the hit,
+                    // and what a restart from scratch would do.
+                    let carry_on = tom.clone().process();
+                    let mut restarted = tom.clone();
+                    restarted.reset_state();
+                    restarted.trigger(second);
+                    hard_reset_worst = hard_reset_worst.max((restarted.process() - carry_on).abs());
+
+                    tom.trigger(second);
+                    out.extend(render(&mut tom, 4_800));
+                    // The first retriggered sample only departs from the
+                    // ring by the onset of the new attack.
+                    let deviation = (out[at] - carry_on).abs();
+                    let around = max_step(&out[at - 1..at + 480]);
+                    assert!(
+                        deviation < 0.15 * fresh_peak && around <= fresh_step * 2.0,
+                        "{range:?} {first}->{second} at {at_ms} ms: deviation \
+                         {deviation}, steepest step {around} (fresh hit {fresh_step})"
+                    );
+                }
+            }
+            // The measure would catch a hard restart.
+            assert!(
+                hard_reset_worst > 0.3 * fresh_peak,
+                "{range:?}: {hard_reset_worst}"
+            );
+        }
+    }
+
+    #[test]
+    fn flam_stays_within_a_full_hit() {
+        let sr = 48_000.0;
+        for range in RANGES {
+            let mut tom = Tom::new(sr, range);
+            tom.trigger(0.6);
+            let mut out = render(&mut tom, 960);
+            tom.trigger(1.0);
+            out.extend(render(&mut tom, 24_000));
+            let single = peak(&hit(sr, range, 1.0, |_| {}));
+            let p = peak(&out);
+            assert!(
+                (single * 0.9..=single * 1.05).contains(&p),
+                "{range:?}: {p} vs {single}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_dc_offset() {
+        for range in RANGES {
+            for tune in [0.0, 1.0] {
+                let out = hit(48_000.0, range, 1.0, |p| p.tune = tune);
+                let mean = out.iter().map(|&s| f64::from(s)).sum::<f64>() / out.len() as f64;
+                assert!(
+                    mean.abs() < 3e-3 * f64::from(peak(&out)),
+                    "{range:?} tune {tune}: mean {mean}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn renders_are_deterministic() {
+        for range in RANGES {
+            let run = || {
+                let mut tom = tom_with(48_000.0, range, |p| p.tone = 0.8);
+                tom.trigger(0.7);
+                let mut out = render(&mut tom, 1_000);
+                tom.trigger(1.0);
+                out.extend(render(&mut tom, 30_000));
+                out
+            };
+            let (a, b) = (run(), run());
+            assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()));
+        }
+    }
+
+    #[test]
+    fn ten_seconds_render_quickly() {
+        let sr = 48_000.0;
+        for range in RANGES {
+            let mut tom = tom_with(sr, range, |p| p.decay = 1.0);
+            let start = std::time::Instant::now();
+            let mut acc = 0.0f32;
+            for i in 0..(10 * 48_000) {
+                if i % 6_000 == 0 {
+                    tom.trigger(if i % 12_000 == 0 { 1.0 } else { 0.7 });
+                }
+                acc += tom.process().abs();
+            }
+            let elapsed = start.elapsed();
+            assert!(acc.is_finite() && acc > 0.0);
+            assert!(elapsed.as_millis() < 100, "{range:?}: 10 s took {elapsed:?}");
+        }
+    }
+
+    #[test]
+    fn report() {
+        for range in RANGES {
+            let fresh = hit(48_000.0, range, 1.0, |p| p.tone = 1.0);
+            eprintln!("{range:?} fresh max step {}", max_step(&fresh));
+            for tone in [0.0, 0.5, 1.0] {
+                eprintln!(
+                    "{range:?} tone {tone}: centroid {:.0}",
+                    attack_centroid(range, 1.0, tone, 1_000.0)
+                );
+            }
+            for v in [0.4, 0.7, 1.0] {
+                eprintln!(
+                    "{range:?} v {v}: centroid {:.0}",
+                    attack_centroid(range, v, 0.5, 1_000.0)
+                );
+            }
+            let out = hit(48_000.0, range, 1.0, |_| {});
+            let mean = out.iter().map(|&s| f64::from(s)).sum::<f64>() / out.len() as f64;
+            eprintln!("{range:?} mean {mean:e} peak {}", peak(&out));
+            for tone in [0.0, 0.5, 1.0] {
+                for v in [0.7, 1.0] {
+                    let mut a = tom_with(48_000.0, range, |p| p.tone = tone);
+                    a.trigger(v);
+                    a.amp_env = 1e-30;
+                    let noise_only = render(&mut a, 480);
+                    let mut b = tom_with(48_000.0, range, |p| p.tone = tone);
+                    b.trigger(v);
+                    b.noise_env = 0.0;
+                    let body_only = render(&mut b, 480);
+                    eprintln!(
+                        "{range:?} tone {tone} v {v}: noise/body energy {:.1} dB, peaks {:.3} {:.3}",
+                        10.0 * (energy(&noise_only) / energy(&body_only)).log10(),
+                        peak(&noise_only),
+                        peak(&body_only)
+                    );
+                }
+            }
+            let quiet = hit(48_000.0, range, 1.0, |p| p.tone = 0.0);
+            let loud = hit(48_000.0, range, 1.0, |p| p.tone = 1.0);
+            eprintln!(
+                "{range:?} attack energy 10ms tone0 {} tone.5 {} tone1 {}",
+                energy(&quiet[..480]),
+                energy(&out[..480]),
+                energy(&loud[..480])
+            );
         }
     }
 }
