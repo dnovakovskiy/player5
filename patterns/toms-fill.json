@@ -1,0 +1,11 @@
+{
+  "bpm": 118,
+  "accent": 1.0,
+  "flam": 0.2,
+  "voices": {
+    "low_tom":  { "steps": "X--x ---- --x- -F--", "tune": 0.35, "decay": 0.7 },
+    "mid_tom":  { "steps": "---- x-x- ---- x---", "tone": 0.7 },
+    "high_tom": { "steps": "--x- ---X x--- --x-", "tune": 0.6, "decay": 0.35 }
+  },
+  "render": { "bars": 2, "sample_rate": 48000, "tail_seconds": 1.0 }
+}
