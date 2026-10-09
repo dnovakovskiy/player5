@@ -76,11 +76,11 @@ impl QueuedLog {
         self.entries[(self.head + 2 * QUEUED_MEMORY - 1 - i) % QUEUED_MEMORY]
     }
 
-    /// Forgets the steps whose events a flush at `sample` dropped (all of
-    /// them: see [`QueuedLog::cut`]). Queued samples only grow, so they are
-    /// the newest entries.
+    /// Forgets the steps whose grid hit a flush at `sample` dropped (with
+    /// [`QueuedLog::cut`], all of their events). Queued samples only grow,
+    /// so they are the newest entries.
     fn flush_from(&mut self, sample: u64) {
-        while self.len > 0 && self.newest(0).first >= sample {
+        while self.len > 0 && self.newest(0).sample >= sample {
             self.head = (self.head + QUEUED_MEMORY - 1) % QUEUED_MEMORY;
             self.len -= 1;
         }
@@ -543,7 +543,7 @@ impl Control {
         let mut dropped = None;
         for i in 0..self.queued.len {
             let q = self.queued.newest(i);
-            if q.first < commit {
+            if q.sample < commit {
                 break;
             }
             dropped = Some(q.step);
