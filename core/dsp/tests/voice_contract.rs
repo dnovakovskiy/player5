@@ -1,13 +1,14 @@
 //! The [`Voice`] contract, checked for every voice in the kit.
 
-use dsp::{
-    Clap, ClosedHat, Cowbell, Kick, OpenHat, Rim, Snare, Tom, TomRange, Voice, VoiceParams,
-};
+use dsp::{Clap, ClosedHat, Cowbell, Kick, OpenHat, Rim, Snare, Tom, TomRange, Voice, VoiceParams};
 
 const SR: f32 = 48_000.0;
 
+/// Builds a fresh voice.
+type Make<'a> = &'a dyn Fn() -> Box<dyn VoiceClone>;
+
 /// Runs `check` against a fresh instance of every voice type.
-fn for_every_voice(check: &dyn Fn(&str, &dyn Fn() -> Box<dyn VoiceClone>)) {
+fn for_every_voice(check: &dyn Fn(&str, Make)) {
     check("kick", &|| Box::new(Kick::new(SR)));
     check("snare", &|| Box::new(Snare::new(SR)));
     check("low tom", &|| Box::new(Tom::new(SR, TomRange::Low)));
@@ -69,8 +70,10 @@ fn a_silent_hit_neither_starts_nor_cuts_a_sound() {
 #[test]
 fn level_changes_on_a_sounding_voice_are_smoothed() {
     for_every_voice(&|name, make| {
-        let mut params = VoiceParams::default();
-        params.decay = 1.0;
+        let mut params = VoiceParams {
+            decay: 1.0,
+            ..VoiceParams::default()
+        };
         let mut a = make();
         a.apply_params(&params);
         a.trigger(1.0);
