@@ -302,6 +302,9 @@ impl Voice for Tom {
         self.noise_coef = math::tau_coefficient(self.spec.noise_tau_s, self.sample_rate);
         self.ramp_coef = math::tau_coefficient(RETRIGGER_TAU_S, self.sample_rate);
         self.level_coef = 1.0 - math::tau_coefficient(LEVEL_TAU_S, self.sample_rate);
+        // Back to the freshly built state, so a render after a rate change
+        // does not depend on what played before it.
+        self.noise = Noise::new(self.spec.noise_seed);
         self.reset_state();
     }
 
