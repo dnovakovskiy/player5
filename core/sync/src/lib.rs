@@ -21,6 +21,8 @@ mod clock;
 pub mod follower;
 pub mod host_time;
 mod internal;
+#[cfg(feature = "ableton-link")]
+pub mod link;
 pub mod midi;
 pub mod net;
 pub mod opus;

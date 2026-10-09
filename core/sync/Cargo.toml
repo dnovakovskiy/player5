@@ -7,7 +7,19 @@ license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+# Ableton Link clock source (`sync::link`). Off by default: it compiles in
+# the Ableton Link SDK, which is GPLv2+ unless Ableton grants a proprietary
+# license. Read ADR-0005 before enabling it in anything you distribute.
+# Building it needs CMake, a C++ compiler and libclang (for bindgen), and
+# Rust 1.85+ (the bindings crate uses edition 2024).
+ableton-link = ["dep:rusty_link"]
+
 [dependencies]
+# Bindings over Ableton's official `abl_link` C wrapper, bundling Link
+# 3.1.5. GPL-2.0-or-later. Pinned exactly: 0.4.9 moves to a Link 4 beta.
+rusty_link = { version = "=0.4.8", optional = true }
 
 [lints]
 workspace = true
