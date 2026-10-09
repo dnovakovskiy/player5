@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	Not referenced by project.yml yet. Pro DJ Link and Ableton Link discover
+	peers with UDP broadcast/multicast, which iOS only allows with Apple's
+	multicast entitlement (granted on request; see
+	docs/ios-multicast-entitlement.md). Once it is granted:
+	  1. enable the capability on the App ID in the developer portal,
+	  2. uncomment the key below,
+	  3. uncomment CODE_SIGN_ENTITLEMENTS in apps/ios/project.yml.
+	Signing with this key before the grant fails, so it stays commented out.
+
+	<key>com.apple.developer.networking.multicast</key>
+	<true/>
+	-->
+</dict>
+</plist>
