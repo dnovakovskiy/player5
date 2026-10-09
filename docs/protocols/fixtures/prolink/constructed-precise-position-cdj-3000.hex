@@ -1,0 +1,11 @@
+# Pro DJ Link fixture: constructed-precise-position-cdj-3000
+# Constructed from the documented layout, not a capture: no published
+# capture contains this packet. Golden bytes for the builders in
+# core/sync/src/prolink/packets.rs.
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/beats.html#absolute-position-packets
+# Device 2: track 312 s, playhead 61.234 s, pitch +3.26 %, 120.2 BPM effective.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 0b 43 44 4a 2d 33
+30 30 30 00 00 00 00 00 00 00 00 00 00 00 00 02
+00 02 00 18 00 00 01 38 00 00 ef 32 00 00 01 46
+00 00 00 00 00 00 00 00 00 00 04 b2

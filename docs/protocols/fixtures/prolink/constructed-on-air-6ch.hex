@@ -1,0 +1,11 @@
+# Pro DJ Link fixture: constructed-on-air-6ch
+# Constructed from the documented layout, not a capture: no published
+# capture contains this packet. Golden bytes for the builders in
+# core/sync/src/prolink/packets.rs.
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/mixer_integration.html#channels-on-air
+# Six-channel on-air flags (subtype 03): channels 1 and 5 on air.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 03 44 4a 4d 2d 56
+31 30 00 00 00 00 00 00 00 00 00 00 00 00 00 01
+03 21 00 11 01 00 00 00 00 00 00 00 00 01 00 00
+00 00 00 00 00
