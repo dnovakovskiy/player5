@@ -210,8 +210,9 @@ impl KeepAlive {
         self.tail[3]
     }
 
-    /// Parses a keep-alive. Longer packets are accepted (beat-link does
-    /// the same); only the first [`KEEP_ALIVE_LEN`] bytes are read.
+    /// Parses a keep-alive. Longer packets are accepted (our leniency:
+    /// beat-link warns and then rejects them); only the first
+    /// [`KEEP_ALIVE_LEN`] bytes are read.
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
         expect(bytes, kind::KEEP_ALIVE, KEEP_ALIVE_LEN)?;
         let mut mac = [0; 6];

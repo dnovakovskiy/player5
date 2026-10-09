@@ -183,7 +183,8 @@ fn rejects_malformed_packets() {
     ));
     assert_eq!(DeckStatus::parse(&ka), Err(ParseError::WrongKind(0x06)));
     assert_eq!(KeepAlive::parse(&st), Err(ParseError::WrongKind(0x0a)));
-    // Longer keep-alives are accepted, like beat-link does.
+    // Longer keep-alives are accepted (our leniency; beat-link rejects
+    // them).
     let mut long = ka.clone();
     long.extend_from_slice(&[0xaa; 8]);
     assert_eq!(KeepAlive::parse(&long), KeepAlive::parse(&ka));
@@ -788,7 +789,110 @@ fn policies() {
     assert_eq!(s.announce_interval_ns, 2_000_000_000);
 }
 
+#[test]
+fn a_discovered_interface_is_found_again_after_the_unit_returns() {
+    let mut s = Session::new(settings(None), 0);
+    let mut out = Vec::new();
+    s.on_announce(&unit_keep_alive(), from_unit(ANNOUNCE_PORT), 0, &mut out);
+    assert_eq!(s.interface_wanted(), Some(UNIT));
+    s.set_interface(US, &mut out);
+    s.tick(11_000 * MS, &mut out);
+    assert_eq!(s.unit(), None);
+    // Forgotten: nothing is announced from a possibly stale address.
+    assert_eq!(s.interface(), None);
+    out.clear();
+    s.tick(13_000 * MS, &mut out);
+    assert!(out.iter().all(|a| !matches!(a, Action::Send { .. })));
+    // The unit is back (we now have another address toward it).
+    s.on_announce(
+        &unit_keep_alive(),
+        from_unit(ANNOUNCE_PORT),
+        14_000 * MS,
+        &mut out,
+    );
+    assert_eq!(s.interface_wanted(), Some(UNIT));
+    let moved = Ipv4Addr::new(192, 168, 2, 21);
+    s.set_interface(moved, &mut out);
+    out.clear();
+    s.tick(14_001 * MS, &mut out);
+    let ka = out.iter().find_map(|a| match a {
+        Action::Send {
+            via: Via::Announce,
+            bytes,
+            ..
+        } => KeepAlive::parse(bytes).ok(),
+        _ => None,
+    });
+    assert_eq!(ka.unwrap().ip, moved);
+
+    // A configured interface is kept.
+    let mut c = Session::new(settings(Some(US)), 0);
+    c.on_announce(&unit_keep_alive(), from_unit(ANNOUNCE_PORT), 0, &mut out);
+    c.tick(11_000 * MS, &mut out);
+    assert_eq!(c.unit(), None);
+    assert_eq!(c.interface(), Some(US));
+}
+
+#[test]
+fn a_late_echo_from_an_old_mac_does_not_move_our_number() {
+    let mut s = Session::new(settings(Some(US)), 0);
+    let mut out = Vec::new();
+    // Our own keep-alive, but with a MAC we no longer use (say the
+    // configured one changed): recognised by its source address.
+    let echo = KeepAlive::rekordbox(0x17, [0x02, 0, 0, 0, 0, 0x01], US);
+    s.on_announce(
+        &echo.to_bytes(),
+        SocketAddrV4::new(US, ANNOUNCE_PORT),
+        MS,
+        &mut out,
+    );
+    assert_eq!(s.device_number(), 0x17);
+    assert!(s.devices().is_empty());
+}
+
 // ---------------------------------------------------------------- loopback
+
+#[test]
+fn start_binds_reports_busy_ports_and_stops_promptly() {
+    let lo = Ipv4Addr::LOCALHOST;
+    let config = OpusConfig {
+        interface: Some(lo),
+        broadcast: Some(lo),
+        ports: OpusPorts {
+            bind: lo,
+            announce: 0,
+            update: 0,
+            peer_announce: 9,
+            peer_update: 9,
+        },
+        ..OpusConfig::default()
+    };
+    let source = super::start(config.clone()).unwrap();
+    // It runs: the interface is configured, so it says it announces.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut announced = false;
+    while !announced && Instant::now() < deadline {
+        announced = matches!(
+            source.recv_timeout(Duration::from_millis(100)),
+            Some(SourceEvent::Status { message, .. }) if message.contains("announcing")
+        );
+    }
+    assert!(announced);
+    let t = Instant::now();
+    source.stop();
+    assert!(
+        t.elapsed() < Duration::from_millis(250),
+        "stop took {:?}",
+        t.elapsed()
+    );
+
+    // A port someone else holds is a clear error, not a panic.
+    let busy = UdpSocket::bind((lo, 0)).unwrap();
+    let mut taken = config;
+    taken.ports.update = busy.local_addr().unwrap().port();
+    let err = super::start(taken).err().expect("port in use");
+    assert!(err.to_string().contains("status port"), "{err}");
+}
 
 /// A pretend Opus Quad on loopback: announces itself to `our_announce`,
 /// waits for a lighting request, then streams status for two decks.
