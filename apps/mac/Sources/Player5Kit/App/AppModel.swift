@@ -55,6 +55,8 @@ public final class AppModel: ObservableObject {
         @Published public private(set) var outputDeviceUID: String? = nil
         @Published public private(set) var midiSources: [String] = []
         private var midiInput: MIDIClockInput? = nil
+        /// The device the engine was last pointed at (the chosen one, or
+        /// the system default at that moment).
         private var appliedOutputDeviceID: AudioDeviceID? = nil
     #endif
 
@@ -440,14 +442,16 @@ public final class AppModel: ObservableObject {
         }
 
         /// Resolves the chosen UID (it may be unplugged: then the system
-        /// default plays) and hands the device to the engine when it changes.
+        /// default plays) and hands the device to the engine when the device
+        /// that would play changes, including a new system default while
+        /// "System default" is selected (the engine pins the device it starts
+        /// on, so it would not follow by itself).
         private func applyOutputDeviceSelection(force: Bool = false) {
-            let id = outputDeviceUID.flatMap { uid in
-                outputDevices.first { $0.uid == uid }?.id
-            }
-            guard force || id != appliedOutputDeviceID else { return }
-            appliedOutputDeviceID = id
-            engine.setOutputDevice(id)
+            let target = OutputDevices.resolve(
+                uid: outputDeviceUID, among: outputDevices, defaultID: OutputDevices.defaultOutputID())
+            guard force || target.effective != appliedOutputDeviceID else { return }
+            appliedOutputDeviceID = target.effective
+            engine.setOutputDevice(target.chosen)
         }
 
         private func startMIDIIfNeeded() {

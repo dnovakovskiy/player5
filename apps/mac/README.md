@@ -70,7 +70,8 @@ clock. Nudge (ms), latency offset (ms, plus the device's reported output
 latency), quantized re-sync and tap work with every source.
 
 Master: one output gain, the soft safety limiter, and the output device
-(Core Audio; the mono mix plays on outputs 1–2). Patterns: presets, a named
+(Core Audio; the mono mix plays on outputs 1–2; "System default" follows
+the default output when it changes). Patterns: presets, a named
 library, `#p=` links compatible with the web app, pattern JSON copy/import.
 
 ## Not yet

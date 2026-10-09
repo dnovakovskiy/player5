@@ -26,6 +26,15 @@ public struct EngineSnapshot: Equatable {
     public var devicesJSON: String = "[]"
 
     public init() {}
+
+    /// 1-based bar and beat-in-bar for a continuous beat (`p5_control_beat`,
+    /// four beats to the bar). `nil` for values that cannot be shown.
+    static func position(atBeat beat: Double) -> (bar: Int, beatInBar: Int)? {
+        guard beat.isFinite, abs(beat) < 1e12 else { return nil }
+        let barStart = (beat / 4).rounded(.down)
+        let inBar = beat - barStart * 4
+        return (Int(barStart) + 1, min(max(Int(inBar) + 1, 1), 4))
+    }
 }
 
 /// State of the audio output.
@@ -93,6 +102,9 @@ public final class EngineHost {
     // MARK: Control-queue state
 
     private let controlQueue = DispatchQueue(label: "player5.control", qos: .userInteractive)
+    /// Created (main thread) with the first control handle; until then
+    /// there is nothing to tick, so the app does not wake 200 times a
+    /// second before audio starts.
     private var timer: DispatchSourceTimer?
     private var control: OpaquePointer?
     private var desired = DesiredState()
@@ -113,7 +125,6 @@ public final class EngineHost {
     }
 
     public init() {
-        startTimer()
         observeEngine()
         observeSession()
     }
@@ -130,11 +141,15 @@ public final class EngineHost {
         if let token = activity {
             ProcessInfo.processInfo.endActivity(token)
         }
-        // No other reference to self exists, so no control-queue block can
-        // be using these.
+        // P5Control stays on its queue even now: blocks already queued find
+        // `self` gone and return, then this frees the handle. Async, because
+        // the last reference may have been dropped on that very queue.
         if let c = control {
-            p5_control_free(c)
+            controlQueue.async {
+                p5_control_free(c)
+            }
         }
+        // The engine has stopped, so no render callback can still hold it.
         if let r = renderer {
             p5_renderer_free(r)
         }
@@ -274,6 +289,7 @@ public final class EngineHost {
             let requested = desired.clock
             return (requested, applyDesired(to: c))
         }
+        startTimerIfNeeded()
         if result != .ok {
             onClockResult?(kind, result)
         }
@@ -374,6 +390,12 @@ public final class EngineHost {
                 ) { [weak self] _ in
                     self?.handleMediaServicesReset()
                 })
+            sessionObservers.append(
+                center.addObserver(
+                    forName: AVAudioSession.routeChangeNotification, object: session, queue: .main
+                ) { [weak self] _ in
+                    self?.handleRouteChange()
+                })
         #endif
     }
 
@@ -393,6 +415,20 @@ public final class EngineHost {
                 }
             @unknown default:
                 break
+            }
+        }
+
+        /// A new route (headphones, USB, AirPlay, Bluetooth) may keep the
+        /// hardware format, so the engine keeps running and no configuration
+        /// change arrives, yet the output latency can change by 100+ ms.
+        /// Report it again once the route has settled so the latency
+        /// compensation follows. Format changes restart through
+        /// `handleConfigurationChange` as well.
+        private func handleRouteChange() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self = self, self.audioWanted, self.engine.isRunning else { return }
+                self.onAudioStatus?(
+                    .running(sampleRate: self.pairSampleRate, deviceLatencyMs: self.deviceLatencyMs))
             }
         }
 
@@ -521,7 +557,9 @@ public final class EngineHost {
 
     // MARK: Control queue internals
 
-    private func startTimer() {
+    /// The 5 ms control tick. Main thread.
+    private func startTimerIfNeeded() {
+        guard timer == nil else { return }
         let t = DispatchSource.makeTimerSource(flags: .strict, queue: controlQueue)
         t.schedule(deadline: .now() + .milliseconds(5), repeating: .milliseconds(5), leeway: .milliseconds(1))
         t.setEventHandler { [weak self] in
@@ -594,12 +632,9 @@ public final class EngineHost {
         var snap = EngineSnapshot()
         snap.step = Int(p5_control_playing_step(c))
         snap.tempo = tempo.isFinite ? (tempo * 100).rounded() / 100 : 0
-        let beat = p5_control_beat(c)
-        if beat.isFinite, abs(beat) < 1e12 {
-            let barStart = (beat / 4).rounded(.down)
-            let inBar = beat - barStart * 4
-            snap.bar = Int(barStart) + 1
-            snap.beatInBar = min(max(Int(inBar) + 1, 1), 4)
+        if let position = EngineSnapshot.position(atBeat: p5_control_beat(c)) {
+            snap.bar = position.bar
+            snap.beatInBar = position.beatInBar
         }
         snap.locked = p5_control_clock_locked(c) != 0
         snap.status = EngineHost.string(p5_control_status(c))

@@ -57,15 +57,34 @@
             all().first { $0.uid == uid }
         }
 
-        /// Calls `handler` on the main queue whenever devices come or go.
-        /// The listener lives as long as the process.
+        /// Calls `handler` on the main queue whenever devices come or go or
+        /// the system default output changes. The listeners live as long as
+        /// the process.
         public static func observeChanges(_ handler: @escaping () -> Void) {
-            var address = globalAddress(kAudioHardwarePropertyDevices)
-            _ = AudioObjectAddPropertyListenerBlock(
-                AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main
-            ) { _, _ in
-                handler()
+            let selectors: [AudioObjectPropertySelector] = [
+                kAudioHardwarePropertyDevices,
+                kAudioHardwarePropertyDefaultOutputDevice,
+            ]
+            for selector in selectors {
+                var address = globalAddress(selector)
+                _ = AudioObjectAddPropertyListenerBlock(
+                    AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main
+                ) { _, _ in
+                    handler()
+                }
             }
+        }
+
+        /// Where audio should play. `chosen` is the device to hand the engine:
+        /// the one with `uid` while it is connected, else `nil` (follow the
+        /// system default). `effective` is the device that results, so a
+        /// change of the system default can be noticed and applied: the
+        /// engine pins its output unit to a device ID when it starts.
+        public static func resolve(
+            uid: String?, among devices: [OutputDevice], defaultID: AudioDeviceID?
+        ) -> (chosen: AudioDeviceID?, effective: AudioDeviceID?) {
+            let chosen = uid.flatMap { wanted in devices.first { $0.uid == wanted }?.id }
+            return (chosen, chosen ?? defaultID)
         }
 
         private static func globalAddress(_ selector: AudioObjectPropertySelector)

@@ -14,8 +14,15 @@ concurrency:
   group: apple-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
+  # XcodeGen is all brew installs; skip the slow (and occasionally failing)
+  # auto-update of the runner's formulae.
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
 
 jobs:
   apple:

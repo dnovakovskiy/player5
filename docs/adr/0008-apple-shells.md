@@ -63,9 +63,11 @@ Constraints:
      stereo (or mono) format at the hardware rate, so the mixer passes it
      through at unity.
    - *Control:* one serial `DispatchQueue` (user-interactive QoS) owns
-     `P5Control`. A strict `DispatchSourceTimer` fires every 5 ms on it and
-     calls `p5_control_tick`. Every other `p5_control_*` call is posted to
-     the same queue. Every sixth tick (~30 ms) it reads tempo, beat, lock,
+     `P5Control`, from creation to `p5_control_free`. A strict
+     `DispatchSourceTimer`, created with the first control handle (nothing
+     to tick before audio starts), fires every 5 ms on it and calls
+     `p5_control_tick`. Every other `p5_control_*` call is posted to the
+     same queue. Every sixth tick (~30 ms) it reads tempo, beat, lock,
      playhead, status and devices, and posts a snapshot to the main thread
      only when it changed.
    - *Main:* the `AVAudioEngine` graph, renderer lifetime and UI state.
@@ -87,7 +89,10 @@ Constraints:
    `mHostTime` is when the buffer starts at the device's I/O; the sound
    leaves the converter `AVAudioIONode.presentationLatency` later. The
    latency offset sent to the core is the user's offset plus, by default,
-   that reported latency.
+   that reported latency, re-read whenever audio (re)starts and, on iOS,
+   after every route change: a new route (Bluetooth, AirPlay, USB) can keep
+   the hardware format, so no configuration change arrives, yet change the
+   latency by over 100 ms.
 
 6. **Clock sources.** Internal and Tap run the internal clock (a tap's tempo
    becomes the pattern BPM). Pro DJ Link, Opus Quad, Ableton Link and
@@ -102,9 +107,12 @@ Constraints:
 7. **macOS output device.** Core Audio enumerates devices with output
    channels; the choice is stored by UID and applied with
    `kAudioOutputUnitProperty_CurrentDevice` on `outputNode.audioUnit` before
-   the engine starts. An unplugged choice falls back to the system default
-   and returns when the device does. `AVAudioEngineConfigurationChange`
-   (and, on iOS, interruptions and media-services resets) rebuild the graph.
+   the engine starts. That pins the output unit to the device it started
+   on, so with "System default" selected the app also listens for
+   `kAudioHardwarePropertyDefaultOutputDevice` and restarts on the new
+   default. An unplugged choice falls back to the system default and
+   returns when the device does. `AVAudioEngineConfigurationChange` (and,
+   on iOS, interruptions and media-services resets) rebuild the graph.
 
 8. **Patterns.** A Codable model mirrors `core/engine/src/spec.rs`. The
    encoder writes only keys the core accepts (it denies unknown fields) and
@@ -120,8 +128,9 @@ Constraints:
   `macos-latest`. Swift is only compiled there; the tests cover the pattern
   model against the spec, the link codec against a web-app payload, the C
   ABI end to end (split pair, every voice and flam, presets and
-  `patterns/` files load, kick renders, simulated source locks) and the
-  MIDI packet walker.
+  `patterns/` files load, kick renders, simulated source locks), the
+  MIDI packet walker, the clock-kind codes, bar/beat display and output
+  device resolution, plus a live Core Audio device enumeration.
 - No new FFI exports were needed; `core/ffi/src/split.rs` is unchanged.
 - `core/ffi/cbindgen.toml` sets `[export] prefix = "P5"` (types become
   `P5P5Control`) and `[fn] prefix = "p5_"` (a bare `p5_` token before every

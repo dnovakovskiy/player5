@@ -29,7 +29,8 @@ in Xcode) and change the bundle id from `com.example.player5`.
 
 - Audio: `AVAudioSession` category `.playback`, 5 ms preferred buffer,
   `UIBackgroundModes: audio` so playback continues with the screen locked.
-  Interruptions and media-server resets restart the engine. The screen
+  Interruptions and media-server resets restart the engine; route changes
+  re-read the output latency for the latency compensation. The screen
   stays awake while the app is open.
 - Audio starts on the first Play (or when an external clock is chosen), so
   opening the app does not stop other audio.
