@@ -1,0 +1,24 @@
+# Opus Quad fixture: constructed-opus-status-zero-flags
+# Constructed from the documented layout, not a capture. It reproduces the
+# malformed packets beat-link guards against: an Opus Quad status whose
+# status-flag byte F (0x89) is zero
+#   (https://github.com/Deep-Symmetry/beat-link/blob/main/src/main/java/org/deepsymmetry/beatlink/VirtualRekordbox.java, `buildUpdate`).
+# Layout: https://djl-analysis.deepsymmetry.org/djl-analysis/vcdj.html#cdj-status-packet
+# Documented in: docs/protocols/opus-quad.md#quirks
+# Deck 2 (device 0x0a), F = 0x00, P2 = 0xfa (moving), track 128.00 BPM at
+# +0 %, beat 258, bar beat 2, Mm = 0, track ID 1234. Length 0xd4 as above.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 0a 4f 50 55 53 2d
+51 55 41 44 00 00 00 00 00 00 00 00 00 00 00 01
+03 0a 00 b0 0a 00 01 01 0a 03 01 00 00 00 04 d2
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 03 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 ff fa 00 10 00 00
+80 00 32 00 7f ff ff ff 00 10 00 00 00 0d 00 ff
+00 00 01 02 01 ff 02 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 10 00 00 00 10 00 00 00 00 00 00 00 00 00 00
+00 00 00 00

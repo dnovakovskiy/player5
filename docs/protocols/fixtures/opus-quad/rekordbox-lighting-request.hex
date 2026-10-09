@@ -1,0 +1,32 @@
+# Opus Quad fixture: rekordbox-lighting-request
+# Quoted bytes, not a capture: the type-0x11 packet rekordbox lighting sends
+# to port 50002 so the Opus Quad starts sending status packets, as published
+# by two independent implementations:
+#   https://github.com/Deep-Symmetry/beat-link/blob/main/src/main/java/org/deepsymmetry/beatlink/VirtualRekordbox.java
+#     (array `rekordboxLightingRequestStatusBytes`, the template before
+#     beat-link patches its MAC and IP over bytes 0x26-0x2f)
+#   https://github.com/kyleawayan/opus-quad-pro-dj-link-analysis/blob/main/pro-dj-link.js
+#     (`sendCdj()` with the computer name "macbook pro", which yields these bytes)
+# Documented in: docs/protocols/opus-quad.md#the-lighting-request-0x11
+# Device 0x17, computer name "macbook pro" one byte per UTF-16BE code unit
+# from byte 0x28, 0x128 (296) bytes in all.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 11 72 65 6b 6f 72
+64 62 6f 78 00 00 00 00 00 00 00 00 00 00 00 01
+01 17 01 04 17 01 00 00 00 6d 00 61 00 63 00 62
+00 6f 00 6f 00 6b 00 20 00 70 00 72 00 6f 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00

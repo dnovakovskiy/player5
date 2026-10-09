@@ -1,0 +1,16 @@
+# Opus Quad fixture: rekordbox-keep-alive
+# Quoted bytes, not a capture: the keep-alive rekordbox sends in lighting
+# mode, as published by two independent implementations that use it to
+# make an Opus Quad talk to them:
+#   https://github.com/Deep-Symmetry/beat-link/blob/main/src/main/java/org/deepsymmetry/beatlink/VirtualRekordbox.java
+#     (array `rekordboxKeepAliveBytes`, the template before the MAC and IP are patched in)
+#   https://github.com/kyleawayan/opus-quad-pro-dj-link-analysis/blob/main/pro-dj-link.js
+#     (`sendKeepAlive()`, which yields the same bytes for this MAC and IP)
+# Documented in: docs/protocols/opus-quad.md#joining-as-rekordbox-lighting
+# Broadcast to port 50000: name "rekordbox", device 0x17, MAC 18:3e:ef:da:5b:ca,
+# IP 192.168.2.11 (the values in the beat-link template).
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 06 00 72 65 6b 6f
+72 64 62 6f 78 00 00 00 00 00 00 00 00 00 00 00
+01 03 00 36 17 01 18 3e ef da 5b ca c0 a8 02 0b
+04 01 00 00 04 08
