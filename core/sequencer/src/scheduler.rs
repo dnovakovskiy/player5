@@ -492,7 +492,7 @@ mod tests {
         let mut s = Scheduler::new(pattern);
         assert_eq!(s.step_span(&clock, 4), (24_000 - 384, 24_000));
         assert_eq!(s.step_span(&clock, 5), (30_000, 30_000));
-        let mut muted = s.pattern().clone();
+        let mut muted = *s.pattern();
         muted.track_mut(VoiceId::Snare).mute = true;
         s.set_pattern(muted);
         assert_eq!(s.step_span(&clock, 4), (24_000, 24_000));
