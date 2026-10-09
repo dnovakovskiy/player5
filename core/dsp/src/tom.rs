@@ -290,10 +290,14 @@ fn unit(x: f32) -> f32 {
 
 impl Voice for Tom {
     fn set_sample_rate(&mut self, sample_rate: f32) {
-        // `max` maps NaN to the floor; the ceiling catches +∞ and absurd
-        // rates, where every envelope coefficient rounds to exactly 1 and a
-        // hit would never end.
-        self.sample_rate = sample_rate.max(1.0).min(MAX_SAMPLE_RATE);
+        // NaN and rates below 1 Hz take the floor (`clamp` would pass NaN
+        // through); the ceiling catches +∞ and absurd rates, where every
+        // envelope coefficient rounds to exactly 1 and a hit would never end.
+        self.sample_rate = if sample_rate >= 1.0 {
+            sample_rate.min(MAX_SAMPLE_RATE)
+        } else {
+            1.0
+        };
         self.sweep_coef = math::tau_coefficient(self.spec.sweep_tau_s, self.sample_rate);
         self.noise_coef = math::tau_coefficient(self.spec.noise_tau_s, self.sample_rate);
         self.ramp_coef = math::tau_coefficient(RETRIGGER_TAU_S, self.sample_rate);
