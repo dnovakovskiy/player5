@@ -26,8 +26,10 @@
 //! Controls (all `0..=1`): `tune` shifts both oscillators by up to 1.3× either
 //! way (−23 % to +30 %, equal ratios per unit of travel), `decay` sets the
 //! tail (80–500 ms to −60 dB), `tone` moves the band-pass from 1.6 kHz to
-//! 4 kHz and `level` scales the output. `snappy` is ignored. A full-velocity
-//! hit at the default controls peaks near −12 dBFS.
+//! 4 kHz and `level` scales the output, following a change within a few
+//! milliseconds so a fader move over a ringing tail does not click. `snappy`
+//! is ignored. A full-velocity hit at the default controls peaks near
+//! −12 dBFS.
 
 use crate::blocks::{Square, Svf};
 use crate::math;
@@ -76,6 +78,10 @@ const SLEW_TAU_S: f32 = 0.000_25;
 
 /// Output scaling so a full hit at `level = 1` peaks near −12 dBFS.
 const CALIBRATION: f32 = 0.146;
+/// Time constant of the `level` smoother.
+const LEVEL_TAU_S: f32 = 0.005;
+/// Distance at which the smoothed level snaps to its target.
+const LEVEL_SNAP: f32 = 1e-6;
 /// Envelope level below which the voice goes idle (−100 dB).
 const IDLE_THRESHOLD: f32 = 1e-5;
 /// Level below which the fast stage is flushed to exactly zero (−180 dB).
@@ -93,6 +99,7 @@ pub struct Cowbell {
     // Derived per sample rate.
     fast_coef: f32,
     slew_coef: f32,
+    level_coef: f32,
 
     // Derived per trigger.
     tail_coef: f32,
@@ -105,6 +112,8 @@ pub struct Cowbell {
     fast: f32,
     tail: f32,
     env: f32,
+    /// `level`, smoothed.
+    level_now: f32,
 }
 
 /// Clamps a control to `0..=1`; non-finite values become `fallback`.
@@ -129,6 +138,7 @@ impl Cowbell {
             level: defaults.level,
             fast_coef: 0.0,
             slew_coef: 0.0,
+            level_coef: 0.0,
             tail_coef: 0.0,
             active: false,
             low_osc: Square::default(),
@@ -137,6 +147,7 @@ impl Cowbell {
             fast: 0.0,
             tail: 0.0,
             env: 0.0,
+            level_now: defaults.level,
         };
         cowbell.set_sample_rate(sample_rate);
         cowbell
@@ -179,6 +190,7 @@ impl Voice for Cowbell {
         };
         self.fast_coef = math::decay_coefficient(FAST_T60_S, self.sample_rate);
         self.slew_coef = math::tau_coefficient(SLEW_TAU_S, self.sample_rate);
+        self.level_coef = 1.0 - math::tau_coefficient(LEVEL_TAU_S, self.sample_rate);
         self.reset_state();
     }
 
@@ -199,6 +211,7 @@ impl Voice for Cowbell {
         if !self.active {
             // Fresh hit: start from a known state so every hit is the same.
             self.reset_state();
+            self.level_now = self.level;
             self.low_osc.reset(-EDGE_ALIGN_S * low_hz);
             self.high_osc.reset(-EDGE_ALIGN_S * high_hz);
         }
@@ -245,7 +258,13 @@ impl Voice for Cowbell {
             self.reset_state();
         }
 
-        out * self.level * CALIBRATION
+        // Level: follows the control within a few milliseconds.
+        self.level_now += (self.level - self.level_now) * self.level_coef;
+        if (self.level - self.level_now).abs() < LEVEL_SNAP {
+            self.level_now = self.level;
+        }
+
+        out * self.level_now * CALIBRATION
     }
 
     #[inline]
@@ -582,20 +601,51 @@ mod tests {
     }
 
     #[test]
-    fn level_scales_output_immediately() {
+    fn level_follows_the_control_smoothly() {
+        // A fresh hit takes the level as it stands.
         let mut a = Cowbell::new(SR);
         let mut b = with_params(SR, 0.5, 0.5, 0.5, 0.5);
         a.trigger(1.0);
         b.trigger(1.0);
-        for _ in 0..500 {
+        for _ in 0..200 {
             let (x, y) = (a.process(), b.process());
             assert!((x * 0.5 - y).abs() < 1e-7);
         }
+        // A level change while ringing starts on the very next sample and
+        // glides there without a jump (a step in the gain would click on a
+        // ringing tail), settling within 50 ms.
         b.apply_params(&VoiceParams {
+            level: 1.0,
+            ..VoiceParams::default()
+        });
+        let n = (SR * 0.05) as usize;
+        let (ra, rb) = (render(&mut a, n), render(&mut b, n));
+        let gains: Vec<f32> = ra
+            .iter()
+            .zip(&rb)
+            .filter(|(x, _)| x.abs() > 1e-4)
+            .map(|(x, y)| y / x)
+            .collect();
+        assert!(gains.len() > 10);
+        assert!(gains[0] > 0.5 && gains[0] < 0.51, "first gain {}", gains[0]);
+        assert!(gains.windows(2).all(|w| w[1] >= w[0] - 1e-4));
+        let last = gains[gains.len() - 1];
+        assert!((last - 1.0).abs() < 1e-3, "settled at {last}");
+
+        // Level 0 is exact silence, both on a fresh hit and once a ringing
+        // hit has been faded out.
+        let mut silent = with_params(SR, 0.5, 0.5, 0.5, 0.0);
+        assert!(hit(&mut silent, 1.0, 2_000).iter().all(|&s| s == 0.0));
+        let mut faded = Cowbell::new(SR);
+        hit(&mut faded, 1.0, 100);
+        faded.apply_params(&VoiceParams {
             level: 0.0,
             ..VoiceParams::default()
         });
-        assert!(render(&mut b, 100).iter().all(|&s| s == 0.0));
+        let out = render(&mut faded, 3 * n);
+        assert!(out[0] != 0.0, "the fade starts from the current level");
+        // 5 ms smoothing reaches the −120 dB snap well inside 100 ms.
+        assert!(out[2 * n..].iter().all(|&s| s == 0.0));
     }
 
     #[test]

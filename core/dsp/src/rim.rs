@@ -23,8 +23,9 @@
 //! Controls (all `0..=1`): `tune` shifts both pings together over ±½ octave,
 //! `decay` stretches the ring subtly (low ping 22–55 ms to −60 dB, the high
 //! ping 0.6× that), `tone` balances the pings (0 = woody low ping, 1 = sharp
-//! high ping) and `level` scales the output. `snappy` is ignored. A
-//! full-velocity hit at the default controls peaks near −10 dBFS.
+//! high ping) and `level` scales the output, following a change within a few
+//! milliseconds so it never clicks. `snappy` is ignored. A full-velocity hit
+//! at the default controls peaks near −10 dBFS.
 
 use crate::blocks::Svf;
 use crate::math;
@@ -71,6 +72,10 @@ const HP_Q: f32 = 0.707;
 const DRIVE: f32 = 1.5;
 /// Output scaling so a full hit at `level = 1` peaks near −10 dBFS.
 const CALIBRATION: f32 = 0.32;
+/// Time constant of the `level` smoother.
+const LEVEL_TAU_S: f32 = 0.005;
+/// Distance at which the smoothed level snaps to its target.
+const LEVEL_SNAP: f32 = 1e-6;
 
 /// Per-resonator energy (amplitude²) below which it counts as silent
 /// (−100 dB).
@@ -144,6 +149,7 @@ pub struct Rim {
     // Derived per sample rate.
     click_coef: f32,
     drive_norm: f32,
+    level_coef: f32,
 
     // State.
     active: bool,
@@ -153,6 +159,8 @@ pub struct Rim {
     click_env: f32,
     click_bp: Svf,
     hp: Svf,
+    /// `level`, smoothed.
+    level_now: f32,
 }
 
 /// Clamps a control to `0..=1`; non-finite values become `fallback`.
@@ -176,6 +184,7 @@ impl Rim {
             tone: defaults.tone,
             level: defaults.level,
             click_coef: 0.0,
+            level_coef: 0.0,
             drive_norm: 1.0 / math::soft_clip(DRIVE),
             active: false,
             low: Resonator::default(),
@@ -184,6 +193,7 @@ impl Rim {
             click_env: 0.0,
             click_bp: Svf::default(),
             hp: Svf::default(),
+            level_now: defaults.level,
         };
         rim.set_sample_rate(sample_rate);
         rim
@@ -227,6 +237,7 @@ impl Voice for Rim {
         };
         self.click_coef = math::tau_coefficient(CLICK_TAU_S, self.sample_rate);
         self.hp.set(HP_HZ, HP_Q, self.sample_rate);
+        self.level_coef = 1.0 - math::tau_coefficient(LEVEL_TAU_S, self.sample_rate);
         self.reset_state();
     }
 
@@ -241,6 +252,9 @@ impl Voice for Rim {
         let velocity = unit(velocity, 0.0);
         if velocity <= 0.0 {
             return;
+        }
+        if !self.active {
+            self.level_now = self.level;
         }
         let sr = self.sample_rate;
         let factor = self.tune_factor();
@@ -298,7 +312,13 @@ impl Voice for Rim {
             self.reset_state();
         }
 
-        shaped * self.level * CALIBRATION
+        // Level: follows the control within a few milliseconds.
+        self.level_now += (self.level - self.level_now) * self.level_coef;
+        if (self.level - self.level_now).abs() < LEVEL_SNAP {
+            self.level_now = self.level;
+        }
+
+        shaped * self.level_now * CALIBRATION
     }
 
     #[inline]
@@ -556,20 +576,51 @@ mod tests {
     }
 
     #[test]
-    fn level_scales_output_immediately() {
+    fn level_follows_the_control_smoothly() {
+        // A fresh hit takes the level as it stands.
         let mut a = Rim::new(SR);
         let mut b = with_params(SR, 0.5, 0.5, 0.5, 0.5);
         a.trigger(1.0);
         b.trigger(1.0);
-        for _ in 0..500 {
+        for _ in 0..200 {
             let (x, y) = (a.process(), b.process());
             assert!((x * 0.5 - y).abs() < 1e-7);
         }
+        // A level change while ringing starts on the very next sample and
+        // glides there without a jump (a step in the gain would click on a
+        // ringing tail), settling within 50 ms.
         b.apply_params(&VoiceParams {
+            level: 1.0,
+            ..VoiceParams::default()
+        });
+        let n = (SR * 0.05) as usize;
+        let (ra, rb) = (render(&mut a, n), render(&mut b, n));
+        let gains: Vec<f32> = ra
+            .iter()
+            .zip(&rb)
+            .filter(|(x, _)| x.abs() > 1e-4)
+            .map(|(x, y)| y / x)
+            .collect();
+        assert!(gains.len() > 10);
+        assert!(gains[0] > 0.5 && gains[0] < 0.51, "first gain {}", gains[0]);
+        assert!(gains.windows(2).all(|w| w[1] >= w[0] - 1e-4));
+        let last = gains[gains.len() - 1];
+        assert!((last - 1.0).abs() < 1e-3, "settled at {last}");
+
+        // Level 0 is exact silence, both on a fresh hit and once a ringing
+        // hit has been faded out.
+        let mut silent = with_params(SR, 0.5, 0.5, 0.5, 0.0);
+        assert!(hit(&mut silent, 1.0, 2_000).iter().all(|&s| s == 0.0));
+        let mut faded = Rim::new(SR);
+        hit(&mut faded, 1.0, 100);
+        faded.apply_params(&VoiceParams {
             level: 0.0,
             ..VoiceParams::default()
         });
-        assert!(render(&mut b, 100).iter().all(|&s| s == 0.0));
+        let out = render(&mut faded, 3 * n);
+        assert!(out[0] != 0.0, "the fade starts from the current level");
+        // 5 ms smoothing reaches the −120 dB snap well inside 100 ms.
+        assert!(out[2 * n..].iter().all(|&s| s == 0.0));
     }
 
     #[test]
