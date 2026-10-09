@@ -29,8 +29,10 @@
 //! Retriggering a ringing tom (a flam, a fast fill) re-excites it instead of
 //! restarting it: the phase runs on, the new strike's energy adds to what is
 //! still ringing, and the amplitude moves to its new value over a fraction
-//! of a millisecond, so there is no click. A hit from silence starts at a
-//! zero crossing with full amplitude, for the sharpest attack.
+//! of a millisecond, so there is no click. The new glide is scaled by the
+//! strike's share of the resulting energy, so a ghost note on a loud ring
+//! barely bends it. A hit from silence starts at a zero crossing with full
+//! amplitude, for the sharpest attack.
 
 use crate::blocks::{Noise, Svf};
 use crate::math;
@@ -152,6 +154,8 @@ const LEVEL_TAU_S: f32 = 0.005;
 /// Largest settled phase increment (turns per sample); with the glide on
 /// top it stays under 0.5.
 const MAX_BASE_INC: f32 = 0.3;
+/// Sample rates above this are treated as this.
+const MAX_SAMPLE_RATE: f32 = 768_000.0;
 
 /// Body envelope level below which the voice goes idle (−100 dB).
 const IDLE_THRESHOLD: f32 = 1e-5;
@@ -286,7 +290,14 @@ fn unit(x: f32) -> f32 {
 
 impl Voice for Tom {
     fn set_sample_rate(&mut self, sample_rate: f32) {
-        self.sample_rate = sample_rate.max(1.0);
+        // NaN and rates below 1 Hz take the floor (`clamp` would pass NaN
+        // through); the ceiling catches +∞ and absurd rates, where every
+        // envelope coefficient rounds to exactly 1 and a hit would never end.
+        self.sample_rate = if sample_rate >= 1.0 {
+            sample_rate.min(MAX_SAMPLE_RATE)
+        } else {
+            1.0
+        };
         self.sweep_coef = math::tau_coefficient(self.spec.sweep_tau_s, self.sample_rate);
         self.noise_coef = math::tau_coefficient(self.spec.noise_tau_s, self.sample_rate);
         self.ramp_coef = math::tau_coefficient(RETRIGGER_TAU_S, self.sample_rate);
@@ -332,10 +343,18 @@ impl Voice for Tom {
             // new value from where it is now, so the waveform stays
             // continuous.
             let current = self.amp_env - self.ramp;
-            let target = (current * current + strike * strike).sqrt().min(1.0);
+            let energy = current * current + strike * strike;
+            let target = energy.sqrt().min(1.0);
             self.amp_env = target;
             self.ramp = target - current;
-            self.pitch_env = self.pitch_env.max(depth);
+            // The oscillator carries the old ring as well as the new strike,
+            // so the new glide is scaled by the strike's share of the
+            // energy: a ghost note on a loud ring nudges the pitch instead
+            // of bending the whole ring up by a third, while a hit on a
+            // nearly silent ring (or a flam's main stroke after its grace
+            // note) glides like a hit from silence. `energy ≥ strike² > 0`.
+            let share = strike * strike / energy;
+            self.pitch_env = self.pitch_env.max(depth * share);
             self.noise_env = self.noise_env.max(noise_level);
         } else {
             // From silence: start at a zero crossing at full amplitude.
@@ -382,12 +401,15 @@ impl Voice for Tom {
 
         let shaped = math::soft_clip((body + noise) * DRIVE) * DRIVE_NORM;
 
-        // Level glides to its target; flush once there.
+        // Level glides to its target and snaps onto it once close, or once
+        // a step rounds away to nothing (which would otherwise leave it a
+        // few ppm short for the rest of the hit).
         let level_error = self.params.level - self.level;
-        if level_error.abs() < FLUSH {
+        let next = self.level + level_error * self.level_coef;
+        if level_error.abs() < FLUSH || next == self.level {
             self.level = self.params.level;
         } else {
-            self.level += level_error * self.level_coef;
+            self.level = next;
         }
         let out = shaped * self.level * CALIBRATION;
 
@@ -423,6 +445,9 @@ mod tests {
     use super::*;
 
     const RANGES: [TomRange; 3] = [TomRange::Low, TomRange::Mid, TomRange::High];
+    /// The supported rates plus the extremes a host might run at: 8 kHz
+    /// (glide and noise filter crowd Nyquist) and 192 kHz.
+    const ALL_RATES: [f32; 5] = [8_000.0, 44_100.0, 48_000.0, 96_000.0, 192_000.0];
 
     fn tom_with(sr: f32, range: TomRange, f: impl FnOnce(&mut VoiceParams)) -> Tom {
         let mut tom = Tom::new(sr, range);
@@ -542,7 +567,7 @@ mod tests {
     #[test]
     fn full_hit_peaks_near_minus_8_dbfs() {
         for range in RANGES {
-            for sr in crate::SUPPORTED_SAMPLE_RATES {
+            for sr in ALL_RATES {
                 for tune in [0.0, 0.5, 1.0] {
                     let out = hit(sr, range, 1.0, |p| p.tune = tune);
                     let d = db(peak(&out));
@@ -557,7 +582,7 @@ mod tests {
 
     #[test]
     fn output_is_finite_and_bounded() {
-        for sr in crate::SUPPORTED_SAMPLE_RATES {
+        for sr in ALL_RATES {
             for range in RANGES {
                 for combo in 0..32u32 {
                     let bit = |b: u32| if combo & (1 << b) != 0 { 1.0 } else { 0.0 };
@@ -593,18 +618,21 @@ mod tests {
 
     #[test]
     fn decays_to_silence_and_goes_idle() {
-        for range in RANGES {
+        for (range, sr) in RANGES.into_iter().flat_map(|r| ALL_RATES.map(|sr| (r, sr))) {
             for (decay, limit_s) in [(0.0, 0.4), (1.0, 2.4)] {
-                let sr = 48_000.0;
                 let mut tom = tom_with(sr, range, |p| p.decay = decay);
                 tom.trigger(1.0);
                 let n = (sr * limit_s) as usize;
                 let out = render(&mut tom, n);
-                assert!(!tom.is_active(), "{range:?} decay {decay} still active");
+                assert!(
+                    !tom.is_active(),
+                    "{range:?} at {sr}: decay {decay} still active"
+                );
                 let idle_at = out.iter().rposition(|&s| s != 0.0).unwrap() + 1;
                 assert!(out[idle_at - 1].abs() < 1e-5, "{}", out[idle_at - 1]);
                 assert!(out[idle_at..].iter().all(|&s| s == 0.0));
                 assert!(render(&mut tom, 4_800).iter().all(|&s| s == 0.0));
+                assert!(!tom.is_active());
                 // Every state that could linger is cleared.
                 assert_eq!(tom.amp_env, 0.0);
                 assert_eq!(tom.noise_env, 0.0);
@@ -875,6 +903,179 @@ mod tests {
                 hard_reset_worst > 0.3 * fresh_peak,
                 "{range:?}: {hard_reset_worst}"
             );
+        }
+    }
+
+    #[test]
+    fn nonsense_sample_rates_stay_bounded_and_end() {
+        // Straight from a buggy host. +∞ used to turn every envelope
+        // coefficient into exactly 1: a hit that hissed forever. Huge
+        // finite rates did the same to the body envelope.
+        let bad_params = VoiceParams {
+            tune: f32::NAN,
+            decay: f32::INFINITY,
+            tone: f32::NEG_INFINITY,
+            snappy: f32::NAN,
+            level: 1.0,
+        };
+        for sr in [f32::INFINITY, 1e9, 1e12, f32::NAN, 0.0, -48_000.0, 1.0] {
+            for range in RANGES {
+                for params in [VoiceParams::default(), bad_params] {
+                    let mut tom = Tom::new(sr, range);
+                    tom.apply_params(&params);
+                    tom.trigger(f32::INFINITY);
+                    assert!(tom.is_active(), "{range:?} at {sr}");
+                    let mut n = 0usize;
+                    while tom.is_active() && n < 2_000_000 {
+                        let s = tom.process();
+                        assert!(s.is_finite() && s.abs() <= 1.0, "{range:?} at {sr}: {s}");
+                        n += 1;
+                    }
+                    assert!(!tom.is_active(), "{range:?} at {sr}: never ends");
+                    assert_eq!(tom.process(), 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn level_lands_exactly_on_its_target() {
+        // The smoothed level must reach a new value exactly, not stall a
+        // few ppm short where the step rounds away (0.37 used to stop at
+        // 0.370_003_6 for the rest of the hit).
+        for sr in ALL_RATES {
+            for range in RANGES {
+                for (from, to) in [(1.0, 0.37), (0.37, 0.9), (0.9, 0.0), (0.0, 1.0)] {
+                    let mut tom = tom_with(sr, range, |p| {
+                        p.decay = 1.0;
+                        p.level = from;
+                    });
+                    tom.trigger(1.0);
+                    render(&mut tom, 100);
+                    tom.apply_params(&VoiceParams {
+                        decay: 1.0,
+                        level: to,
+                        ..VoiceParams::default()
+                    });
+                    render(&mut tom, (sr * 0.2) as usize);
+                    assert!(tom.is_active());
+                    assert_eq!(tom.level, to, "{range:?} at {sr}: {from} -> {to}");
+                }
+            }
+        }
+    }
+
+    /// Frequency of the first full cycle (rising crossing to rising
+    /// crossing) at or after sample `from`.
+    fn first_cycle_frequency(out: &[f32], from: usize, sr: f32) -> f64 {
+        let c = rising_crossings(&out[from..]);
+        f64::from(sr) / (c[1] - c[0])
+    }
+
+    #[test]
+    fn retrigger_glide_follows_the_new_strike() {
+        // A ghost note on a loudly ringing tom adds little energy, so it must
+        // not bend the whole ring up by the full glide depth (it used to: a
+        // 0.42 ghost on a ring at 0.34 jumped the pitch by 1.38x). A flam's
+        // main stroke after its grace note, and a hit on a ring that is
+        // nearly gone, must still glide like a hit from silence.
+        let sr = 48_000.0;
+        for range in RANGES {
+            let settled = settled_frequency(sr, range, 0.5);
+            let after_retrigger = |first: f32, second: f32, decay: f32, at_ms: f32| {
+                let mut tom = tom_with(sr, range, |p| p.decay = decay);
+                tom.trigger(first);
+                let at = (sr * at_ms / 1_000.0) as usize;
+                let mut out = render(&mut tom, at);
+                assert!(tom.is_active());
+                tom.trigger(second);
+                let depth = tom.pitch_env;
+                out.extend(render(&mut tom, 4_800));
+                (first_cycle_frequency(&out, at, sr) / settled, depth)
+            };
+            let (ghost, _) = after_retrigger(1.0, 0.42, 0.7, 100.0);
+            assert!(
+                ghost < 1.12,
+                "{range:?}: ghost note bends the ring {ghost}x"
+            );
+            let (flam, _) = after_retrigger(0.42, 1.0, 0.5, 14.4);
+            assert!(
+                flam > 1.25,
+                "{range:?}: flam main stroke glides only {flam}x"
+            );
+            let mut fresh = Tom::new(sr, range);
+            fresh.trigger(1.0);
+            let (_, late) = after_retrigger(1.0, 1.0, 0.0, 220.0);
+            assert!(
+                (late / fresh.pitch_env - 1.0).abs() < 0.01,
+                "{range:?}: hit on a dying ring glides {late}, fresh {}",
+                fresh.pitch_env
+            );
+        }
+    }
+
+    /// Energy above `hz` (two-pole high-pass). Feed it signals that start
+    /// at zero, or the filter's own start-up transient dominates.
+    fn hf_energy(samples: &[f32], sr: f32, hz: f32) -> f64 {
+        let mut hp = crate::blocks::Svf::new(hz, 0.707, sr);
+        samples
+            .iter()
+            .map(|&s| {
+                let h = f64::from(hp.process(s).high);
+                h * h
+            })
+            .sum()
+    }
+
+    #[test]
+    fn retrigger_ramp_is_quieter_than_the_stick() {
+        // A click is broadband energy. What a retrigger adds to the ringing
+        // body (retriggered minus carried-on ring, noise attack off in both)
+        // must stay well below the high-frequency energy of a fresh hit's
+        // own attack, at every phase of the ring. An instantaneous jump to
+        // the new amplitude must fail the same measure.
+        let sr = 48_000.0;
+        let window = (sr * 0.005) as usize;
+        for range in RANGES {
+            let mut instant_worst = f64::MAX;
+            for (first, second, decay) in [(1.0, 1.0, 0.5), (1.0, 0.7, 1.0), (0.7, 0.7, 0.5)] {
+                let mut fresh = tom_with(sr, range, |p| p.decay = decay);
+                fresh.trigger(second);
+                let stick = hf_energy(&render(&mut fresh, window), sr, 2_000.0);
+                let added_hf = |instant: bool, at: usize| {
+                    let mut tom = tom_with(sr, range, |p| p.decay = decay);
+                    tom.trigger(first);
+                    render(&mut tom, at);
+                    let mut ring = tom.clone();
+                    tom.trigger(second);
+                    if instant {
+                        tom.ramp = 0.0;
+                    }
+                    tom.noise_env = 0.0;
+                    ring.noise_env = 0.0;
+                    let added: Vec<f32> = render(&mut tom, window)
+                        .iter()
+                        .zip(render(&mut ring, window))
+                        .map(|(a, b)| a - b)
+                        .collect();
+                    hf_energy(&added, sr, 2_000.0)
+                };
+                let (mut worst, mut worst_instant) = (0.0f64, 0.0f64);
+                for i in 0..120 {
+                    // Steps of 0.29 ms walk the retrigger across the ring's
+                    // phase.
+                    let at = (sr * (0.02 + 0.000_29 * i as f32)) as usize;
+                    worst = worst.max(added_hf(false, at));
+                    worst_instant = worst_instant.max(added_hf(true, at));
+                }
+                let margin = 10.0 * (stick / worst).log10();
+                assert!(
+                    margin > 6.0,
+                    "{range:?} {first}->{second}: retrigger HF only {margin} dB under the stick"
+                );
+                instant_worst = instant_worst.min(10.0 * (stick / worst_instant).log10());
+            }
+            assert!(instant_worst < 6.0, "{range:?}: {instant_worst} dB");
         }
     }
 
