@@ -1,0 +1,9 @@
+# Pro DJ Link fixture: claim-stage1-cdj-2000nexus
+# Real capture: https://github.com/Deep-Symmetry/dysentery/blob/main/doc/assets/powerup.pcapng
+#   (powerup.pcapng, frame 312; 172.16.42.5:50000 -> 172.16.42.255:50000, UDP payload 0x2c bytes)
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/startup.html#cdj-assign-stage-1
+# First-stage claim, N = 1, MAC 74:5e:1c:56:f4:b5.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 00 00 43 44 4a 2d
+32 30 30 30 6e 65 78 75 73 00 00 00 00 00 00 00
+01 02 00 2c 01 01 74 5e 1c 56 f4 b5

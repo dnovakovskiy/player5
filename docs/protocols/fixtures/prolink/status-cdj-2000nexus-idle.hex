@@ -1,0 +1,20 @@
+# Pro DJ Link fixture: status-cdj-2000nexus-idle
+# Real capture: https://github.com/Deep-Symmetry/dysentery/blob/main/doc/assets/to-virtual.pcapng
+#   (to-virtual.pcapng, frame 2; 172.16.42.3:7228 -> 172.16.42.2:50002, UDP payload 0xd4 bytes)
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/vcdj.html#cdj-status-packets
+# 0xd4-byte CDJ status from device 3: no track loaded, not playing, BPM ffff.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 0a 43 44 4a 2d 32
+30 30 30 6e 65 78 75 73 00 00 00 00 00 00 00 01
+03 03 00 b0 03 00 01 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 01 00 04 04 00 00 00 04
+00 00 00 04 00 00 00 00 00 00 00 00 31 2e 32 34
+00 00 00 00 00 00 00 03 00 8c ff 7e 00 0f fd f3
+7f ff ff ff 7f ff ff ff 00 0f fd f3 00 00 00 ff
+ff ff ff ff 01 ff 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00
+00 0f fd f3 00 0f fd f3 00 00 95 97 0f 00 00 00
+00 00 00 00

@@ -1,0 +1,10 @@
+# Pro DJ Link fixture: assignment-request-cdj-2000nexus
+# Real capture: https://github.com/Deep-Symmetry/dysentery/blob/main/doc/assets/LinkInfo.pcapng
+#   (LinkInfo.pcapng, frame 131; 169.254.192.112:50000 -> 169.254.99.60:50000, UDP payload 0x32 bytes)
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/startup.html#cdj-startup
+# CDJ answers the mixer: kind 02 with byte 0x0b = 01, D = 00 (unicast).
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 02 01 43 44 4a 2d
+32 30 30 30 6e 65 78 75 73 00 00 00 00 00 00 00
+01 02 00 32 a9 fe c0 70 74 5e 1c 56 c0 70 00 01
+01 01

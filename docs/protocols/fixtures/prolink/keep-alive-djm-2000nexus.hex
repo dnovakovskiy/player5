@@ -1,0 +1,10 @@
+# Pro DJ Link fixture: keep-alive-djm-2000nexus
+# Real capture: https://github.com/Deep-Symmetry/dysentery/blob/main/doc/assets/to-virtual.pcapng
+#   (to-virtual.pcapng, frame 17; 172.16.42.4:50000 -> 172.16.42.255:50000, UDP payload 0x36 bytes)
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/startup.html#mixer-keep-alive
+# DJM-2000nexus keep-alive: device 0x21 (33), byte 0x34 = 02 (mixer).
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 06 00 44 4a 4d 2d
+32 30 30 30 6e 65 78 75 73 00 00 00 00 00 00 00
+01 02 00 36 21 01 74 5e 1c 35 63 3c ac 10 2a 04
+04 00 00 00 02 00

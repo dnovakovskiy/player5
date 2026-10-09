@@ -1,0 +1,25 @@
+# Pro DJ Link fixture: status-cdj-2000nexus-playing-master
+# Real capture: https://github.com/Deep-Symmetry/dysentery/tree/main/doc/assets/captures/S06-load-and-play
+#   (S06-load-and-play/run.pcapng, frame 2149; 169.254.103.172:3537 -> 169.254.202.84:50002, UDP payload 0x11c bytes)
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/vcdj.html#cdj-status-packets
+# 0x11c-byte CDJ status from device 1 on firmware 1.44: playing, tempo master,
+# not synced, track BPM 132.01, beat 2, beat-within-bar 2.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 0a 43 44 4a 2d 32
+30 30 30 6e 65 78 75 73 00 00 00 00 00 00 00 01
+04 01 00 f8 01 00 00 00 02 03 01 00 00 00 00 c8
+00 00 00 01 00 00 00 05 00 00 00 1b 00 00 00 00
+00 00 00 00 00 00 00 0c 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 01 00 06 04 00 00 00 00
+00 00 00 04 01 01 00 00 00 00 00 03 31 2e 34 34
+00 00 00 00 00 00 00 03 00 e4 ff fa 00 0f 83 12
+80 00 33 91 7f ff ff ff 00 0f 83 12 00 09 01 ff
+00 00 00 02 01 ff 02 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00
+00 0f 83 12 00 0f 83 12 00 00 2c a7 0f 01 00 00
+12 34 56 78 00 00 00 01 01 01 01 01 02 01 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 05 00 00 00 00 00 00 00 00

@@ -1,0 +1,12 @@
+# Pro DJ Link fixture: beat-djm-2000nexus
+# Real capture: https://github.com/Deep-Symmetry/dysentery/blob/main/doc/assets/to-virtual.pcapng
+#   (to-virtual.pcapng, frame 1; 172.16.42.4:7406 -> 172.16.42.255:50001, UDP payload 0x60 bytes)
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/beats.html#beat-packets
+# Beat packet from the mixer (device 0x21): 120.00 BPM, pitch +0 %, beat 3 (not musically meaningful).
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 28 44 4a 4d 2d 32
+30 30 30 6e 65 78 75 73 00 00 00 00 00 00 00 01
+00 21 00 3c 00 00 01 f4 00 00 03 e8 00 00 03 e8
+00 00 07 d0 00 00 0b b8 00 00 0f a0 ff ff ff ff
+ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff
+ff ff ff ff 00 10 00 00 00 00 2e e0 03 00 00 21

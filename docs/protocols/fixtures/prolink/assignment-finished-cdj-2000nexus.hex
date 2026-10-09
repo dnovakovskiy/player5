@@ -1,0 +1,9 @@
+# Pro DJ Link fixture: assignment-finished-cdj-2000nexus
+# Real capture: https://github.com/Deep-Symmetry/dysentery/blob/main/doc/assets/LinkInfo.pcapng
+#   (LinkInfo.pcapng, frame 134; 169.254.244.181:50000 -> 169.254.192.112:50000, UDP payload 0x26 bytes)
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/startup.html#assignment-finished-from-player
+# 'Assignment finished' sent by an already-settled CDJ (device 2), not by the mixer.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 05 00 43 44 4a 2d
+32 30 30 30 6e 65 78 75 73 00 00 00 00 00 00 00
+01 02 00 26 02 01
