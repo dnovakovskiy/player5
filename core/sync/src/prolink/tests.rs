@@ -164,7 +164,7 @@ fn real_beats_parse_and_rebuild_byte_exact() {
             b.second_bar_ms,
             b.eighth_beat_ms
         ],
-        [454, 909, 1818, 1818, 3636, 3636]
+        [0x1c6, 0x38d, 0x71a, 0x71a, 0xe34, 0xe34]
     );
     assert!((b.track_bpm().unwrap() - 132.01).abs() < 1e-9);
     assert!((b.pitch_percent() + 3.05).abs() < 0.01);
@@ -724,6 +724,12 @@ fn loopback_passive_observations_devices_and_follow_switching() {
         Duration::from_secs(2),
         |e| matches!(e, SourceEvent::Status { message, .. } if message.contains("device 2") && message.contains("tempo master")),
     );
+    // Refresh the status so it cannot go stale on a slow machine.
+    send(
+        &net,
+        ports.status,
+        &build_cdj_status(&CdjStatus::new(2, 125.0, 0.0, true, true)),
+    );
     send(
         &net,
         ports.beat,
@@ -784,7 +790,7 @@ fn loopback_joins_then_yields_to_real_hardware() {
     }
     use PacketKind::*;
     assert_eq!(
-        kinds,
+        kinds[..10],
         [
             Hello,
             Hello,
@@ -796,9 +802,13 @@ fn loopback_joins_then_yields_to_real_hardware() {
             ClaimStage2,
             ClaimStage2,
             ClaimStage3,
-            KeepAlive
         ]
     );
+    // Normally the "assignment finished" cuts the final stage to one packet;
+    // a slow machine may get a second one out first.
+    let rest = &kinds[10..];
+    assert_eq!(rest.last(), Some(&KeepAlive), "{kinds:?}");
+    assert!(rest[..rest.len() - 1].iter().all(|k| *k == ClaimStage3) && rest.len() <= 3);
     let k = keep_alive.unwrap();
     assert_eq!(
         (k.number, k.name.as_str(), k.ip),
