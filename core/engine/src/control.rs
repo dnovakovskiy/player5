@@ -1344,8 +1344,11 @@ mod tests {
     }
 
     /// Re-sync pressed again and again while the renderer is stalled (no
-    /// pulls): flushes pile up past the reserve. A flush that does not fit
-    /// waits, and nothing is scheduled in front of it.
+    /// pulls): flushes pile up past the reserve and some do not fit. They
+    /// wait, and nothing is scheduled in front of them. (With the reserve
+    /// honoured, a flush that does not fit only ever follows another flush
+    /// that already covered it, so this exercises the retry path rather
+    /// than proving it necessary.)
     #[test]
     fn flushes_that_do_not_fit_are_retried_before_anything_else() {
         let (p, mut c) = event_queue(64);

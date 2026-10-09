@@ -593,4 +593,69 @@ mod tests {
             p5_renderer_free(renderer);
         }
     }
+
+    /// The split API is the lockstep engine shifted to the commit point:
+    /// with control ticking four times per 512-frame render block at the
+    /// published position, a start and an internal re-sync put their
+    /// downbeat on the first sample the renderer had not committed to
+    /// (two blocks on) and everything after it is bit-identical to a
+    /// lockstep engine started and re-synced exactly there. A start that
+    /// used the stale published position played its downbeat a block late;
+    /// a re-sync there also replayed the steps already heard.
+    #[test]
+    fn split_start_and_resync_match_lockstep_at_the_commit_point() {
+        const B: usize = 512;
+        let json = CString::new(
+            r#"{ "bpm": 133, "shuffle": 0.4, "flam": 0.7, "voices": {
+                "kick": { "steps": "x--- x--- x--- x---" },
+                "snare": { "steps": "---- f--- ---- F---" },
+                "closed_hat": { "steps": "xxxx xxxx xxxx xxxx" } } }"#,
+        )
+        .unwrap();
+        let (start_block, resync_block, blocks) = (20usize, 157usize, 400usize);
+        let split_audio = unsafe {
+            let mut control = ptr::null_mut();
+            let mut renderer = ptr::null_mut();
+            assert_eq!(p5_split_new(48_000.0, &mut control, &mut renderer), 0);
+            assert_eq!(p5_control_load_pattern_json(control, json.as_ptr()), 0);
+            let mut audio = Vec::new();
+            let mut out = vec![0.0f32; B];
+            for k in 0..blocks {
+                if k == start_block {
+                    p5_control_start(control);
+                }
+                if k == resync_block {
+                    p5_control_resync(control);
+                }
+                p5_renderer_render(renderer, out.as_mut_ptr(), B, 0);
+                audio.extend_from_slice(&out);
+                for _ in 0..4 {
+                    p5_control_tick(control);
+                }
+            }
+            p5_control_free(control);
+            p5_renderer_free(renderer);
+            audio
+        };
+        // Control acts after block k - 1 was rendered: published (k - 1) B,
+        // commit (k + 1) B.
+        let mut engine = engine::Engine::new(48_000.0);
+        let spec = engine::PatternSpec::from_json(json.to_str().unwrap()).unwrap();
+        engine.load_spec(&spec).unwrap();
+        let mut lockstep = Vec::new();
+        let mut out = vec![0.0f32; B];
+        for k in 0..blocks {
+            if k == start_block + 1 {
+                engine.start();
+            }
+            if k == resync_block + 1 {
+                engine.resync();
+            }
+            engine.render(&mut out);
+            lockstep.extend_from_slice(&out);
+        }
+        let onset = |audio: &[f32]| audio.iter().position(|s| *s != 0.0);
+        assert_eq!(onset(&split_audio), Some((start_block + 1) * B));
+        assert!(split_audio == lockstep, "split and lockstep differ");
+    }
 }
