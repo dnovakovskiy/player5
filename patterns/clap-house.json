@@ -1,0 +1,9 @@
+{
+  "bpm": 124,
+  "accent": 0.8,
+  "flam": 0.35,
+  "voices": {
+    "clap": { "steps": "---- X--- --x- F--x", "tone": 0.62, "decay": 0.7, "level": 0.9 }
+  },
+  "render": { "bars": 2, "sample_rate": 48000, "tail_seconds": 0.6 }
+}
