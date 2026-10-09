@@ -5,16 +5,18 @@
 //! standing in for the snare wires. This model keeps that structure:
 //!
 //! * **body** – two sines a little less than an octave apart (180 Hz and
-//!   330 Hz at the centre of `tune`). Each starts slightly sharp and settles
-//!   within a few milliseconds (the pitch blip of a struck resonator) and
+//!   330 Hz at the centre of `tune`). Each starts sharp and drops onto its
+//!   pitch within about 20 ms (the pitch blip of a struck resonator) and
 //!   decays exponentially, the upper mode faster than the lower one. Their
-//!   sum goes through a gentle soft clip whose drive follows velocity, so
-//!   accented hits are denser, not just louder.
+//!   sum goes through a soft clip whose drive follows velocity, so accented
+//!   hits are denser, not just louder.
 //! * **snares** – white noise, high-passed (two-pole, 0.9–2 kHz) to keep it
 //!   out of the body's range, then low-passed (two-pole, 3.5–14 kHz) for
-//!   colour. Its envelope is a short snap on top of an exponential tail whose
-//!   length follows `decay`. The noise level is normalised to the sample
-//!   rate, so the drum sounds the same at 44.1, 48 and 96 kHz.
+//!   colour. The filtered noise is scaled to a fixed RMS (so `tone` changes
+//!   its colour, not its level, and the drum sounds the same at 44.1, 48 and
+//!   96 kHz) and soft-clipped, which rounds off its tallest peaks. Its
+//!   envelope is a short snap on top of an exponential tail whose length
+//!   follows `decay`.
 //!
 //! Controls (all `0..=1`):
 //!
@@ -24,11 +26,13 @@
 //! * `tone` – low settings give a fuller lower body mode and darker noise,
 //!   high settings a thinner body and brighter, crisper noise;
 //! * `snappy` – amount of noise, from none (a pure two-mode body) to
-//!   wire-heavy;
+//!   wire-heavy, with a gentle taper (half travel gives three quarters of
+//!   the full amount);
 //! * `level` – output level. It applies immediately, smoothed over a few
 //!   milliseconds so moving it mid-hit never clicks.
 //!
-//! `tune`, `decay`, `tone` and `snappy` take effect on the next hit.
+//! `tune`, `decay`, `tone` and `snappy` take effect on the next hit. A hit
+//! with velocity 0 is ignored.
 //!
 //! Accent (velocity): louder, more body drive, relatively more and brighter
 //! noise and a sharper snap. A full-velocity hit at default controls and
@@ -56,6 +60,9 @@ const TUNE_LOW_RATIO: f32 = core::f32::consts::FRAC_1_SQRT_2;
 const TUNE_LN_RATIO: f32 = math::LN_2;
 /// Phase increments are kept below this many turns per sample.
 const MAX_INC: f32 = 0.45;
+/// Sample rates are clamped to `1..=MAX_SAMPLE_RATE` so every derived
+/// coefficient stays finite.
+const MAX_SAMPLE_RATE: f32 = 1.0e6;
 
 /// Body ring-down (−60 dB) at `decay = 0.5`, lower and upper mode.
 const LOW_BODY_T60_S: f32 = 0.2;
@@ -119,9 +126,10 @@ const NOISE_LP_ENBW: f32 = 1.413_716_694;
 /// Bandwidth the two-pole Butterworth high-pass removes from white noise,
 /// per hertz of cutoff: `π / (2 √2)`.
 const NOISE_HP_ENBW: f32 = 1.110_720_735;
-/// The filtered noise is scaled to this RMS before its soft clip. Peaks
-/// beyond about 2σ are rounded off, which steadies the hit-to-hit peak level
-/// (and bounds it) while the bulk of the noise passes through unchanged.
+/// The filtered noise is scaled to this RMS before its soft clip. The clip
+/// barely touches typical samples (−0.6 dB at 1σ) but rounds off the tall
+/// peaks (−2 dB at 2σ), which steadies the hit-to-hit peak level, bounds
+/// the noise path and adds a little analogue grit.
 const NOISE_DRIVE_RMS: f32 = 0.5;
 /// Seed of the noise generator (reset with the sample rate).
 const NOISE_SEED: u32 = 0x2545_F491;
@@ -309,7 +317,7 @@ impl Snare {
 impl Voice for Snare {
     fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = if sample_rate.is_finite() {
-            sample_rate.max(1.0)
+            sample_rate.clamp(1.0, MAX_SAMPLE_RATE)
         } else {
             48_000.0
         };
@@ -334,20 +342,20 @@ impl Voice for Snare {
 
     fn trigger(&mut self, velocity: f32) {
         let velocity = unit(velocity);
+        if velocity <= 0.0 {
+            return;
+        }
         let sr = self.sample_rate;
         let p = self.params;
 
         // Carry whatever is sounding now; it fades out under the new hit.
-        let carry = if self.active { self.last_out } else { 0.0 };
-        if !self.active {
+        if self.active {
+            self.offset = self.last_out;
+        } else {
+            self.offset = 0.0;
             self.level_now = p.level;
         }
         self.reset_hit();
-        self.offset = carry;
-        self.active = carry != 0.0;
-        if velocity <= 0.0 {
-            return;
-        }
 
         // Body.
         let (low_hz, high_hz) = self.body_frequencies_hz();
@@ -560,10 +568,46 @@ mod tests {
         let mut s = Snare::new(SR);
         assert!(!s.is_active());
         assert!(render(&mut s, 1_000).iter().all(|&x| x == 0.0));
-        // A zero-velocity trigger stays silent too.
+        // A zero-velocity (or garbage) hit is ignored.
         s.trigger(0.0);
+        s.trigger(f32::NAN);
         assert!(!s.is_active());
         assert!(render(&mut s, 1_000).iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn zero_velocity_hit_leaves_a_ringing_drum_alone() {
+        let mut a = Snare::new(SR);
+        let mut b = Snare::new(SR);
+        a.trigger(1.0);
+        b.trigger(1.0);
+        assert_eq!(render(&mut a, 500), render(&mut b, 500));
+        b.trigger(0.0);
+        assert_eq!(render(&mut a, 5_000), render(&mut b, 5_000));
+    }
+
+    #[test]
+    fn noise_level_is_independent_of_tone_and_sample_rate() {
+        // The filtered noise is normalised to a fixed RMS ahead of its soft
+        // clip; check the estimate holds across the control and rate range.
+        for sr in crate::SUPPORTED_SAMPLE_RATES {
+            for tone in [0.0, 0.5, 1.0] {
+                for velocity in [0.1, 1.0] {
+                    let mut s = snare_with(sr, |p| p.tone = tone);
+                    s.trigger(velocity);
+                    let n = 100_000;
+                    let mut acc = 0.0f64;
+                    for _ in 0..n {
+                        let hp = s.noise_hp.process(s.noise.tick()).high;
+                        let lp = s.noise_lp.process(hp).low * s.noise_scale;
+                        acc += f64::from(lp) * f64::from(lp);
+                    }
+                    let rms = (acc / f64::from(n)).sqrt() as f32;
+                    let error = db(rms / NOISE_DRIVE_RMS);
+                    assert!(error.abs() < 1.5, "{sr} Hz tone {tone} v {velocity}: {error} dB");
+                }
+            }
+        }
     }
 
     #[test]
@@ -891,41 +935,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
-    fn probe_margins() {
-        for at in [48, 384, 720, 1_152, 1_920] {
-            for grace in [0.42, 1.0] {
-                let (a, b) = retrigger_steps(0.0, at, grace);
-                println!("body retrig at {at} grace {grace}: {a} vs {b} ratio {}", a / b);
-            }
-            let (a, b) = retrigger_steps(0.5, at, 0.42);
-            println!("full retrig at {at}: {a} vs {b} ratio {}", a / b);
-        }
-        for tone in [0.0, 0.5, 1.0] {
-            let out = hit(SR, 1.0, |p| p.tone = tone);
-            println!("tone {tone}: centroid {}", centroid_hz(&out[..4_800], SR));
-        }
-        for v in [0.42, 0.7, 1.0] {
-            let out = hit(SR, v, |_| {});
-            println!("vel {v}: peak {} centroid {}", db(peak(&out)), centroid_hz(&out[..4_800], SR));
-        }
-        for snappy in [0.0, 0.5, 1.0] {
-            let out = hit(SR, 1.0, |p| p.snappy = snappy);
-            println!("snappy {snappy}: hf {} body {}", band_power(&out[..9_600], SR, 2_000.0, 10_000.0), power_at(&out[..4_800], SR, 180.0));
-        }
-        for decay in [0.0, 0.5, 1.0] {
-            let out = hit(SR, 1.0, |p| p.decay = decay);
-            println!("decay {decay}: tail {}", energy(&out[7_200..14_400]));
-        }
-        // Energy split of a default hit, first 100 ms.
-        let out = hit(SR, 1.0, |_| {});
-        let w = &out[..4_800];
-        for (lo, hi) in [(60.0, 120.0), (120.0, 250.0), (250.0, 500.0), (500.0, 1000.0), (1000.0, 2000.0), (2000.0, 4000.0), (4000.0, 8000.0), (8000.0, 16000.0)] {
-            println!("band {lo}-{hi}: {:.1} dB", 10.0 * band_power(w, SR, lo, hi).log10());
-        }
-    }
-
-    #[test]
     fn sample_rate_change_resets() {
         let mut s = Snare::new(SR);
         s.trigger(1.0);
@@ -949,69 +958,5 @@ mod tests {
         std::hint::black_box(acc);
         let elapsed = start.elapsed();
         assert!(elapsed.as_millis() < 100, "10 s of snare took {elapsed:?}");
-    }
-}
-
-#[cfg(test)]
-mod probe {
-    use super::*;
-
-    fn peak(x: &[f32]) -> f32 {
-        x.iter().fold(0.0f32, |m, s| m.max(s.abs()))
-    }
-
-    #[test]
-    #[ignore]
-    fn probe_noise_rms() {
-        for sr in [44_100.0f32, 48_000.0, 96_000.0] {
-            for tone in [0.0, 0.5, 1.0] {
-                for vel in [0.1, 1.0] {
-                    let mut s = Snare::new(sr);
-                    s.apply_params(&VoiceParams { tone, ..VoiceParams::default() });
-                    s.trigger(vel);
-                    let mut acc = 0.0f64;
-                    let n = 200_000;
-                    for _ in 0..n {
-                        let hp = s.noise_hp.process(s.noise.tick()).high;
-                        let lp = s.noise_lp.process(hp).low * s.noise_scale;
-                        acc += f64::from(lp) * f64::from(lp);
-                    }
-                    let rms = (acc / n as f64).sqrt();
-                    println!("sr {sr} tone {tone} vel {vel}: rms {rms:.4} ({:.2} dB re target)", 20.0 * (rms / f64::from(NOISE_DRIVE_RMS)).log10());
-                }
-            }
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn probe_levels() {
-        for sr in [44_100.0f32, 48_000.0, 96_000.0] {
-            for (snappy, tone, decay, vel) in [
-                (0.5, 0.5, 0.5, 1.0),
-                (0.5, 0.5, 0.5, 0.7),
-                (0.0, 0.5, 0.5, 1.0),
-                (1.0, 0.5, 0.5, 1.0),
-                (1.0, 1.0, 1.0, 1.0),
-                (1.0, 0.0, 1.0, 1.0),
-                (0.0, 0.0, 0.5, 1.0),
-            ] {
-                let mut s = Snare::new(sr);
-                s.apply_params(&VoiceParams { snappy, tone, decay, ..VoiceParams::default() });
-                let mut peaks = vec![];
-                let mut body_peak = 0.0f32;
-                for _ in 0..1000 {
-                    s.trigger(vel);
-                    let out: Vec<f32> = (0..(sr * 0.3) as usize).map(|_| s.process()).collect();
-                    peaks.push(20.0 * peak(&out).log10());
-                    let _ = &mut body_peak;
-                }
-                peaks.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                println!(
-                    "sr {sr} snappy {snappy} tone {tone} decay {decay} vel {vel}: min {:.2} p1 {:.2} p10 {:.2} med {:.2} p90 {:.2} p99 {:.2} max {:.2}",
-                    peaks[0], peaks[10], peaks[100], peaks[500], peaks[900], peaks[990], peaks[999]
-                );
-            }
-        }
     }
 }
