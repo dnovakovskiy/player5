@@ -213,7 +213,17 @@ test drives the follower with seeded xorshift noise.
   `Control` and `Renderer` and checks that every step is heard exactly once
   and on the source's grid (Fine within 4 ms, MIDI within 2 ms, Coarse
   within 120 ms at first and 50 ms later), and that a cue jump costs
-  exactly one realign.
+  exactly one realign. The same rig also runs control and render the way
+  two threads do (big render blocks, the control half one block behind),
+  with re-sync storms and cue jumps both ways: nothing doubles, nothing
+  drops out.
+- `Jittery`'s integral sits below critical damping (κ = 0.5), so a phase
+  step in a MIDI clock that comes without a Start (a master nudging its
+  pulse train) leaves a tail of roughly an eighth of the step that decays
+  over a few seconds (a 24 ms step: ≈ 3 ms after 2 s, < 1 ms after 8 s).
+  Critical damping trades that for a larger error in the first two
+  seconds; neither is clearly better, and MIDI masters rarely jump
+  without a Start.
 - A `Coarse` source takes 8 reports (about 4 s) to lock and tens of beats to
   follow a nudge below its 300 ms jump threshold. That is the price of a
   phase that is only good to ±200 ms; a source adapter that knows its error
