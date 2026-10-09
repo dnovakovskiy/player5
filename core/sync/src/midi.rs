@@ -44,6 +44,19 @@ const OUTLIER_FRACTION: f64 = 0.5;
 /// really changed abruptly).
 const MAX_REJECTED: u32 = 4;
 
+/// After a gap that no Start or Continue explains (a stalled driver), a
+/// fresh fit whose tempo differs from the last reported one by more than
+/// this fraction stays silent until it holds [`CONFIRM_FIT`] pulses. A
+/// stall that releases its backlog a few milliseconds apart looks like a
+/// much faster clock until the queue has caught up; reporting that tempo
+/// would drag the follower's feed-forward along with it. (A backlog
+/// released all at once is faster than any accepted tempo and never
+/// reported anyway.)
+const CONFIRM_FRACTION: f64 = 0.1;
+
+/// Pulses (one beat) such a fit needs before its tempo is believed.
+const CONFIRM_FIT: usize = PPQN as usize;
+
 /// The MIDI System Real-Time messages that matter for clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MidiMessage {
@@ -89,6 +102,11 @@ pub struct MidiClockFollower {
     /// Run number for new points: Start and Continue begin a new run,
     /// because a source may restart its clock's phase there.
     run: u32,
+    /// Period (samples per pulse) of the last report.
+    reported_period: Option<f64>,
+    /// The fit restarted after an unexplained gap: its tempo needs
+    /// confirming before it is reported.
+    after_stall: bool,
 }
 
 /// One pulse in the tempo fit.
@@ -114,6 +132,8 @@ impl MidiClockFollower {
             head: 0,
             rejected: 0,
             run: 0,
+            reported_period: None,
+            after_stall: false,
         }
     }
 
@@ -143,11 +163,13 @@ impl MidiClockFollower {
                 self.running = true;
                 self.pulses = 0;
                 self.run = self.run.wrapping_add(1);
+                self.after_stall = false;
                 None
             }
             MidiMessage::Continue => {
                 self.running = true;
                 self.run = self.run.wrapping_add(1);
+                self.after_stall = false;
                 None
             }
             MidiMessage::Stop => {
@@ -176,6 +198,17 @@ impl MidiClockFollower {
             return None;
         }
         let bpm = self.tempo_bpm()?;
+        let period = 60.0 * self.sample_rate / (bpm * f64::from(PPQN));
+        if self.after_stall {
+            let differs = self
+                .reported_period
+                .is_some_and(|r| (period / r - 1.0).abs() > CONFIRM_FRACTION);
+            if differs && self.len < CONFIRM_FIT {
+                return None;
+            }
+            self.after_stall = false;
+        }
+        self.reported_period = Some(period);
         let phase = if self.running {
             Phase::Bar((pulse as f64 / f64::from(PPQN)).rem_euclid(4.0))
         } else {
@@ -196,6 +229,7 @@ impl MidiClockFollower {
         if let Some(prev) = self.last_pulse {
             if sample - prev > max_gap {
                 self.clear_fit();
+                self.after_stall = true;
             } else if sample <= prev {
                 // Out-of-order or duplicate timestamp: no timing information.
                 return false;
@@ -602,6 +636,41 @@ mod tests {
         // move; only its kinks (start and end) cost a brief error.
         assert!(inside < 0.3, "{inside:.3} BPM");
         assert!(worst < 1.0, "{worst:.3} BPM");
+    }
+
+    /// A stalled driver: pulses due during a stall are released when it
+    /// ends, `spread` apart, until the queue has caught up. Their stamps
+    /// say "a much faster clock"; that tempo must never be reported.
+    #[test]
+    fn a_stalled_driver_never_reports_a_false_tempo() {
+        // Catch-up of up to a beat (one beat confirms a new tempo).
+        for (stall_s, spread_s) in [(0.3, 0.0), (0.3, 0.002), (0.15, 0.008), (0.2, 0.010)] {
+            let bpm = 120.0;
+            let period = pulse_samples(bpm);
+            let mut m = MidiClockFollower::new(SR);
+            m.handle(MidiMessage::Start, 0.0);
+            let (stall_at, stall_end) = (4.0 * SR, (4.0 + stall_s) * SR);
+            let mut prev: f64 = 0.0;
+            let (mut worst, mut last_report): (f64, f64) = (0.0, 0.0);
+            for k in 0..(24 * 16) {
+                let ideal = f64::from(k) * period;
+                let stamp = if ideal < stall_at {
+                    ideal
+                } else {
+                    ideal.max(stall_end).max(prev + spread_s * SR)
+                };
+                prev = stamp;
+                if let Some(obs) = m.handle(MidiMessage::Clock, stamp) {
+                    worst = worst.max((obs.bpm.unwrap() - bpm).abs());
+                    // Phase still counts every pulse.
+                    let want = (f64::from(k) / 24.0).rem_euclid(4.0);
+                    assert_eq!(obs.phase, Phase::Bar(want));
+                    last_report = stamp;
+                }
+            }
+            assert!(worst < 0.5, "stall {stall_s} s, spread {spread_s} s: {worst:.2} BPM off");
+            assert!(last_report > 7.0 * SR, "reports resumed");
+        }
     }
 
     #[test]
