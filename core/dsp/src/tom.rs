@@ -149,6 +149,10 @@ const RETRIGGER_TAU_S: f32 = 0.000_3;
 /// Time constant of `level` changes.
 const LEVEL_TAU_S: f32 = 0.005;
 
+/// Largest settled phase increment (turns per sample); with the glide on
+/// top it stays under 0.5.
+const MAX_BASE_INC: f32 = 0.3;
+
 /// Body envelope level below which the voice goes idle (−100 dB).
 const IDLE_THRESHOLD: f32 = 1e-5;
 /// Small states are flushed to zero below this, keeping clear of denormals.
@@ -304,14 +308,15 @@ impl Voice for Tom {
     }
 
     fn trigger(&mut self, velocity: f32) {
-        // `!(v > 0)` also rejects NaN.
-        if !(velocity > 0.0) {
+        if velocity.is_nan() || velocity <= 0.0 {
             return;
         }
         let velocity = velocity.min(1.0);
         let strike = velocity * (VELOCITY_CURVE + (1.0 - VELOCITY_CURVE) * velocity);
 
-        self.base_inc = self.tuned_frequency_hz() / self.sample_rate;
+        // The clamp only matters at absurdly low sample rates; it keeps the
+        // swept increment below Nyquist and the phase wrap a single step.
+        self.base_inc = (self.tuned_frequency_hz() / self.sample_rate).min(MAX_BASE_INC);
         self.amp_coef = math::decay_coefficient(self.decay_seconds(), self.sample_rate);
         self.noise_lp
             .set(self.noise_cutoff_hz(velocity), NOISE_Q, self.sample_rate);
@@ -782,7 +787,6 @@ mod tests {
                 power_above(&attack_frame(&out), 48_000.0, 1_000.0)
             };
             let (soft, hard) = (hf(0.4), hf(1.0));
-            eprintln!("{range:?}: HF share {soft} vs {hard}");
             assert!(hard > soft * 1.5, "{range:?}: HF share {soft} vs {hard}");
         }
     }
@@ -936,50 +940,28 @@ mod tests {
     }
 
     #[test]
-    fn report() {
+    fn attack_noise_sits_under_the_body() {
+        // Split the first 10 ms of a full hit into its two parts by
+        // silencing the other one, and compare their energies (dB).
+        let noise_to_body = |range: TomRange, tone: f32| {
+            let mut a = tom_with(48_000.0, range, |p| p.tone = tone);
+            a.trigger(1.0);
+            a.amp_env = 0.0;
+            let noise = energy(&render(&mut a, 480));
+            let mut b = tom_with(48_000.0, range, |p| p.tone = tone);
+            b.trigger(1.0);
+            b.noise_env = 0.0;
+            let body = energy(&render(&mut b, 480));
+            10.0 * (noise / body).log10()
+        };
         for range in RANGES {
-            let fresh = hit(48_000.0, range, 1.0, |p| p.tone = 1.0);
-            eprintln!("{range:?} fresh max step {}", max_step(&fresh));
-            for tone in [0.0, 0.5, 1.0] {
-                eprintln!(
-                    "{range:?} tone {tone}: centroid {:.0}",
-                    attack_centroid(range, 1.0, tone, 1_000.0)
-                );
-            }
-            for v in [0.4, 0.7, 1.0] {
-                eprintln!(
-                    "{range:?} v {v}: centroid {:.0}",
-                    attack_centroid(range, v, 0.5, 1_000.0)
-                );
-            }
-            let out = hit(48_000.0, range, 1.0, |_| {});
-            let mean = out.iter().map(|&s| f64::from(s)).sum::<f64>() / out.len() as f64;
-            eprintln!("{range:?} mean {mean:e} peak {}", peak(&out));
-            for tone in [0.0, 0.5, 1.0] {
-                for v in [0.7, 1.0] {
-                    let mut a = tom_with(48_000.0, range, |p| p.tone = tone);
-                    a.trigger(v);
-                    a.amp_env = 1e-30;
-                    let noise_only = render(&mut a, 480);
-                    let mut b = tom_with(48_000.0, range, |p| p.tone = tone);
-                    b.trigger(v);
-                    b.noise_env = 0.0;
-                    let body_only = render(&mut b, 480);
-                    eprintln!(
-                        "{range:?} tone {tone} v {v}: noise/body energy {:.1} dB, peaks {:.3} {:.3}",
-                        10.0 * (energy(&noise_only) / energy(&body_only)).log10(),
-                        peak(&noise_only),
-                        peak(&body_only)
-                    );
-                }
-            }
-            let quiet = hit(48_000.0, range, 1.0, |p| p.tone = 0.0);
-            let loud = hit(48_000.0, range, 1.0, |p| p.tone = 1.0);
-            eprintln!(
-                "{range:?} attack energy 10ms tone0 {} tone.5 {} tone1 {}",
-                energy(&quiet[..480]),
-                energy(&out[..480]),
-                energy(&loud[..480])
+            let dark = noise_to_body(range, 0.0);
+            let mid = noise_to_body(range, 0.5);
+            let bright = noise_to_body(range, 1.0);
+            assert!((-22.0..=-14.0).contains(&mid), "{range:?}: {mid} dB");
+            assert!(
+                dark < mid - 2.0 && mid < bright - 2.0 && bright < -10.0,
+                "{range:?}: {dark} {mid} {bright} dB"
             );
         }
     }
