@@ -916,7 +916,12 @@ mod tests {
     /// A click is broadband; a hat has next to nothing down there, so a
     /// click shows up here at once.
     fn low_band(x: &[f32]) -> Vec<f32> {
-        let mut stages = [0, 1, 0, 1].map(|i| Svf::new(1_000.0, HIGHPASS_Q[i], SR));
+        low_band_at(x, SR)
+    }
+
+    /// [`low_band`] at any sample rate.
+    fn low_band_at(x: &[f32], sr: f32) -> Vec<f32> {
+        let mut stages = [0, 1, 0, 1].map(|i| Svf::new(1_000.0, HIGHPASS_Q[i], sr));
         x.iter()
             .map(|&s| stages.iter_mut().fold(s, |acc, f| f.process(acc).low))
             .collect()
@@ -1018,5 +1023,182 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(acc.is_finite());
         assert!(elapsed.as_millis() < 100, "10 s of hats took {elapsed:?}");
+    }
+
+    #[test]
+    fn extreme_sample_rates_stay_finite_bounded_and_go_idle() {
+        // Outside the supported rates every filter corner is clamped below
+        // Nyquist; the voice must still be well-formed, if dull at 8 kHz.
+        for sr in [8_000.0f32, 11_025.0, 22_050.0, 192_000.0] {
+            for open in [false, true] {
+                let mut v = hat(open, sr);
+                for bits in 0..16u8 {
+                    let corner = |bit: u8| f32::from((bits >> bit) & 1);
+                    v.apply_params(&params(corner(0), corner(1), corner(2), corner(3)));
+                    for velocity in [0.1, 0.7, 1.0] {
+                        v.trigger(velocity);
+                        for s in render(v.as_mut(), (sr * 0.2) as usize) {
+                            assert!(
+                                s.is_finite() && s.abs() <= 1.0,
+                                "open={open} sr={sr} params {bits:04b} v={velocity}: {s}"
+                            );
+                        }
+                    }
+                }
+                // Longest open decay: idle within 2.6 s, exact zeros after.
+                v.apply_params(&params(0.5, 1.0, 0.5, 1.0));
+                v.trigger(1.0);
+                let out = render(v.as_mut(), (sr * 2.7) as usize);
+                assert!(!v.is_active(), "open={open} sr={sr}: never went idle");
+                assert!(out[out.len() - 100..].iter().all(|&s| s == 0.0));
+                let mean = out.iter().map(|&s| f64::from(s)).sum::<f64>() / out.len() as f64;
+                assert!(mean.abs() < 1e-5, "open={open} sr={sr}: DC {mean}");
+            }
+        }
+        // 192 kHz still sits at the calibrated level.
+        for open in [false, true] {
+            let first =
+                20.0 * peak(&hit(open, 192_000.0, VoiceParams::default(), 1.0, 96_000)).log10();
+            assert!(
+                (-16.0..=-11.0).contains(&first),
+                "open={open}: {first} dBFS at 192 kHz"
+            );
+        }
+    }
+
+    /// Power (dB) on the metal cluster's odd harmonics at `ratio` and off
+    /// them (aliases, leakage), both between `lo` and `hi` Hz.
+    fn on_off_lines_db(spec: &[(f64, f64)], ratio: f64, lo: f64, hi: f64) -> (f64, f64) {
+        let bin_hz = spec[1].0;
+        let nyquist = spec.len() as f64 * bin_hz;
+        let mut on_line = vec![false; spec.len()];
+        for &f in &METAL_FREQS_HZ {
+            let f = f64::from(f) * ratio;
+            let mut n = 1.0;
+            while n * f < nyquist - 3.0 * bin_hz {
+                let bin = (n * f / bin_hz).round() as usize;
+                for flag in &mut on_line[bin - 2..=bin + 2] {
+                    *flag = true;
+                }
+                n += 2.0;
+            }
+        }
+        let (mut on, mut off) = (0.0, 0.0);
+        for (&(hz, p), &is_on) in spec.iter().zip(&on_line) {
+            if hz >= lo && hz < hi {
+                if is_on {
+                    on += p;
+                } else {
+                    off += p;
+                }
+            }
+        }
+        (db(on), db(off))
+    }
+
+    #[test]
+    fn little_aliasing_or_air_at_44k() {
+        // At 44.1 kHz the PolyBLEP squares fold some energy back into the
+        // band; it must stay well under the true metal lines, and the band
+        // above 18 kHz well under the main band.
+        let sr = 44_100.0;
+        for (tune, tone) in [(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)] {
+            let mut v = OpenHat::new(sr);
+            v.apply_params(&params(tune, 1.0, tone, 1.0));
+            v.trigger(1.0);
+            let out = render(&mut v, 65_536);
+            let spec = spectrum(&out, sr, 65_536);
+            let ratio = f64::from(v.tune_ratio());
+            let (on, off) = on_off_lines_db(&spec, ratio, 2_000.0, 18_000.0);
+            println!("tune={tune} tone={tone}: on-off {}", on - off);
+            assert!(
+                on - off > 17.0,
+                "tune={tune} tone={tone}: aliases only {} dB under the lines",
+                on - off
+            );
+            let main = db(band_power(&spec, 5_000.0, 14_000.0));
+            let air = db(band_power(&spec, 18_000.0, 22_050.0));
+            println!("tune={tune} tone={tone}: air {}", main - air);
+            assert!(
+                main - air > 30.0,
+                "tune={tune} tone={tone}: above 18 kHz only {} dB down",
+                main - air
+            );
+        }
+    }
+
+    #[test]
+    fn choke_fades_cleanly_at_any_moment() {
+        // Choked during the attack, early in the ring or late in it, at
+        // every rate: a 3-6 ms fade with nothing in the low band, then idle.
+        for sr in crate::SUPPORTED_SAMPLE_RATES {
+            let ms = sr / 1_000.0;
+            for open in [false, true] {
+                let reference = peak(&hit(
+                    open,
+                    sr,
+                    VoiceParams::default(),
+                    1.0,
+                    (ms * 20.0) as usize,
+                ));
+                for after in [1usize, 5, 24, 240, 2_400] {
+                    let mut v = hat(open, sr);
+                    v.trigger(1.0);
+                    let mut out = render(v.as_mut(), after);
+                    v.choke();
+                    let start = out.len();
+                    out.extend(render(v.as_mut(), (ms * 20.0) as usize));
+                    let low = peak(&low_band_at(&out, sr));
+                    assert!(
+                        low < reference * 1e-3,
+                        "open={open} sr={sr} after {after}: low band {low}"
+                    );
+                    let gone = out[start..]
+                        .iter()
+                        .rposition(|&s| s.abs() > reference * 1e-3)
+                        .map_or(0.0, |i| (i + 1) as f32 / ms);
+                    assert!(
+                        gone < 6.0,
+                        "open={open} sr={sr} after {after}: -60 dB after {gone} ms"
+                    );
+                    assert!(!v.is_active(), "open={open} sr={sr}: still active");
+                    assert!(out[out.len() - 48..].iter().all(|&s| s == 0.0));
+                }
+                // A ringing hat fades rather than being cut: 1-2 ms into
+                // the choke it is still clearly audible.
+                let mut v = hat(open, sr);
+                v.trigger(1.0);
+                let ring = render(v.as_mut(), (ms * 3.0) as usize);
+                let level = peak(&ring[ring.len() - ms as usize..]);
+                v.choke();
+                let fade = render(v.as_mut(), (ms * 2.0) as usize);
+                assert!(
+                    peak(&fade[ms as usize..]) > level * 0.05,
+                    "open={open} sr={sr}: choke cut instead of fading"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retrigger_at_another_velocity_has_no_click() {
+        for open in [false, true] {
+            let fresh = peak(&hit(open, SR, params(0.5, 1.0, 0.5, 1.0), 1.0, 960));
+            for (first, second) in [(1.0, 0.7), (0.7, 1.0), (1.0, 0.2), (0.2, 1.0)] {
+                for ring in [10usize, 240, 1_440] {
+                    let mut v = hat(open, SR);
+                    v.apply_params(&params(0.5, 1.0, 0.5, 1.0));
+                    v.trigger(first);
+                    let mut out = render(v.as_mut(), ring);
+                    v.trigger(second);
+                    out.extend(render(v.as_mut(), 960));
+                    let low = peak(&low_band(&out));
+                    assert!(
+                        low < fresh * 1e-3 && peak(&out) < fresh * 1.5,
+                        "open={open} {first}->{second} after {ring}: low band {low}"
+                    );
+                }
+            }
+        }
     }
 }
