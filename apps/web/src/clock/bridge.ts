@@ -39,6 +39,12 @@ export interface BridgeEvents {
   onTimeline(timeline: BridgeTimeline): void;
   onDevices(devices: BridgeDevice[]): void;
   onStatus(level: "info" | "warn" | "error", message: string): void;
+  /**
+   * The bridge started following another device (a new follow target, a
+   * master handoff): its bar is not a jump of the old one, so the engine
+   * should re-sync at once rather than confirm the jump first.
+   */
+  onDeviceChange?(device: number): void;
   /** ~20 Hz while locked: at performance time `ms` the source was at `phase`. */
   onObservation(ms: number, kind: number, phase: number, bpm: number, precision: Precision): void;
 }
@@ -91,6 +97,8 @@ export class BridgeClient {
   private observeTimer: ReturnType<typeof setInterval> | null = null;
   private nextPingId = 1;
   private followTarget: "master" | number | null = null;
+  /** Device of the last on-target locked timeline (kept across reconnects). */
+  private heardDevice: number | null = null;
   private samples: { rtt: number; offsetUs: number }[] = [];
   /** server_us − client_us from the lowest-RTT recent exchange. */
   offsetUs: number | null = null;
@@ -277,13 +285,34 @@ export class BridgeClient {
       device: typeof msg.device === "number" ? msg.device : null,
     };
     this.events.onTimeline(this.timeline);
+    const device = this.timeline.device;
+    if (this.timeline.locked && device !== null && this.onTarget) {
+      if (this.heardDevice !== null && device !== this.heardDevice) this.events.onDeviceChange?.(device);
+      this.heardDevice = device;
+    }
     this.emitObservation();
+  }
+
+  /** The device this page asked to follow ("master" or a number), if any. */
+  get target(): "master" | number | null {
+    return this.followTarget;
+  }
+
+  /**
+   * Whether the timeline is the one this page asked for. A bridge that just
+   * (re)started follows the master until our `follow` arrives; its
+   * timeline meanwhile is another device's bar, and feeding it would pull
+   * the engine onto the wrong deck and back.
+   */
+  get onTarget(): boolean {
+    const t = this.timeline;
+    return !t || typeof this.followTarget !== "number" || t.device === this.followTarget;
   }
 
   /** Beat now, mapped onto the performance clock, while the source is locked. */
   private emitObservation(): void {
     const t = this.timeline;
-    if (!t || !t.locked || this.offsetUs === null || !(t.bpm > 0)) return;
+    if (!t || !t.locked || this.offsetUs === null || !(t.bpm > 0) || !this.onTarget) return;
     const ms = performance.now();
     const beat = beatAt(t, ms * 1000 + this.offsetUs);
     const kind = t.bar_aligned ? 0 : 1;

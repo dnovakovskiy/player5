@@ -89,7 +89,16 @@ protocol (an in-test RFC 6455 server at 128 BPM: lock, phase within 0.1
 beat in the worklet and the ScriptProcessor, devices, follow, reconnect
 with the follow target re-sent, discovery only on demand), offline reload
 through the service worker, a new deploy winning over the cache, and the
-single-file page making zero requests. Every test fails on page errors,
+single-file page making zero requests. The artifact fragment
+(`dist-single/player5-artifact.html`) is loaded inside a strict-CSP host
+page at 1280 px and as an emulated phone: no horizontal scroll, no
+requests, share/import, and every voice alone reaching the meter. Against
+the real bridge binary (`cargo build -p player5-bridge --bins --examples`
+first; skipped otherwise): the simulated clock, and Pro DJ Link from
+`apps/bridge/examples/fake_booth.rs` (two players on loopback) with lock,
+tempo, bar alignment within 1/20 beat of the players' own downbeats, a
+follow switch that lands in under 0.9 s, and a bridge restart the page
+rides through without leaving the followed deck's bar. Every test fails on page errors,
 console errors (except ones it expects, like a refused bridge connection)
 and alert/confirm/prompt dialogs. A pre-installed Chromium at
 `/opt/pw-browsers/chromium` is used when present (or `PW_CHROMIUM`); CI

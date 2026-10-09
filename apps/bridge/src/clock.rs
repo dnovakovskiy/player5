@@ -59,6 +59,14 @@ impl BridgeClock {
                 if self.follower.precision() != precision {
                     self.follower.set_precision(precision);
                 }
+                // Another device (a new follow target, a master handoff)
+                // has its own bar: take it at once instead of treating it
+                // as a phase jump of the old one to be confirmed, which
+                // would label the old device's phase with the new number
+                // for a while and then jump.
+                if self.seen && device != self.device {
+                    self.follower.request_resync();
+                }
                 let obs = Observation {
                     sample: host_ns as f64 / 1_000.0,
                     phase,
@@ -200,6 +208,36 @@ mod tests {
         // Lock is lost after silence.
         c.advance(t0 + 5_000_000);
         assert!(!c.locked());
+    }
+
+    #[test]
+    fn a_new_device_is_taken_at_once() {
+        let mut c = BridgeClock::new("prolink");
+        let obs = |t_us: u64, bar: f64, bpm: f64, device: u8| SourceEvent::Observation {
+            host_ns: t_us * 1_000,
+            phase: Phase::Bar(bar),
+            bpm: Some(bpm),
+            precision: Precision::Fine,
+            device: Some(device),
+        };
+        // Device 2 at 120 BPM: a beat every 500 ms, bar position 0..4.
+        let mut t = 10_000_000u64;
+        for k in 0..8u32 {
+            c.handle(obs(t, f64::from(k % 4), 120.0, 2), t);
+            c.advance(t);
+            t += 500_000;
+        }
+        assert!(c.locked());
+        assert!((c.beat_at(t).rem_euclid(4.0) - 0.0).abs() < 0.01);
+        // Device 3 at 128 BPM, at bar position 1.5 right now.
+        c.handle(obs(t, 1.5, 128.0, 3), t);
+        c.advance(t);
+        let msg: Value = serde_json::from_str(&c.timeline_message(t)).unwrap();
+        assert_eq!(msg["device"], 3);
+        assert_eq!(msg["bpm"], 128.0);
+        let bar = msg["anchor_beat"].as_f64().unwrap().rem_euclid(4.0);
+        assert!((bar - 1.5).abs() < 0.01, "still on device 2's bar: {bar}");
+        assert!(c.locked());
     }
 
     #[test]
