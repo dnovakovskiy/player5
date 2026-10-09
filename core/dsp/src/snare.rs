@@ -25,11 +25,11 @@
 //!   with it);
 //! * `tone` – low settings give a fuller lower body mode and darker noise,
 //!   high settings a thinner body and brighter, crisper noise;
-//! * `snappy` – amount of noise, linear in amplitude, from none (a pure
-//!   two-mode body) to wire-heavy (6 dB more wires than the default 0.5);
+//! * `snappy` – amount of noise, from none (a pure two-mode body) to
+//!   wire-heavy, with a gentle taper (half travel gives three quarters of
+//!   the full amount);
 //! * `level` – output level. It applies immediately, smoothed over a few
-//!   milliseconds so moving it mid-hit never clicks; a new hit starts at
-//!   the current level.
+//!   milliseconds so moving it mid-hit never clicks.
 //!
 //! `tune`, `decay`, `tone` and `snappy` take effect on the next hit. A hit
 //! with velocity 0 is ignored.
@@ -92,9 +92,8 @@ const NOISE_T60_LOW_S: f32 = 0.08;
 /// ln(0.4 / 0.08).
 const NOISE_T60_LN_RATIO: f32 = 1.609_437_912;
 /// Noise level at `snappy = 1`, velocity 1 (after the soft clip, whose
-/// output RMS is about [`NOISE_DRIVE_RMS`]). `snappy` scales it linearly, so
-/// the default `snappy = 0.5` sits 6 dB below the wire-heavy maximum.
-const NOISE_GAIN: f32 = 1.8;
+/// output RMS is about [`NOISE_DRIVE_RMS`]).
+const NOISE_GAIN: f32 = 1.2;
 /// Share of the noise level that does not depend on velocity (on top of the
 /// overall velocity gain), so accents tilt the balance towards the wires.
 const NOISE_VELOCITY_FLOOR: f32 = 0.75;
@@ -349,13 +348,13 @@ impl Voice for Snare {
         let sr = self.sample_rate;
         let p = self.params;
 
-        // Carry whatever is sounding now (already scaled by the old level);
-        // it fades out under the new hit. The new hit starts from silence
-        // (body phase 0, noise envelope onset), so it can take the current
-        // `level` at once: a hit right after a level move, ringing or not,
-        // plays at the new level instead of gliding in from the old one.
-        self.offset = if self.active { self.last_out } else { 0.0 };
-        self.level_now = p.level;
+        // Carry whatever is sounding now; it fades out under the new hit.
+        if self.active {
+            self.offset = self.last_out;
+        } else {
+            self.offset = 0.0;
+            self.level_now = p.level;
+        }
         self.reset_hit();
 
         // Body.
@@ -386,11 +385,11 @@ impl Voice for Snare {
         let bandwidth = (NOISE_LP_ENBW * lp_hz - NOISE_HP_ENBW * hp_hz).max(100.0);
         let rms = (bandwidth * 2.0 / (3.0 * sr)).sqrt();
         self.noise_scale = NOISE_DRIVE_RMS / rms;
-        // Linear in amplitude, like the noise VCA's level pot: every part of
-        // the travel stays useful (the top half adds 6 dB of wires).
-        let noise_level = NOISE_GAIN
-            * p.snappy
-            * (NOISE_VELOCITY_FLOOR + (1.0 - NOISE_VELOCITY_FLOOR) * velocity);
+        // A gentle taper (like an audio pot): the first half of the travel
+        // brings in three quarters of the wires.
+        let snappy = p.snappy * (2.0 - p.snappy);
+        let noise_level =
+            NOISE_GAIN * snappy * (NOISE_VELOCITY_FLOOR + (1.0 - NOISE_VELOCITY_FLOOR) * velocity);
 
         // Start the hit.
         self.low_env = LOW_BODY_GAIN - LOW_BODY_TONE_CUT * p.tone;

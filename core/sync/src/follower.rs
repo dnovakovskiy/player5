@@ -946,9 +946,7 @@ mod tests {
                         due += (length - phase) * SR;
                     }
                 }
-                let silent = sc
-                    .outage
-                    .is_some_and(|(a, b)| at / SR >= a && at / SR < b);
+                let silent = sc.outage.is_some_and(|(a, b)| at / SR >= a && at / SR < b);
                 if !silent {
                     pending.push((due, obs));
                 }
@@ -1457,7 +1455,11 @@ mod tests {
                 s,
             );
             assert!(!g.take_discontinuity(), "{phase:?}");
-            assert!(g.phase_error().abs() < 1e-9, "{phase:?}: {}", g.phase_error());
+            assert!(
+                g.phase_error().abs() < 1e-9,
+                "{phase:?}: {}",
+                g.phase_error()
+            );
             assert!((g.beat_at_sample(s) - 8.0).abs() < 1e-9, "{phase:?}");
         }
     }
@@ -1483,7 +1485,7 @@ mod tests {
         }
         // Resync with a refined tempo: snaps, tempo kept.
         let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
-        let mut feed = |f: &mut FollowerClock, k: u32, jitter: f64| {
+        let feed = |f: &mut FollowerClock, k: u32, jitter: f64| {
             let s = f64::from(k) * 32_000.0 + jitter;
             let o = Observation {
                 sample: s,

@@ -668,7 +668,10 @@ mod tests {
                     last_report = stamp;
                 }
             }
-            assert!(worst < 0.5, "stall {stall_s} s, spread {spread_s} s: {worst:.2} BPM off");
+            assert!(
+                worst < 0.5,
+                "stall {stall_s} s, spread {spread_s} s: {worst:.2} BPM off"
+            );
             assert!(last_report > 7.0 * SR, "reports resumed");
         }
     }
