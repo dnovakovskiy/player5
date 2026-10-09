@@ -25,9 +25,13 @@ impl Default for Master {
 }
 
 impl Master {
-    /// Linear output gain (`0..=4`, i.e. up to +12 dB).
+    /// Linear output gain (`0..=4`, i.e. up to +12 dB). Applies
+    /// immediately. NaN is ignored (the gain stays where it was), so a bad
+    /// value can never turn the output into NaN.
     pub fn set_output_gain(&mut self, gain: f32) {
-        self.output_gain = gain.clamp(0.0, 4.0);
+        if !gain.is_nan() {
+            self.output_gain = gain.clamp(0.0, 4.0);
+        }
     }
 
     /// Current output gain.
@@ -88,6 +92,18 @@ mod tests {
         let mut m = Master::default();
         m.set_output_gain(0.5);
         assert_eq!(m.process(0.4), 0.2);
+    }
+
+    #[test]
+    fn nan_gain_is_ignored() {
+        let mut m = Master::default();
+        m.set_output_gain(0.5);
+        m.set_output_gain(f32::NAN);
+        assert_eq!(m.output_gain(), 0.5);
+        m.set_output_gain(f32::INFINITY);
+        assert_eq!(m.output_gain(), 4.0);
+        m.set_output_gain(-1.0);
+        assert_eq!(m.process(0.3), 0.0);
     }
 
     #[test]
