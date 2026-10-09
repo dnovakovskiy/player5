@@ -1,0 +1,9 @@
+{
+  "bpm": 124,
+  "accent": 1.0,
+  "flam": 0.4,
+  "voices": {
+    "snare": { "steps": "---- X--x -x-- F-xx", "tune": 0.55, "decay": 0.4, "tone": 0.6, "snappy": 0.65 }
+  },
+  "render": { "bars": 2, "sample_rate": 48000, "tail_seconds": 0.5 }
+}
