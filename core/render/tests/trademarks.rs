@@ -91,8 +91,8 @@ fn names_model_number(line: &str, needle: &str) -> bool {
         let before = start.checked_sub(1).map(|j| bytes[j]);
         let after = bytes.get(end).copied();
         let before_ok =
-            before.is_none_or(|b| !(b.is_ascii_alphanumeric() || b == b'.' || b == b','));
-        let after_ok = after.is_none_or(|a| !a.is_ascii_alphanumeric() || a == b's');
+            !matches!(before, Some(b) if b.is_ascii_alphanumeric() || b == b'.' || b == b',');
+        let after_ok = !matches!(after, Some(a) if a.is_ascii_alphanumeric() && a != b's');
         let after_not_decimal =
             !(after == Some(b'.') && bytes.get(end + 1).is_some_and(u8::is_ascii_digit));
         if before_ok && after_ok && after_not_decimal {
