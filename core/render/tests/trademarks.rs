@@ -6,13 +6,17 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Directories never scanned: build output, dependencies, VCS, tooling.
-const SKIP_DIRS: [&str; 9] = [
+/// Directories never scanned: build output (including the gitignored,
+/// machine-generated JS core), dependencies, VCS, tooling.
+const SKIP_DIRS: [&str; 12] = [
     "target",
     "node_modules",
     ".git",
     ".claude",
     "dist",
+    "dist-single",
+    "generated",
+    "Frameworks",
     "build",
     "DerivedData",
     "test-results",
