@@ -946,9 +946,7 @@ mod tests {
                         due += (length - phase) * SR;
                     }
                 }
-                let silent = sc
-                    .outage
-                    .is_some_and(|(a, b)| at / SR >= a && at / SR < b);
+                let silent = sc.outage.is_some_and(|(a, b)| at / SR >= a && at / SR < b);
                 if !silent {
                     pending.push((due, obs));
                 }
@@ -1457,7 +1455,11 @@ mod tests {
                 s,
             );
             assert!(!g.take_discontinuity(), "{phase:?}");
-            assert!(g.phase_error().abs() < 1e-9, "{phase:?}: {}", g.phase_error());
+            assert!(
+                g.phase_error().abs() < 1e-9,
+                "{phase:?}: {}",
+                g.phase_error()
+            );
             assert!((g.beat_at_sample(s) - 8.0).abs() < 1e-9, "{phase:?}");
         }
     }
