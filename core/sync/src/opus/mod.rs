@@ -11,7 +11,7 @@
 //! - [`session`]: the source as a pure state machine (deck table, follow
 //!   target, announcements).
 //! - [`start`]: runs it on a background thread as a
-//!   [`SourceHandle`](crate::net::SourceHandle).
+//!   [`SourceHandle`].
 //!
 //! The unit reports beat number, beat within the bar, tempo, pitch, play
 //! state and the tempo-master flag per deck, but only in status packets
@@ -124,7 +124,10 @@ impl Default for OpusConfig {
 }
 
 impl OpusConfig {
-    fn settings(&self) -> session::Settings {
+    /// The settings a [`session::Session`] runs with: the interval
+    /// clamped, an unspecified interface treated as unknown.
+    #[must_use]
+    pub fn settings(&self) -> session::Settings {
         let interval = self
             .announce_interval
             .clamp(MIN_ANNOUNCE_INTERVAL, MAX_ANNOUNCE_INTERVAL);
