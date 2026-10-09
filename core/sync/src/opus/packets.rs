@@ -210,8 +210,9 @@ impl KeepAlive {
         self.tail[3]
     }
 
-    /// Parses a keep-alive. Longer packets are accepted (beat-link does
-    /// the same); only the first [`KEEP_ALIVE_LEN`] bytes are read.
+    /// Parses a keep-alive. Longer packets are accepted (our leniency:
+    /// beat-link warns and then rejects them); only the first
+    /// [`KEEP_ALIVE_LEN`] bytes are read.
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
         expect(bytes, kind::KEEP_ALIVE, KEEP_ALIVE_LEN)?;
         let mut mac = [0; 6];
@@ -288,7 +289,8 @@ pub fn lighting_request(number: u8, computer_name: &str) -> Vec<u8> {
 pub struct LightingHello {
     /// Device name, bytes `0x0b..0x1f`.
     pub name: String,
-    /// Device number byte `0x21` (`09` for deck 1 in the published prefix).
+    /// Byte `0x21`, where status packets carry the device number (`09` in
+    /// the published prefix; what it means in a hello is not published).
     pub device: u8,
     /// The status fields, when the packet is long enough to carry them
     /// (beat-link reads such packets as status).

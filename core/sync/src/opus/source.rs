@@ -18,6 +18,13 @@ const BUF_LEN: usize = 2048;
 /// Repeated send errors are reported at most this often.
 const SEND_ERROR_INTERVAL_NS: u64 = 10_000_000_000;
 
+/// Most datagrams read from the announce socket per loop.
+const MAX_ANNOUNCE_READS: usize = 64;
+
+/// After failing to find our address toward the unit, wait this long
+/// before trying again (each try opens a socket).
+const INTERFACE_RETRY_NS: u64 = 1_000_000_000;
+
 /// Our address on the interface that routes to `peer` (no packet is
 /// sent: `connect` on UDP only picks a route).
 #[must_use]
@@ -46,6 +53,7 @@ pub fn run(ctx: SourceContext, announce: UdpSocket, update: UdpSocket, settings:
     let mut out = Vec::new();
     let mut buf = [0u8; BUF_LEN];
     let mut last_send_error: Option<(String, u64)> = None;
+    let mut next_interface_probe = 0u64;
     if let Some(ip) = session.interface() {
         session.set_interface(ip, &mut out);
     }
@@ -63,7 +71,9 @@ pub fn run(ctx: SourceContext, announce: UdpSocket, update: UdpSocket, settings:
                 std::thread::sleep(POLL);
             }
         }
-        loop {
+        // Bounded, so a flood on the announce port cannot keep the loop
+        // from checking `should_stop`.
+        for _ in 0..MAX_ANNOUNCE_READS {
             match announce.recv_from(&mut buf) {
                 Ok((n, SocketAddr::V4(from))) => {
                     let now = host_time::now_ns();
@@ -78,13 +88,18 @@ pub fn run(ctx: SourceContext, announce: UdpSocket, update: UdpSocket, settings:
                 SourceCommand::Follow(target) => session.set_follow(target, &mut out),
             }
         }
+        let now = host_time::now_ns();
         if let Some(unit) = session.interface_wanted() {
-            match local_ip_toward(unit, peer_update_port) {
-                Some(ip) => session.set_interface(ip, &mut out),
-                None => session.interface_failed(&mut out),
+            if now >= next_interface_probe {
+                match local_ip_toward(unit, peer_update_port) {
+                    Some(ip) => session.set_interface(ip, &mut out),
+                    None => {
+                        next_interface_probe = now.saturating_add(INTERFACE_RETRY_NS);
+                        session.interface_failed(&mut out);
+                    }
+                }
             }
         }
-        let now = host_time::now_ns();
         session.tick(now, &mut out);
         for action in out.drain(..) {
             match action {

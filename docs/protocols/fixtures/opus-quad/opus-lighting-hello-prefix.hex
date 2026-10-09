@@ -7,7 +7,8 @@
 # The rest of the packet is not published; this prefix is what the
 # analysis script compares to recognise the unit.
 # Documented in: docs/protocols/opus-quad.md#what-the-unit-sends
-# Name "OPUS-QUAD", device byte 0x21 = 0x09 (deck 1).
+# Name "OPUS-QUAD", byte 0x21 = 0x09 (where status packets carry the device
+# number; its meaning in this packet is not published).
 # Bytes: UDP payload, hex, 16 per line.
 51 73 70 74 31 57 6d 4a 4f 4c 10 4f 50 55 53 2d
 51 55 41 44 00 00 00 00 00 00 00 00 00 00 00 01

@@ -278,7 +278,8 @@ impl Session {
         let Ok(AnnouncePacket::KeepAlive(ka)) = parse_announce(bytes) else {
             return;
         };
-        if Some(ka.mac) == self.mac {
+        let from_us = Some(*from.ip()) == self.interface && ka.name == REKORDBOX_NAME;
+        if from_us || Some(ka.mac) == self.mac {
             return; // our own broadcast
         }
         if ka.name == OPUS_NAME {
@@ -518,7 +519,7 @@ impl Session {
         if self.next_announce.is_some_and(|t| now < t) {
             return;
         }
-        self.next_announce = Some(now + self.settings.announce_interval_ns);
+        self.next_announce = Some(now.saturating_add(self.settings.announce_interval_ns));
         let broadcast = self
             .settings
             .broadcast
@@ -553,6 +554,14 @@ impl Session {
                 self.unit = None;
                 self.decks = Default::default();
                 self.follow_reported = None;
+                // An address we discovered (rather than were given) may be
+                // stale by the time the unit is back (DHCP, link-local
+                // re-assignment, another interface): find it again then.
+                // The MAC is kept until then so late echoes of our own
+                // keep-alive are still recognised.
+                if self.settings.interface.is_none() {
+                    self.interface = None;
+                }
                 Self::status(out, true, format!("lost the Opus Quad at {addr}"));
             }
         }
