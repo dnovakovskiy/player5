@@ -33,7 +33,9 @@
 //! Controls are normalised `0..=1`: `tune` (the whole cluster ±25 %),
 //! `decay` (60 dB fall time: closed 40–120 ms, open 0.25–1.5 s), `tone` and
 //! `level`. `snappy` is ignored. Pitch, decay and tone take effect on the
-//! next trigger; `level` applies immediately.
+//! next trigger; `level` applies immediately, smoothed over a few
+//! milliseconds so moving it under a ringing open hat never clicks. A hit
+//! with velocity 0 is ignored.
 //!
 //! A full-velocity hit at `level = 1.0` peaks close to −14 dBFS for both
 //! hats, well under the kick. Being metal, no two hits are identical: at
@@ -85,6 +87,10 @@ const ATTACK_TAU_S: f32 = 0.000_1;
 const CHOKE_T60_S: f32 = 0.005;
 /// Envelope level below which the voice goes idle (−100 dB).
 const IDLE_THRESHOLD: f32 = 1e-5;
+/// Time constant of the `level` smoother.
+const LEVEL_TAU_S: f32 = 0.005;
+/// The smoothed level snaps onto its target once this close (−120 dB).
+const LEVEL_SNAP: f32 = 1e-6;
 
 /// What distinguishes the closed hat from the open one.
 #[derive(Clone, Copy, Debug)]
@@ -139,6 +145,7 @@ struct HatCore {
     // Derived per sample rate.
     attack_coef: f32,
     choke_coef: f32,
+    level_coef: f32,
 
     // Derived per trigger.
     env_coef: f32,
@@ -154,6 +161,8 @@ struct HatCore {
     env: f32,
     /// Smoothed VCA gain following `env`.
     gain: f32,
+    /// `params.level`, smoothed while the voice sounds.
+    level_now: f32,
 }
 
 impl HatCore {
@@ -164,6 +173,7 @@ impl HatCore {
             params: VoiceParams::default(),
             attack_coef: 1.0,
             choke_coef: 0.0,
+            level_coef: 0.0,
             env_coef: 0.0,
             active: false,
             oscs: Default::default(),
@@ -173,6 +183,7 @@ impl HatCore {
             lowpass: Svf::default(),
             env: 0.0,
             gain: 0.0,
+            level_now: VoiceParams::default().level,
         };
         core.set_sample_rate(sample_rate);
         core
@@ -205,6 +216,7 @@ impl HatCore {
         self.active = false;
         self.env = 0.0;
         self.gain = 0.0;
+        self.level_now = self.params.level;
         self.band.reset();
         for hp in &mut self.highpass {
             hp.reset();
@@ -216,6 +228,7 @@ impl HatCore {
         self.sample_rate = sample_rate.max(1.0);
         self.attack_coef = 1.0 - math::tau_coefficient(ATTACK_TAU_S, self.sample_rate);
         self.choke_coef = math::decay_coefficient(CHOKE_T60_S, self.sample_rate);
+        self.level_coef = 1.0 - math::tau_coefficient(LEVEL_TAU_S, self.sample_rate);
         self.lowpass
             .set(LOWPASS_HZ, BUTTERWORTH_Q, self.sample_rate);
         for ((osc, &hz), &phase) in self
@@ -238,6 +251,9 @@ impl HatCore {
             snappy: unit(params.snappy),
             level: unit(params.level),
         };
+        if !self.active {
+            self.level_now = self.params.level;
+        }
     }
 
     fn trigger(&mut self, velocity: f32) {
@@ -293,11 +309,18 @@ impl HatCore {
         let high = hp2.process(hp1.process(vca).high).high;
         let out = self.lowpass.process(high).low;
 
+        // Level: follows the control within a few milliseconds.
+        self.level_now += (self.params.level - self.level_now) * self.level_coef;
+        if (self.params.level - self.level_now).abs() < LEVEL_SNAP {
+            self.level_now = self.params.level;
+        }
+        let y = out * self.level_now * self.shape.calibration;
+
         if self.env < IDLE_THRESHOLD && self.gain < IDLE_THRESHOLD {
             self.reset_state();
         }
 
-        out * self.params.level * self.shape.calibration
+        y
     }
 }
 
@@ -836,19 +859,26 @@ mod tests {
     }
 
     #[test]
-    fn level_scales_output_immediately() {
+    fn level_scales_output_and_glides_mid_ring() {
         for open in [false, true] {
             let full = hit(open, SR, VoiceParams::default(), 1.0, 2_400);
             let half = hit(open, SR, params(0.5, 0.5, 0.5, 0.5), 1.0, 2_400);
             for (a, b) in full.iter().zip(&half) {
                 assert!((a * 0.5 - b).abs() <= a.abs() * 1e-6);
             }
-            // Mid-ring, without a retrigger.
-            let mut v = hat(open, SR);
+            // Mid-ring, without a retrigger: the level glides down within a
+            // few milliseconds instead of stepping (which would click).
+            let mut v = HatCore::new(if open { OPEN } else { CLOSED }, SR);
             v.trigger(1.0);
-            render(v.as_mut(), 240);
+            for _ in 0..240 {
+                v.process();
+            }
+            let mut reference = v.clone();
             v.apply_params(&params(0.5, 0.5, 0.5, 0.0));
-            assert_eq!(v.process(), 0.0);
+            let (a, b) = (reference.process(), v.process());
+            assert!(b.abs() >= 0.99 * a.abs() && b.abs() <= a.abs(), "{a} {b}");
+            let late: Vec<f32> = (0..4_800).map(|_| v.process()).collect();
+            assert!(late[2_400..].iter().all(|s| s.abs() < 1e-4));
         }
     }
 

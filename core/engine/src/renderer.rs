@@ -282,6 +282,26 @@ mod tests {
     }
 
     #[test]
+    fn non_finite_params_never_reach_the_output() {
+        let (mut p, mut r) = renderer();
+        for target in [
+            ParamTarget::Master(MasterParam::OutputGain),
+            ParamTarget::Master(MasterParam::Limiter),
+            ParamTarget::Voice(VoiceId::Kick, VoiceParam::Level),
+            ParamTarget::Voice(VoiceId::Kick, VoiceParam::Tune),
+            ParamTarget::Voice(VoiceId::Kick, VoiceParam::Decay),
+        ] {
+            p.push(Event::param(0, target, f32::NAN)).unwrap();
+        }
+        p.push(Event::trigger(0, VoiceId::Kick, f32::NAN)).unwrap();
+        p.push(Event::trigger(10, VoiceId::Snare, 1.0)).unwrap();
+        let mut out = vec![0.0f32; 4_800];
+        r.process(&mut out);
+        assert!(out.iter().all(|s| s.is_finite()));
+        assert!(out.iter().any(|&s| s != 0.0), "the snare should sound");
+    }
+
+    #[test]
     fn publishes_timing() {
         let (_p, mut r) = renderer();
         let timing = Arc::clone(&r.timing);

@@ -16,8 +16,13 @@
 //!   hits are denser, not just louder.
 //!
 //! Controls are normalised `0..=1`: `tune` (40–90 Hz), `decay` (60 dB fall
-//! time 0.1–2 s) and `level`. A full-velocity hit at `level = 1.0` peaks
-//! close to −6 dBFS.
+//! time 0.1–2 s) and `level`. `tune` and `decay` take effect on the next
+//! hit; `level` applies immediately, smoothed over a few milliseconds so
+//! moving it under a ringing kick never clicks. A full-velocity hit at
+//! `level = 1.0` peaks close to −6 dBFS.
+//!
+//! A hit with velocity 0 is ignored. A retrigger while the kick still rings
+//! restarts it from the pulse edge, like the analogue circuit.
 
 use crate::math;
 use crate::voice::Voice;
@@ -67,6 +72,26 @@ const DRIVE_VELOCITY: f32 = 0.5;
 const CALIBRATION: f32 = 0.5;
 /// Envelope level below which the voice goes idle (−100 dB).
 const IDLE_THRESHOLD: f32 = 1e-5;
+/// Time constant of the `level` smoother.
+const LEVEL_TAU_S: f32 = 0.005;
+/// The smoothed level snaps onto its target once this close (−120 dB).
+const LEVEL_SNAP: f32 = 1e-6;
+/// Decaying states are zeroed below this, long before they could go
+/// subnormal (denormal arithmetic is slow on x86 and in WASM). It sits far
+/// below the last bit of anything they are added to (the pitch factor is
+/// exactly 1.0 by then, and the click is under one ULP of the body), so
+/// flushing does not change the rendered audio.
+const FLUSH_THRESHOLD: f32 = 1e-30;
+
+/// Zeroes a decaying state once it is far below audibility.
+#[inline]
+fn flush(x: f32) -> f32 {
+    if x.abs() < FLUSH_THRESHOLD {
+        0.0
+    } else {
+        x
+    }
+}
 
 /// The bass drum voice. See the [module docs](self).
 #[derive(Clone, Debug)]
@@ -86,6 +111,7 @@ pub struct Kick {
     click_coef: f32,
     click_hp_coef: f32,
     click_lp_coef: f32,
+    level_coef: f32,
 
     // State.
     active: bool,
@@ -96,6 +122,18 @@ pub struct Kick {
     hp_x1: f32,
     hp_y1: f32,
     lp_y1: f32,
+    /// `params.level`, smoothed while the voice sounds.
+    level_now: f32,
+}
+
+/// Clamps a control to `0..=1`, mapping non-finite values to 0.
+#[inline]
+fn unit(x: f32) -> f32 {
+    if x.is_finite() {
+        x.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 impl Kick {
@@ -114,6 +152,7 @@ impl Kick {
             click_coef: 0.0,
             click_hp_coef: 0.0,
             click_lp_coef: 0.0,
+            level_coef: 0.0,
             active: false,
             phase: 0.0,
             amp_env: 0.0,
@@ -122,6 +161,7 @@ impl Kick {
             hp_x1: 0.0,
             hp_y1: 0.0,
             lp_y1: 0.0,
+            level_now: KickParams::default().level,
         };
         kick.set_sample_rate(sample_rate);
         kick
@@ -134,28 +174,31 @@ impl Kick {
     }
 
     /// Replaces all parameters. Takes effect on the next trigger, except
-    /// `level`, which applies immediately.
+    /// `level`, which applies immediately (smoothed while the kick rings).
+    /// Values are clamped to `0..=1`; non-finite values become 0.
     pub fn set_params(&mut self, params: KickParams) {
-        self.params = KickParams {
-            tune: params.tune.clamp(0.0, 1.0),
-            decay: params.decay.clamp(0.0, 1.0),
-            level: params.level.clamp(0.0, 1.0),
-        };
+        self.set_tune(params.tune);
+        self.set_decay(params.decay);
+        self.set_level(params.level);
     }
 
     /// Sets `tune` (`0..=1`).
     pub fn set_tune(&mut self, tune: f32) {
-        self.params.tune = tune.clamp(0.0, 1.0);
+        self.params.tune = unit(tune);
     }
 
     /// Sets `decay` (`0..=1`).
     pub fn set_decay(&mut self, decay: f32) {
-        self.params.decay = decay.clamp(0.0, 1.0);
+        self.params.decay = unit(decay);
     }
 
-    /// Sets `level` (`0..=1`).
+    /// Sets `level` (`0..=1`). Applies immediately: a ringing kick follows
+    /// it within a few milliseconds, an idle one starts its next hit there.
     pub fn set_level(&mut self, level: f32) {
-        self.params.level = level.clamp(0.0, 1.0);
+        self.params.level = unit(level);
+        if !self.active {
+            self.level_now = self.params.level;
+        }
     }
 
     /// Body frequency (Hz) the current `tune` resolves to once the sweep has
@@ -190,7 +233,9 @@ impl Voice for Kick {
         self.click_coef = math::tau_coefficient(CLICK_TAU_S, self.sample_rate);
         self.click_hp_coef = math::onepole_coefficient(CLICK_HP_HZ, self.sample_rate);
         self.click_lp_coef = math::onepole_coefficient(CLICK_LP_HZ, self.sample_rate);
+        self.level_coef = 1.0 - math::tau_coefficient(LEVEL_TAU_S, self.sample_rate);
         self.reset_state();
+        self.level_now = self.params.level;
     }
 
     fn apply_params(&mut self, params: &VoiceParams) {
@@ -200,7 +245,14 @@ impl Voice for Kick {
     }
 
     fn trigger(&mut self, velocity: f32) {
-        let velocity = velocity.clamp(0.0, 1.0);
+        // A silent (or NaN) hit changes nothing; a ringing kick rings on.
+        if velocity.is_nan() || velocity <= 0.0 {
+            return;
+        }
+        let velocity = velocity.min(1.0);
+        if !self.active {
+            self.level_now = self.params.level;
+        }
         self.velocity = velocity;
         self.base_freq_hz = self.tuned_frequency_hz();
         self.amp_coef = math::decay_coefficient(self.decay_seconds(), self.sample_rate);
@@ -209,7 +261,7 @@ impl Voice for Kick {
 
         // Hard retrigger: the analogue circuit restarts from the pulse edge.
         self.reset_state();
-        self.active = velocity > 0.0;
+        self.active = true;
         self.amp_env = 1.0;
         self.pitch_env = velocity;
         self.click_env = velocity;
@@ -232,8 +284,8 @@ impl Voice for Kick {
         // Click: pulse → one-pole high-pass → one-pole low-pass.
         let hp = self.click_hp_coef * (self.hp_y1 + self.click_env - self.hp_x1);
         self.hp_x1 = self.click_env;
-        self.hp_y1 = hp;
-        self.lp_y1 += (1.0 - self.click_lp_coef) * (hp - self.lp_y1);
+        self.hp_y1 = flush(hp);
+        self.lp_y1 = flush(self.lp_y1 + (1.0 - self.click_lp_coef) * (hp - self.lp_y1));
         let click = self.lp_y1 * CLICK_GAIN;
 
         // Saturate the mix; normalise so a full-scale body still peaks at 1.
@@ -241,13 +293,19 @@ impl Voice for Kick {
 
         // Advance envelopes.
         self.amp_env *= self.amp_coef;
-        self.pitch_env *= self.sweep_coef;
-        self.click_env *= self.click_coef;
+        self.pitch_env = flush(self.pitch_env * self.sweep_coef);
+        self.click_env = flush(self.click_env * self.click_coef);
         if self.amp_env < IDLE_THRESHOLD && self.click_env < IDLE_THRESHOLD {
             self.reset_state();
         }
 
-        shaped * self.velocity * self.params.level * CALIBRATION
+        // Level: follows the control within a few milliseconds.
+        self.level_now += (self.params.level - self.level_now) * self.level_coef;
+        if (self.params.level - self.level_now).abs() < LEVEL_SNAP {
+            self.level_now = self.params.level;
+        }
+
+        shaped * self.velocity * self.level_now * CALIBRATION
     }
 
     #[inline]
