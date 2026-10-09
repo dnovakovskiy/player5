@@ -27,6 +27,13 @@ pub const MAX_GAP_NS: u64 = 1_000_000_000;
 /// they were laid out at the old tempo and would be projected wrongly.
 pub const TEMPO_TOLERANCE: f64 = 0.0005;
 
+/// Estimates less certain than this (half-width) are not reported. A
+/// single bracket between two packets ~200 ms apart is about ±104 ms; a
+/// lost packet doubles that, and a consumer that snaps its phase to each
+/// observation would jump by a large part of a beat. The bracket is still
+/// remembered, so the next beat's estimate can use it.
+pub const MAX_UNCERTAINTY_NS: u64 = 150_000_000;
+
 /// When a beat is estimated to have started.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BeatEstimate {
@@ -93,7 +100,8 @@ impl BeatTracker {
     }
 
     /// Feeds one status report received at `host_ns`. Returns an estimate
-    /// when this report shows the next beat starting.
+    /// when this report shows the next beat starting, unless it is less
+    /// certain than [`MAX_UNCERTAINTY_NS`].
     ///
     /// `beat` is the beat counter (`None` if unknown), `playing` whether
     /// the deck plays, `bpm` its effective tempo.
@@ -165,10 +173,11 @@ impl BeatTracker {
         }
         let mid = ((lo + hi) / 2.0).min(0.0);
         let start = (i128::from(host_ns) + mid.round() as i128).max(0) as u64;
-        Some(BeatEstimate {
+        let uncertainty_ns = ((hi - lo) / 2.0).max(0.0) as u64;
+        (uncertainty_ns <= MAX_UNCERTAINTY_NS).then_some(BeatEstimate {
             beat,
             host_ns: start,
-            uncertainty_ns: ((hi - lo) / 2.0).max(0.0) as u64,
+            uncertainty_ns,
             beats_used: used,
         })
     }
@@ -338,6 +347,62 @@ mod tests {
             }
         }
         assert!(last_est.unwrap().beats_used > 1);
+    }
+
+    #[test]
+    fn a_lost_packet_does_not_report_a_wide_bracket() {
+        // 100 BPM, packets every 200 ms, but the one at 400 ms is lost:
+        // the step from beat 5 to 6 is only known to within ±204 ms.
+        let mut t = BeatTracker::new();
+        let bpm = Some(100.0);
+        assert!(t.update(0, Some(5), true, bpm).is_none());
+        assert!(t.update(200_000_000, Some(5), true, bpm).is_none());
+        assert!(t.update(600_000_000, Some(6), true, bpm).is_none());
+        // The wide bracket is remembered and agrees with the next one.
+        assert_eq!(t.beats_remembered(), 1);
+        assert!(t.update(800_000_000, Some(6), true, bpm).is_none());
+        assert!(t.update(1_000_000_000, Some(6), true, bpm).is_none());
+        let e = t.update(1_200_000_000, Some(7), true, bpm).unwrap();
+        assert_eq!(e.beats_used, 2);
+        assert!(e.uncertainty_ns <= 100_000_000 + SLACK_NS);
+    }
+
+    #[test]
+    fn extreme_inputs_never_panic() {
+        let mut rng = Rng(0xdead_beef_cafe_f00d);
+        let mut t = BeatTracker::new();
+        let specials = [0, 1, u64::MAX - 1, u64::MAX, 1 << 63];
+        let bpms = [
+            None,
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(-1.0),
+            Some(0.0),
+            Some(f64::MIN_POSITIVE),
+            Some(1e-8),
+            Some(128.0),
+            Some(1e300),
+        ];
+        let mut now = 0u64;
+        let mut beat = 1u32;
+        for i in 0..50_000u32 {
+            now = match rng.below(10) {
+                0 => specials[rng.below(specials.len() as u64) as usize],
+                _ => now.wrapping_add(rng.below(400_000_000)),
+            };
+            beat = match rng.below(8) {
+                0 => rng.next() as u32,
+                1 => u32::MAX,
+                2 => 0,
+                _ => beat.wrapping_add(rng.below(2) as u32),
+            };
+            let b = bpms[rng.below(bpms.len() as u64) as usize];
+            if let Some(e) = t.update(now, Some(beat), i % 13 != 0, b) {
+                assert!(e.uncertainty_ns <= MAX_UNCERTAINTY_NS);
+                assert!((1..=WINDOW).contains(&e.beats_used));
+                assert!(e.host_ns <= now);
+            }
+        }
     }
 
     #[test]
