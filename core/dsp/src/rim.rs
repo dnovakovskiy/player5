@@ -70,7 +70,7 @@ const HP_Q: f32 = 0.707;
 /// strike strength, so accents saturate harder.
 const DRIVE: f32 = 1.5;
 /// Output scaling so a full hit at `level = 1` peaks near −10 dBFS.
-const CALIBRATION: f32 = 0.3;
+const CALIBRATION: f32 = 0.32;
 
 /// Per-resonator energy (amplitude²) below which it counts as silent
 /// (−100 dB).
@@ -644,3 +644,4 @@ mod tests {
         assert!(elapsed.as_millis() < 100, "10 s took {elapsed:?}");
     }
 }
+
