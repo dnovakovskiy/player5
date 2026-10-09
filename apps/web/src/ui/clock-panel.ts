@@ -214,7 +214,9 @@ export class ClockPanel {
       onConnection: (state, detail) => {
         this.bridgeState = state;
         if (state === "closed") this.timeline = null;
-        if (detail && state === "closed") this.bridgeStatus = `closed (${detail})`;
+        // The bridge refuses pages from origins it does not trust and says
+        // how to allow one; fill in ours.
+        if (detail && state === "closed") this.bridgeStatus = `closed (${detail.replace("<origin>", location.origin)})`;
         this.renderStatus();
       },
       onHello: () => {

@@ -15,5 +15,6 @@ the old one and link both ways; never edit history.
 | [0008](0008-apple-shells.md) | Apple shells: one XCFramework, one Swift package, XcodeGen apps | Accepted |
 | [0009](0009-kit-headroom.md) | One fixed headroom trim on the kit mix | Accepted |
 | [0010](0010-web-delivery.md) | Web delivery: runtime fallbacks, single-file artifact, offline PWA, time mapping | Accepted (amends 0004) |
+| [0011](0011-bridge-origin-policy.md) | Which pages may use the bridge (Origin check, framing, per-peer cap) | Accepted (amends 0007) |
 
 Template: Context · Decision · Consequences · Sources (if any).

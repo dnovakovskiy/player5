@@ -64,14 +64,18 @@ pub fn read_request(stream: &mut TcpStream) -> Result<(Request, Vec<u8>), ReadEr
     let start = Instant::now();
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
+    // Where the blank line could still start: rescanning the whole buffer
+    // after every read would be quadratic for a client that trickles bytes.
+    let mut scanned = 0;
     loop {
-        if let Some(end) = find_head_end(&buf) {
+        if let Some(end) = find_head_end(&buf[scanned..]).map(|e| e + scanned) {
             let rest = buf[end + 4..].to_vec();
             let head = std::str::from_utf8(&buf[..end]).map_err(|_| ReadError::Malformed)?;
             return parse_head(head)
                 .map(|r| (r, rest))
                 .ok_or(ReadError::Malformed);
         }
+        scanned = buf.len().saturating_sub(3);
         if buf.len() > MAX_HEAD {
             return Err(ReadError::TooLarge);
         }
@@ -150,6 +154,76 @@ pub fn websocket_accept(req: &Request) -> Result<String, (u16, &'static str)> {
         Some(bytes) if bytes.len() == 16 => Ok(ws::accept_key(key)),
         _ => Err((400, "Bad Request")),
     }
+}
+
+/// Which browser pages may open the WebSocket (and so change the follow
+/// target for the whole booth). See ADR-0011.
+///
+/// Allowed: requests without an `Origin` header (not a browser page);
+/// pages served from a loopback host (`localhost`, `*.localhost`,
+/// `127.0.0.0/8`, `[::1]`: only local software serves those); pages
+/// served by this bridge itself (`Origin` equals the `Host` header) when
+/// that host is an IP address, a single-label name or a `.local` name,
+/// which a DNS-rebinding attacker cannot point at the bridge; and any
+/// origin listed in `extra` (`--allow-origin`; `*` allows every origin).
+/// Everything else, e.g. an arbitrary web page open on the DJ laptop or a
+/// public name re-bound to the bridge's address, is refused.
+pub fn origin_allowed(req: &Request, extra: &[String]) -> Result<(), String> {
+    let Some(origin) = req.header("origin") else {
+        return Ok(());
+    };
+    let origin = origin.trim().trim_end_matches('/');
+    if extra
+        .iter()
+        .any(|o| o == "*" || o.trim_end_matches('/').eq_ignore_ascii_case(origin))
+    {
+        return Ok(());
+    }
+    let refused = || Err(origin.to_string());
+    let Some((scheme, authority)) = origin.split_once("://") else {
+        return refused();
+    };
+    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        || authority.is_empty()
+        || authority.contains(['/', '@', '?', '#'])
+    {
+        return refused();
+    }
+    let host = host_of(authority).to_ascii_lowercase();
+    if is_loopback_host(&host) {
+        return Ok(());
+    }
+    let same_host = req
+        .header("host")
+        .is_some_and(|h| h.trim().eq_ignore_ascii_case(authority));
+    let unbindable = host.parse::<std::net::IpAddr>().is_ok()
+        || (host.starts_with('[') && host.ends_with(']'))
+        || !host.contains('.')
+        || host.ends_with(".local");
+    if same_host && unbindable {
+        return Ok(());
+    }
+    refused()
+}
+
+/// The host part of `host[:port]` or `[v6][:port]` (brackets kept).
+fn host_of(authority: &str) -> &str {
+    if authority.starts_with('[') {
+        return authority
+            .find(']')
+            .map_or(authority, |end| &authority[..=end]);
+    }
+    authority
+        .rsplit_once(':')
+        .map_or(authority, |(host, _port)| host)
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    if host == "localhost" || host.ends_with(".localhost") || host == "[::1]" {
+        return true;
+    }
+    host.parse::<std::net::Ipv4Addr>()
+        .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Writes a complete response with a body.
@@ -369,6 +443,75 @@ mod tests {
             assert!(resolve_static(&root, "/link.txt").is_none());
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn with_origin(origin: Option<&str>, host: &str) -> Request {
+        let mut head = format!("GET /ws HTTP/1.1\r\nHost: {host}");
+        if let Some(o) = origin {
+            head.push_str(&format!("\r\nOrigin: {o}"));
+        }
+        req(&head)
+    }
+
+    #[test]
+    fn origin_policy() {
+        let none: &[String] = &[];
+        let ok = |origin: Option<&str>, host: &str| {
+            origin_allowed(&with_origin(origin, host), none).is_ok()
+        };
+        // Not a browser page.
+        assert!(ok(None, "192.168.1.5:17505"));
+        // Pages served by the bridge itself.
+        assert!(ok(Some("http://192.168.1.5:17505"), "192.168.1.5:17505"));
+        assert!(ok(Some("http://[fe80::1]:17505"), "[fe80::1]:17505"));
+        assert!(ok(
+            Some("http://djlaptop.local:17505"),
+            "djlaptop.local:17505"
+        ));
+        assert!(ok(Some("http://djlaptop:17505"), "DJLAPTOP:17505"));
+        // Local software (a dev server, the app on localhost).
+        assert!(ok(Some("http://localhost:5173"), "localhost:17505"));
+        assert!(ok(Some("http://127.0.0.1:4173"), "127.0.0.1:17505"));
+        assert!(ok(Some("http://[::1]:8080"), "[::1]:17505"));
+        assert!(ok(Some("http://app.localhost"), "127.0.0.1:17505"));
+        // A web page open on the DJ laptop.
+        assert!(!ok(Some("https://evil.example"), "localhost:17505"));
+        assert!(!ok(Some("http://192.168.1.9"), "192.168.1.5:17505"));
+        assert!(!ok(Some("null"), "localhost:17505"));
+        // DNS rebinding: a public name re-pointed at the bridge.
+        assert!(!ok(
+            Some("http://rebind.evil.example:17505"),
+            "rebind.evil.example:17505"
+        ));
+        // Not fooled by look-alikes.
+        assert!(!ok(
+            Some("http://localhost.evil.example"),
+            "localhost:17505"
+        ));
+        assert!(!ok(
+            Some("http://127.0.0.1@evil.example"),
+            "127.0.0.1:17505"
+        ));
+        assert!(!ok(Some("http://192.168.1.5:17505"), "192.168.1.5:9999"));
+        assert!(!ok(Some("ftp://localhost"), "localhost:17505"));
+        // --allow-origin.
+        let extra = vec!["https://player5.example/".to_string()];
+        assert!(origin_allowed(
+            &with_origin(Some("https://player5.example"), "localhost:17505"),
+            &extra
+        )
+        .is_ok());
+        assert!(origin_allowed(
+            &with_origin(Some("https://other.example"), "localhost:17505"),
+            &extra
+        )
+        .is_err());
+        let any = vec!["*".to_string()];
+        assert!(origin_allowed(
+            &with_origin(Some("https://other.example"), "localhost:17505"),
+            &any
+        )
+        .is_ok());
     }
 
     #[test]

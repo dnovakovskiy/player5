@@ -162,7 +162,6 @@ test("Pro DJ Link through the real bridge: lock, tempo, bar, follow, restart", a
   await page.locator("#bridge-follow").selectOption("3");
   await expect.poll(async () => Math.abs(await barError(page, 3)), { timeout: 10_000, intervals: [50] }).toBeLessThan(0.05);
   const took = Date.now() - switched;
-  if (process.env.TRACE) console.log("switch took", took);
   expect(took, "ms until the heard bar is device 3's").toBeLessThan(900);
   await expect(page.locator("#source-status")).toContainText("device 3", { timeout: 10_000 });
   await expect.poll(async () => Math.abs((await engineTempo(page)) - 128), { timeout: 15_000 }).toBeLessThan(0.05);
@@ -183,7 +182,6 @@ test("Pro DJ Link through the real bridge: lock, tempo, bar, follow, restart", a
   for (let i = 0; i < 40; i++) {
     const e3 = await barError(page, 3);
     worst = Math.max(worst, Math.abs(e3));
-    if (process.env.TRACE) console.log("trace", i, e3.toFixed(3), (await barError(page, 2)).toFixed(3), (await page.locator("#source-status").textContent())?.slice(0, 100));
     await expect(page.locator("#bridge-follow")).toHaveValue("3", { timeout: 0 });
     await page.waitForTimeout(100);
   }
@@ -195,4 +193,50 @@ test("Pro DJ Link through the real bridge: lock, tempo, bar, follow, restart", a
   await expect.poll(async () => Math.abs((await engineTempo(page)) - 128), { timeout: 15_000 }).toBeLessThan(0.05);
   await expectAlignedTo(page, 3);
   expect(errors).toEqual([]);
+});
+
+test("a page from another origin cannot drive the bridge; the app explains why", async ({ page }) => {
+  // A non-browser client (no Origin header) follows device 3.
+  const timelines: { device: number | null }[] = [];
+  const owner = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  owner.onmessage = (e) => {
+    const m = JSON.parse(String(e.data)) as { type: string; device: number | null };
+    if (m.type === "timeline") timelines.push(m);
+  };
+  await new Promise<void>((resolve) => (owner.onopen = () => resolve()));
+  owner.send(JSON.stringify({ type: "follow", target: 3 }));
+  await expect.poll(() => timelines.at(-1)?.device, { timeout: 10_000 }).toBe(3);
+
+  // Any web page open on the DJ laptop tries to switch the booth to device 2.
+  await page.route("http://foreign.test/**", (route) =>
+    route.fulfill({ contentType: "text/html", body: "<!doctype html><title>elsewhere</title>" }),
+  );
+  await page.goto("http://foreign.test/");
+  const closed = await page.evaluate(async (url) => {
+    const ws = new WebSocket(url);
+    ws.onopen = () => ws.send(JSON.stringify({ type: "follow", target: 2 }));
+    return new Promise<{ code: number; reason: string }>((resolve) => {
+      ws.onclose = (e) => resolve({ code: e.code, reason: e.reason });
+    });
+  }, `ws://127.0.0.1:${port}/ws`);
+  expect(closed.code).toBe(1008);
+  expect(closed.reason).toContain("--allow-origin");
+  await page.waitForTimeout(1_000);
+  expect(timelines.at(-1)?.device, "the bridge still follows device 3").toBe(3);
+  owner.close();
+
+  // The app itself, hosted on another origin, says what to do.
+  await page.route("http://player5.test/**", async (route) => {
+    const url = new URL(route.request().url());
+    const response = await route.fetch({ url: `http://127.0.0.1:4173${url.pathname}${url.search}` });
+    await route.fulfill({ response });
+  });
+  guard(page, [/WebSocket connection to .* failed/]);
+  await page.goto("http://player5.test/");
+  await chooseSource(page, "Bridge");
+  await page.locator("#bridge-url").fill(`ws://127.0.0.1:${port}/ws`);
+  await page.getByRole("button", { name: "Connect" }).click();
+  await expect(page.locator("#source-status")).toContainText("--allow-origin http://player5.test", {
+    timeout: 10_000,
+  });
 });
