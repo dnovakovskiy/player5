@@ -204,7 +204,10 @@ mod tests {
         // Now tapping at 90 BPM (32 000 samples).
         at += 8_000.0;
         let first = t.tap(at).unwrap();
-        assert!((first.bpm.unwrap() - 120.0).abs() < 1e-9, "one tap is an outlier");
+        assert!(
+            (first.bpm.unwrap() - 120.0).abs() < 1e-9,
+            "one tap is an outlier"
+        );
         at += 32_000.0;
         let second = t.tap(at).unwrap();
         assert!((second.bpm.unwrap() - 90.0).abs() < 1e-9, "{second:?}");

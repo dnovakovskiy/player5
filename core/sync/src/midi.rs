@@ -560,8 +560,13 @@ mod tests {
         m.handle(MidiMessage::Start, t - 500.0);
         t += 333.0;
         for k in 0..60 {
-            let obs = m.handle(MidiMessage::Clock, t).expect("every pulse reports");
-            assert!((obs.bpm.unwrap() - 120.0).abs() < 1e-6, "pulse {k}: {obs:?}");
+            let obs = m
+                .handle(MidiMessage::Clock, t)
+                .expect("every pulse reports");
+            assert!(
+                (obs.bpm.unwrap() - 120.0).abs() < 1e-6,
+                "pulse {k}: {obs:?}"
+            );
             t += 1_000.0;
         }
     }

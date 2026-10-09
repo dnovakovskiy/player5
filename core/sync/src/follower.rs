@@ -456,7 +456,9 @@ impl FollowerClock {
         let anchor_phase = self.est_beat.rem_euclid(modulus);
         let beats = expected + wrap(phase - anchor_phase - expected, modulus);
         let bpm = beats / samples * 60.0 * self.sample_rate / (1.0 + self.drift);
-        (Self::MIN_BPM..=Self::MAX_BPM).contains(&bpm).then_some(bpm)
+        (Self::MIN_BPM..=Self::MAX_BPM)
+            .contains(&bpm)
+            .then_some(bpm)
     }
 
     /// Estimated source tempo in beats per sample.
@@ -477,8 +479,8 @@ impl FollowerClock {
         let ours = self.beat_at_sample(s);
         let out_err = wrap(phase - ours, modulus);
         let est_err = wrap(phase - self.est_beat, modulus);
-        let threshold = (self.tuning.jump_s * self.est_rate() * self.sample_rate)
-            .min(0.45 * modulus);
+        let threshold =
+            (self.tuning.jump_s * self.est_rate() * self.sample_rate).min(0.45 * modulus);
         // The gain must not depend on this report's own timing error: a
         // late-stamped report makes its own spacing longer, and weighting
         // it more biases the estimate late by about rate * jitter^2 /
@@ -651,8 +653,8 @@ impl FollowerClock {
             let gap = self.est_beat_at(t) - ours;
             let deadband = self.tuning.deadband_s * base * self.sample_rate;
             let excess = gap - gap.clamp(-deadband, deadband);
-            let c = (excess / self.tuning.slew_tau)
-                .clamp(-self.tuning.max_slew, self.tuning.max_slew);
+            let c =
+                (excess / self.tuning.slew_tau).clamp(-self.tuning.max_slew, self.tuning.max_slew);
             if c.abs() > 1e-12 {
                 slew_rate = base * (1.0 + c);
                 // The gap closes at `base * c` beats per sample; after
@@ -815,7 +817,6 @@ mod tests {
         /// fraction, over ticks without a snap.
         max_rate_dev: f64,
     }
-
 
     impl Run {
         fn max_abs_error_between(&self, from: f64, to: f64) -> f64 {
@@ -1219,7 +1220,10 @@ mod tests {
         // A duplicate of the last report and an older one change nothing.
         let last = 3.0 * 24_000.0;
         f.observe(&obs(last, Phase::Bar(3.0), 120.0), last + 5_000.0);
-        f.observe(&obs(last - 24_000.0, Phase::Bar(0.5), 120.0), last + 5_000.0);
+        f.observe(
+            &obs(last - 24_000.0, Phase::Bar(0.5), 120.0),
+            last + 5_000.0,
+        );
         assert_eq!(f.beat_at_sample(1e6), snapshot.beat_at_sample(1e6));
         // A late one (300 ms old when it arrives) is used at its own sample:
         // a perfect report must not disturb a perfect lock.

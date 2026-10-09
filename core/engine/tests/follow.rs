@@ -409,8 +409,9 @@ fn a_cue_jump_realigns_once() {
 #[test]
 fn engine_api_follows_and_free_runs_after_loss() {
     let mut engine = Engine::new(SR as f32);
-    let spec = PatternSpec::from_json(r#"{ "voices": { "kick": { "steps": "x---x---x---x---" } } }"#)
-        .unwrap();
+    let spec =
+        PatternSpec::from_json(r#"{ "voices": { "kick": { "steps": "x---x---x---x---" } } }"#)
+            .unwrap();
     engine.load_spec(&spec).unwrap();
     engine.set_clock_mode(ClockMode::Follow(Precision::Fine));
     assert!(!engine.is_locked());

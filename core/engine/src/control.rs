@@ -729,7 +729,10 @@ mod tests {
         let events = drain(&mut c);
         assert!(events.iter().all(|e| !matches!(e.kind, EventKind::Flush)));
         let samples = trigger_samples(&events);
-        assert!(samples.windows(2).all(|w| w[1] > w[0]), "strictly increasing");
+        assert!(
+            samples.windows(2).all(|w| w[1] > w[0]),
+            "strictly increasing"
+        );
         assert_eq!(samples.len() as u64, ctl.scheduler().next_step());
     }
 
