@@ -385,6 +385,36 @@ pub unsafe extern "C" fn p5_engine_render(engine: *mut P5Engine, out: *mut f32, 
     engine.render(out);
 }
 
+// ---- Web-friendly variants -------------------------------------------------
+//
+// JavaScript sees a wasm `i64` as a `BigInt`, and the pure-JS build of this
+// module (wasm2js, the browser fallback when WebAssembly is blocked; see
+// ADR-0010) cannot pass `i64` across its boundary at all. These variants
+// take and return only `i32`/`f64`, so one host script drives both builds.
+// Additive: the `u64` originals above are unchanged.
+
+/// [`p5_engine_position`] as an `f64` (exact up to 2^53 samples, about
+/// 5 900 years at 48 kHz).
+///
+/// # Safety
+/// `engine` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn p5_engine_position_f64(engine: *const P5Engine) -> f64 {
+    // SAFETY: per the caller contract.
+    unsafe { p5_engine_position(engine) as f64 }
+}
+
+/// [`p5_engine_set_stop_after`] with a 32-bit step count; `0` loops
+/// forever.
+///
+/// # Safety
+/// `engine` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn p5_engine_set_stop_after_u32(engine: *mut P5Engine, steps: u32) {
+    // SAFETY: per the caller contract.
+    unsafe { p5_engine_set_stop_after(engine, u64::from(steps)) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,6 +483,40 @@ mod tests {
             assert_eq!(p5_engine_clock_locked(engine), 1);
             assert_eq!(p5_engine_midi(engine, 0, 10.0), 0);
             assert_eq!(p5_engine_midi(engine, 5, 10.0), 1);
+            p5_engine_free(engine);
+        }
+    }
+}
+
+#[cfg(test)]
+mod web_variant_tests {
+    use super::*;
+    use std::ffi::CString;
+
+    #[test]
+    fn f64_and_u32_variants_match_the_u64_originals() {
+        let engine = p5_engine_new(48_000.0);
+        let json = CString::new(
+            r#"{ "bpm": 120, "voices": { "kick": { "steps": "x---x---x---x---" } } }"#,
+        )
+        .unwrap();
+        unsafe {
+            p5_engine_load_pattern_json(engine, json.as_ptr());
+            p5_engine_set_stop_after_u32(engine, 16);
+            p5_engine_start(engine);
+            let mut out = vec![0.0f32; 6_000];
+            p5_engine_render(engine, out.as_mut_ptr(), out.len());
+            assert_eq!(p5_engine_position_f64(engine), 6_000.0);
+            assert_eq!(
+                p5_engine_position_f64(engine),
+                p5_engine_position(engine) as f64
+            );
+            for _ in 0..16 {
+                p5_engine_render(engine, out.as_mut_ptr(), out.len());
+            }
+            // stop_after_u32(16) has ended playback after one bar.
+            assert_eq!(p5_engine_playing_step(engine), -1);
+            assert_eq!(p5_engine_position_f64(ptr::null()), 0.0);
             p5_engine_free(engine);
         }
     }

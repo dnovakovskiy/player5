@@ -36,7 +36,7 @@ jobs:
         run: cargo run -p render -- patterns/four-on-the-floor.json /tmp/four.wav --fingerprint
 
   web:
-    name: web (wasm + vite + playwright)
+    name: web (wasm + JS core + vite + playwright)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -59,11 +59,28 @@ jobs:
         run: npm ci
       - name: Typecheck
         run: npm run check
-      - name: Wasm render matches native golden masters
+      - name: Wasm and JS core renders match the native golden masters
         run: npm run verify-wasm
-      - name: Build
+      - name: Build (PWA)
         run: npm run build
+      - name: Build (single file)
+        run: npm run build:single
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
-      - name: Smoke test (AudioWorklet in headless Chromium)
+      - name: Playwright (instrument, runtimes, MIDI, bridge, offline, single file)
         run: npm test
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            apps/web/playwright-report/
+            apps/web/test-results/
+          retention-days: 7
+      - name: Upload single-file build
+        uses: actions/upload-artifact@v4
+        with:
+          name: player5-single-file
+          path: apps/web/dist-single/player5.html
+          retention-days: 14
