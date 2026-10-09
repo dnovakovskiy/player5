@@ -195,60 +195,69 @@ test("Pro DJ Link through the real bridge: lock, tempo, bar, follow, restart", a
   expect(errors).toEqual([]);
 });
 
-test("a page from another origin cannot drive the bridge; the app explains why", async ({ page }) => {
-  // A non-browser client (no Origin header) follows device 3.
-  const timelines: { device: number | null }[] = [];
-  const owner = new WebSocket(`ws://127.0.0.1:${port}/ws`);
-  owner.onmessage = (e) => {
-    const m = JSON.parse(String(e.data)) as { type: string; device: number | null };
-    if (m.type === "timeline") timelines.push(m);
-  };
-  await new Promise<void>((resolve) => (owner.onopen = () => resolve()));
-  owner.send(JSON.stringify({ type: "follow", target: 3 }));
-  await expect.poll(() => timelines.at(-1)?.device, { timeout: 10_000 }).toBe(3);
+test.describe("origin policy", () => {
+  // On an HTTPS origin the app registers its service worker, whose script
+  // fetch page.route() does not see; this test is about the bridge.
+  test.use({ serviceWorkers: "block" });
 
-  // Chrome asks before a public page may reach the loopback address (Local
-  // Network Access). Grant it, so what is tested is the bridge's own check:
-  // a DJ who clicks "Allow" on some page is still protected.
-  await page
-    .context()
-    .grantPermissions(["local-network-access"], { origin: "http://foreign.test" })
-    .catch(() => {}); // Chromium builds that predate the permission
-  await page
-    .context()
-    .grantPermissions(["local-network-access"], { origin: "http://player5.test" })
-    .catch(() => {});
+  test("a page from another origin cannot drive the bridge; the app explains why", async ({ page }) => {
+    // A non-browser client (no Origin header) follows device 3.
+    const timelines: { device: number | null }[] = [];
+    const owner = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    owner.onmessage = (e) => {
+      const m = JSON.parse(String(e.data)) as { type: string; device: number | null };
+      if (m.type === "timeline") timelines.push(m);
+    };
+    await new Promise<void>((resolve) => (owner.onopen = () => resolve()));
+    owner.send(JSON.stringify({ type: "follow", target: 3 }));
+    await expect.poll(() => timelines.at(-1)?.device, { timeout: 10_000 }).toBe(3);
 
-  // Any web page open on the DJ laptop tries to switch the booth to device 2.
-  await page.route("http://foreign.test/**", (route) =>
-    route.fulfill({ contentType: "text/html", body: "<!doctype html><title>elsewhere</title>" }),
-  );
-  await page.goto("http://foreign.test/");
-  const closed = await page.evaluate(async (url) => {
-    const ws = new WebSocket(url);
-    ws.onopen = () => ws.send(JSON.stringify({ type: "follow", target: 2 }));
-    return new Promise<{ code: number; reason: string }>((resolve) => {
-      ws.onclose = (e) => resolve({ code: e.code, reason: e.reason });
+    // Chrome lets a public page reach the loopback address only from a secure
+    // context and only once the user allows Local Network Access. Use HTTPS
+    // origins and grant it, so what is tested is the bridge's own check: a DJ
+    // who clicks "Allow" on some page is still protected.
+    await page
+      .context()
+      .grantPermissions(["local-network-access"], { origin: "https://foreign.test" })
+      .catch(() => {}); // Chromium builds that predate the permission
+    await page
+      .context()
+      .grantPermissions(["local-network-access"], { origin: "https://player5.test" })
+      .catch(() => {});
+
+    // Any web page open on the DJ laptop tries to switch the booth to device 2.
+    await page.route("https://foreign.test/**", (route) =>
+      route.fulfill({ contentType: "text/html", body: "<!doctype html><title>elsewhere</title>" }),
+    );
+    const consoleLines: string[] = [];
+    page.on("console", (m) => consoleLines.push(m.text()));
+    await page.goto("https://foreign.test/");
+    const closed = await page.evaluate(async (url) => {
+      const ws = new WebSocket(url);
+      ws.onopen = () => ws.send(JSON.stringify({ type: "follow", target: 2 }));
+      return new Promise<{ code: number; reason: string }>((resolve) => {
+        ws.onclose = (e) => resolve({ code: e.code, reason: e.reason });
+      });
+    }, `ws://127.0.0.1:${port}/ws`);
+    expect(closed.code, consoleLines.join("\n")).toBe(1008);
+    expect(closed.reason).toContain("--allow-origin");
+    await page.waitForTimeout(1_000);
+    expect(timelines.at(-1)?.device, "the bridge still follows device 3").toBe(3);
+    owner.close();
+
+    // The app itself, hosted on another origin, says what to do.
+    await page.route("https://player5.test/**", async (route) => {
+      const url = new URL(route.request().url());
+      const response = await route.fetch({ url: `http://127.0.0.1:4173${url.pathname}${url.search}` });
+      await route.fulfill({ response });
     });
-  }, `ws://127.0.0.1:${port}/ws`);
-  expect(closed.code).toBe(1008);
-  expect(closed.reason).toContain("--allow-origin");
-  await page.waitForTimeout(1_000);
-  expect(timelines.at(-1)?.device, "the bridge still follows device 3").toBe(3);
-  owner.close();
-
-  // The app itself, hosted on another origin, says what to do.
-  await page.route("http://player5.test/**", async (route) => {
-    const url = new URL(route.request().url());
-    const response = await route.fetch({ url: `http://127.0.0.1:4173${url.pathname}${url.search}` });
-    await route.fulfill({ response });
-  });
-  guard(page, [/WebSocket connection to .* failed/]);
-  await page.goto("http://player5.test/");
-  await chooseSource(page, "Bridge");
-  await page.locator("#bridge-url").fill(`ws://127.0.0.1:${port}/ws`);
-  await page.getByRole("button", { name: "Connect" }).click();
-  await expect(page.locator("#source-status")).toContainText("--allow-origin http://player5.test", {
-    timeout: 10_000,
+    guard(page, [/WebSocket connection to .* failed/]);
+    await page.goto("https://player5.test/");
+    await chooseSource(page, "Bridge");
+    await page.locator("#bridge-url").fill(`ws://127.0.0.1:${port}/ws`);
+    await page.getByRole("button", { name: "Connect" }).click();
+    await expect(page.locator("#source-status")).toContainText("--allow-origin https://player5.test", {
+      timeout: 10_000,
+    });
   });
 });

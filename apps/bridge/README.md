@@ -63,9 +63,10 @@ cargo run -p player5-bridge -- --source sim --sim-bpm 124 --web apps/web/dist
   refused (it could otherwise switch the follow target mid-set). To use a
   copy of the app hosted elsewhere, start the bridge with
   `--allow-origin <that site's origin>` (ADR-0012). Recent Chrome also
-  asks you once to let that site reach devices on your local network
+  lets a site reach devices on your local network only over HTTPS, and
+  asks you once to allow it
   ([Local Network Access](https://wicg.github.io/local-network-access/));
-  allow it, or the connection fails before it reaches the bridge. The app
+  otherwise the connection fails before it reaches the bridge. The app
   the bridge serves itself never needs either.
 - Stop it with Ctrl-C.
 
