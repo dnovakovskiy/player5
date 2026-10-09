@@ -8,6 +8,7 @@
 //! state; it wakes for packets, for the join sequence's deadlines and at
 //! least every 50 ms to check for stop requests.
 
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,6 +46,17 @@ const DEVICES_MIN_INTERVAL_NS: u64 = 1_000_000_000;
 const TEMPO_EPSILON: f64 = 0.001;
 /// Backoff after a failed interface discovery or send.
 const RETRY_NS: u64 = 5_000_000_000;
+/// Our own broadcasts come back to us. An announcement byte-identical to
+/// one we broadcast this recently is our echo, whatever source address the
+/// operating system gave it.
+const ECHO_WINDOW_NS: u64 = 3_000_000_000;
+/// How many recent broadcasts to remember for echo detection.
+const ECHO_MEMORY: usize = 8;
+/// A beat packet byte-identical to the previous one from the same device
+/// and address within this long is one broadcast received twice (two
+/// interfaces on the booth network). Real beats are at least 150 ms apart
+/// even at the follower's 400 BPM ceiling.
+const DUPLICATE_BEAT_NS: u64 = 50_000_000;
 
 /// The three UDP ports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -353,9 +365,8 @@ fn run(
             Duration::from_nanos(d.saturating_sub(now)).min(POLL)
         });
         match rx.recv_timeout(wait) {
-            Ok(packet) => {
-                tracker.packet(&packet);
-                while let Ok(packet) = rx.try_recv() {
+            Ok(first) => {
+                for packet in drain_in_time_order(first, &rx) {
                     tracker.packet(&packet);
                 }
             }
@@ -407,6 +418,21 @@ fn run(
     }
 }
 
+/// `first` plus everything already queued behind it, ordered by receive
+/// time. The three receive threads share one channel, so a packet stamped
+/// a few microseconds earlier on one port can be queued after a later one
+/// from another port; observations must leave in time order, because a
+/// follower ignores reports older than the newest it has used.
+pub(crate) fn drain_in_time_order(first: Received, rx: &mpsc::Receiver<Received>) -> Vec<Received> {
+    let mut batch = vec![first];
+    while let Ok(packet) = rx.try_recv() {
+        batch.push(packet);
+    }
+    // Stable: packets from one socket keep their arrival order.
+    batch.sort_by_key(|p| p.at);
+    batch
+}
+
 /// What the tracker wants done.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Output {
@@ -444,6 +470,14 @@ pub(crate) struct Tracker {
     opus_warned: bool,
     discover_from: Option<Ipv4Addr>,
     discover_after: u64,
+    /// Broadcasts we sent recently (send time, bytes), to recognise their
+    /// echo.
+    sent: VecDeque<(u64, Vec<u8>)>,
+    echo_warned: bool,
+    /// Last beat packet per device (receive time, source, bytes), to drop
+    /// the second copy of a broadcast received on two interfaces.
+    last_beats: BTreeMap<u8, (u64, Ipv4Addr, Vec<u8>)>,
+    duplicate_warned: bool,
     out: Vec<Output>,
 }
 
@@ -471,6 +505,10 @@ impl Tracker {
             opus_warned: false,
             discover_from: None,
             discover_after: now,
+            sent: VecDeque::new(),
+            echo_warned: false,
+            last_beats: BTreeMap::new(),
+            duplicate_warned: false,
             out: Vec::new(),
         };
         let ports = format!(
@@ -544,8 +582,68 @@ impl Tracker {
         );
     }
 
-    fn is_self(&self, name: &str, from: Ipv4Addr) -> bool {
-        self.joiner.as_ref().is_some_and(|j| j.is_self(name, from))
+    /// Whether an announcement is our own, come back to us. Recognised by
+    /// content first: a host on the booth network through two interfaces
+    /// (or with a wrong `interface` setting) sees its broadcasts come back
+    /// from another address, and mistaking that echo for a device holding
+    /// our number would make us give the number up to ourselves.
+    fn is_own_announcement(&mut self, data: &[u8], from: Ipv4Addr, at: u64) -> bool {
+        let echo = self
+            .sent
+            .iter()
+            .any(|(t, bytes)| at.saturating_sub(*t) <= ECHO_WINDOW_NS && bytes.as_slice() == data);
+        if echo {
+            if let Some(ip) = self.interface.filter(|ip| *ip != from) {
+                if !self.echo_warned {
+                    self.echo_warned = true;
+                    self.status(
+                        true,
+                        format!(
+                            "Pro DJ Link: our own announcements come back from {from}, not from \
+                             {ip}; this computer may reach the booth network through more than \
+                             one interface. Set the interface and broadcast addresses of the \
+                             booth network"
+                        ),
+                    );
+                }
+            }
+            return true;
+        }
+        let name = device_name(Port::Announce, data);
+        self.joiner.as_ref().is_some_and(|j| j.is_self(&name, from))
+    }
+
+    /// Whether a beat packet is the second copy of one broadcast, received
+    /// through a second interface. Remembers the packet otherwise.
+    fn duplicate_beat(&mut self, device: u8, data: &[u8], from: Ipv4Addr, at: u64) -> bool {
+        let duplicate = self.last_beats.get(&device).is_some_and(|(t, src, bytes)| {
+            *src == from && at.saturating_sub(*t) <= DUPLICATE_BEAT_NS && bytes.as_slice() == data
+        });
+        if duplicate {
+            if !self.duplicate_warned {
+                self.duplicate_warned = true;
+                self.status(
+                    true,
+                    "Pro DJ Link: every beat arrives twice; this computer is probably on the \
+                     booth network through two interfaces (e.g. Ethernet and Wi-Fi). Copies are \
+                     dropped, but disconnect one of them"
+                        .into(),
+                );
+            }
+            return true;
+        }
+        self.last_beats.insert(device, (at, from, data.to_vec()));
+        false
+    }
+
+    /// Remembers a broadcast for echo detection.
+    fn remember_sent(&mut self, bytes: &[u8], now: u64) {
+        self.sent
+            .retain(|(t, _)| now.saturating_sub(*t) <= ECHO_WINDOW_NS);
+        if self.sent.len() >= ECHO_MEMORY {
+            self.sent.pop_front();
+        }
+        self.sent.push_back((now, bytes.to_vec()));
     }
 
     fn saw_traffic(&mut self, from: Ipv4Addr, at: u64) {
@@ -569,6 +667,7 @@ impl Tracker {
             match action {
                 JoinAction::Send(Outgoing::Broadcast(bytes)) => {
                     if let Some(to) = self.broadcast {
+                        self.remember_sent(&bytes, now);
                         self.out.push(Output::Send { to, bytes });
                     }
                 }
@@ -670,7 +769,7 @@ impl Tracker {
             return;
         };
         let (data, from, at) = (rx.data.as_slice(), rx.from, rx.at);
-        if rx.port == Port::Announce && self.is_self(&device_name(rx.port, data), from) {
+        if rx.port == Port::Announce && self.is_own_announcement(data, from, at) {
             return;
         }
         self.saw_traffic(from, at);
@@ -736,6 +835,9 @@ impl Tracker {
             }
             PacketKind::Beat => {
                 let Ok(b) = parse_beat(data) else { return };
+                if self.duplicate_beat(b.device, data, from, at) {
+                    return;
+                }
                 self.table.beat(&b, from, at);
                 self.refollow(at);
                 if self.following(b.device) {
@@ -1111,6 +1213,176 @@ mod tests {
             .take_output()
             .iter()
             .all(|o| matches!(o, Output::Event(_))));
+    }
+
+    /// Runs an active tracker until it has joined; returns it, the time and
+    /// everything it sent.
+    fn joined(interface: Ipv4Addr) -> (Tracker, u64, Vec<Vec<u8>>) {
+        let config = ProlinkConfig {
+            interface: Some(interface),
+            ..ProlinkConfig::default()
+        };
+        let mut t = Tracker::new(&config, ProlinkPorts::default(), 0);
+        let mut sent = Vec::new();
+        let mut now = 0;
+        while now < 5 * S {
+            t.tick(now);
+            for o in t.take_output() {
+                if let Output::Send { bytes, .. } = o {
+                    sent.push(bytes);
+                }
+            }
+            now += 10 * MS;
+        }
+        (t, now, sent)
+    }
+
+    #[test]
+    fn own_echo_from_another_address_is_not_a_conflict() {
+        // Two interfaces on the booth network: our broadcasts come back
+        // with the other interface's source address. Before echo detection
+        // by content, player5 gave its number up to itself.
+        let (mut t, now, sent) = joined(ip(50));
+        let keep_alive = sent.last().unwrap().clone();
+        assert_eq!(parse_keep_alive(&keep_alive).unwrap().number, 5);
+        let other_nic = Ipv4Addr::new(169, 254, 77, 1);
+        for i in 0..3 {
+            t.packet(&rx(
+                Port::Announce,
+                keep_alive.clone(),
+                other_nic,
+                now + i * MS,
+            ));
+        }
+        assert!(!t.joiner.as_ref().unwrap().has_yielded());
+        assert!(!t.table.contains(5));
+        let warnings: Vec<String> = events(&mut t)
+            .into_iter()
+            .filter_map(|e| match e {
+                SourceEvent::Status {
+                    warning: true,
+                    message,
+                } => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("come back from 169.254.77.1"));
+        // Keep-alives keep going out.
+        t.tick(now + 2 * S);
+        assert!(t
+            .take_output()
+            .iter()
+            .any(|o| matches!(o, Output::Send { .. })));
+        // A different machine also calling itself player5 and holding
+        // number 5 is not an echo: real devices still win.
+        let impostor = build_keep_alive(&KeepAlive {
+            number: 5,
+            name: "player5".into(),
+            mac: fallback_mac(ip(60)),
+            ip: ip(60),
+            peers: 2,
+            device_type: 1,
+            first_on_network: false,
+            cdj3000_compatible: true,
+        });
+        t.packet(&rx(Port::Announce, impostor, ip(60), now + 3 * S));
+        assert!(t.joiner.as_ref().unwrap().has_yielded());
+    }
+
+    #[test]
+    fn duplicate_beats_from_two_interfaces_are_dropped() {
+        let mut t = passive();
+        let _ = events(&mut t);
+        let beat = build_beat_packet(&BeatPacket::new(1, 120.0, 0.0, 1));
+        t.packet(&rx(Port::Beat, beat.clone(), ip(1), S));
+        t.packet(&rx(Port::Beat, beat.clone(), ip(1), S + 300_000));
+        let ev = events(&mut t);
+        assert_eq!(observations(&ev).len(), 1, "one beat, one observation");
+        assert!(ev.iter().any(
+            |e| matches!(e, SourceEvent::Status { warning: true, message } if message.contains("twice"))
+        ));
+        // The next real beat is reported, and the beat interval learned
+        // from the copies did not collapse to a fraction of a millisecond.
+        let next = build_beat_packet(&BeatPacket::new(1, 120.0, 0.0, 2));
+        t.packet(&rx(Port::Beat, next.clone(), ip(1), S + 500 * MS));
+        t.packet(&rx(Port::Beat, next, ip(1), S + 500 * MS + 200_000));
+        let obs = observations(&events(&mut t));
+        assert_eq!(
+            obs,
+            vec![(S + 500 * MS, Phase::Bar(1.0), Some(120.0), Some(1))]
+        );
+        assert_eq!(t.table.playing(1, S + 2400 * MS), Some(true));
+        // Identical bytes long after are a real beat (e.g. a loop), not a
+        // copy; so is the same packet from another device's address.
+        t.packet(&rx(Port::Beat, beat.clone(), ip(1), 3 * S));
+        t.packet(&rx(Port::Beat, beat, ip(9), 3 * S + 100_000));
+        assert_eq!(observations(&events(&mut t)).len(), 2);
+    }
+
+    #[test]
+    fn batches_are_handed_over_in_receive_order() {
+        let (tx, rxq) = mpsc::channel();
+        let packet = |port, at| rx(port, vec![at as u8], ip(1), at);
+        // The status thread queued its packet before the beat thread, but
+        // received it later.
+        tx.send(packet(Port::Status, 30)).unwrap();
+        tx.send(packet(Port::Beat, 10)).unwrap();
+        tx.send(packet(Port::Announce, 20)).unwrap();
+        tx.send(packet(Port::Beat, 20)).unwrap();
+        let first = rxq.recv().unwrap();
+        let order: Vec<(u64, Port)> = drain_in_time_order(first, &rxq)
+            .iter()
+            .map(|p| (p.at, p.port))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (10, Port::Beat),
+                (20, Port::Announce),
+                (20, Port::Beat),
+                (30, Port::Status)
+            ]
+        );
+    }
+
+    #[test]
+    fn observations_leave_in_time_order_across_ports() {
+        // A tempo change in status received just after a beat must not be
+        // reported before it: a follower drops reports older than the
+        // newest it has used, and would lose the beat.
+        let mut t = passive();
+        t.packet(&rx(
+            Port::Status,
+            build_cdj_status(&CdjStatus::new(2, 126.0, 0.0, true, true)),
+            ip(2),
+            S,
+        ));
+        let _ = events(&mut t);
+        let (tx, rxq) = mpsc::channel();
+        tx.send(rx(
+            Port::Status,
+            build_cdj_status(&CdjStatus::new(2, 126.0, 2.0, true, true)),
+            ip(2),
+            S + 100 * MS + 5_000,
+        ))
+        .unwrap();
+        tx.send(rx(
+            Port::Beat,
+            build_beat_packet(&BeatPacket::new(2, 126.0, 0.0, 3)),
+            ip(2),
+            S + 100 * MS,
+        ))
+        .unwrap();
+        let first = rxq.recv().unwrap();
+        for p in drain_in_time_order(first, &rxq) {
+            t.packet(&p);
+        }
+        let obs = observations(&events(&mut t));
+        assert_eq!(obs.len(), 2);
+        assert!(obs.windows(2).all(|w| w[0].0 < w[1].0), "{obs:?}");
+        assert_eq!(obs[0].1, Phase::Bar(2.0));
+        assert_eq!(obs[1].1, Phase::TempoOnly);
     }
 
     #[test]
