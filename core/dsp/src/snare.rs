@@ -777,6 +777,23 @@ mod tests {
     }
 
     #[test]
+    fn same_drum_at_every_sample_rate() {
+        let reference = centroid_hz(&hit(SR, 1.0, |_| {})[..4_800], SR);
+        for sr in crate::SUPPORTED_SAMPLE_RATES {
+            let ms = |t: f32| (t * sr / 1_000.0) as usize;
+            let body = hit(sr, 1.0, |p| p.snappy = 0.0);
+            let f = dominant_hz(&hann(&body[ms(20.0)..ms(100.0)]), sr, 80.0, 600.0);
+            assert!((f - 180.0).abs() < 180.0 * 0.02, "{sr} Hz: body at {f} Hz");
+            let full = hit(sr, 1.0, |_| {});
+            let c = centroid_hz(&full[..ms(100.0)], sr);
+            assert!(
+                (c / reference - 1.0).abs() < 0.1,
+                "{sr} Hz: centroid {c} vs {reference}"
+            );
+        }
+    }
+
+    #[test]
     fn pitch_blips_down_and_settles() {
         // Unwrap the lower mode's phase: early on it runs sharp, then
         // settles onto the tuned pitch.
