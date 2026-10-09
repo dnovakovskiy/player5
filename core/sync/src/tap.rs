@@ -4,13 +4,16 @@
 //! (a double tap, a missed beat), so the tempo is the median of the recent
 //! intervals, which ignores a single bad one outright. A tap much closer to
 //! the previous one than the current tempo allows is a bounce and is
-//! dropped. Two intervals in a row that disagree with the median mean the
-//! tapper changed tempo: the sequence restarts from them. A pause longer
+//! dropped. Two intervals in a row that disagree with the median but agree
+//! with each other mean the tapper changed tempo: the sequence restarts
+//! from them. Two that disagree with each other too (one long, one short)
+//! mean the tap between them was displaced: it is dropped. A pause longer
 //! than [`TAP_TIMEOUT_S`] starts over.
 //!
-//! The reported beat position is not the raw last tap but the least-squares
-//! phase of all taps in the sequence (each tap assigned to its nearest beat
-//! at the median tempo), so one early or late tap does not drag the grid.
+//! The reported beat position is not the raw last tap but the median phase
+//! of all taps in the sequence (each tap's offset from its nearest beat at
+//! the median tempo), so one early or late tap, even the newest, does not
+//! drag the grid.
 
 use crate::follower::{FollowerClock, Observation, Phase};
 
@@ -71,11 +74,18 @@ impl TapTempo {
                 if (interval / median - 1.0).abs() > OUTLIER_FRACTION {
                     self.outliers += 1;
                     if self.outliers >= 2 {
-                        // Two disagreeing intervals in a row: a new tempo.
-                        // Keep only the taps that define it.
-                        let keep = [self.taps[self.count - 2], last];
-                        self.taps[..2].copy_from_slice(&keep);
-                        self.count = 2;
+                        let previous = last - self.taps[self.count - 2];
+                        if (interval / previous - 1.0).abs() <= OUTLIER_FRACTION {
+                            // Two like intervals off the median: a new
+                            // tempo. Keep only the taps that define it.
+                            let keep = [self.taps[self.count - 2], last];
+                            self.taps[..2].copy_from_slice(&keep);
+                            self.count = 2;
+                        } else {
+                            // One long, one short: the tap between them was
+                            // early or late. Drop it.
+                            self.count -= 1;
+                        }
                         self.outliers = 0;
                     }
                 } else {
@@ -130,17 +140,25 @@ impl TapTempo {
         })
     }
 
-    /// Where the newest beat falls according to all taps: each tap is
-    /// assigned to its nearest beat counting back from the newest at
-    /// `interval`, and the beat phase is the mean of their offsets.
+    /// Where the beat nearest the newest tap falls according to all taps:
+    /// each tap's offset from the beat grid through the newest tap at
+    /// `interval` (wrapped to ± half a beat), and the median of those
+    /// offsets moves the grid.
     fn fitted_last_beat(&self, interval: f64) -> f64 {
         let newest = self.taps[self.count - 1];
-        let mut sum = 0.0;
-        for &t in &self.taps[..self.count] {
-            let beats_back = ((newest - t) / interval).round();
-            sum += t + beats_back * interval;
+        let mut v = [0.0; TAPS];
+        let n = self.count;
+        for (slot, &t) in v[..n].iter_mut().zip(&self.taps[..n]) {
+            let beats = (t - newest) / interval;
+            *slot = (beats - beats.round()) * interval;
         }
-        sum / self.count as f64
+        v[..n].sort_unstable_by(f64::total_cmp);
+        let median = if n % 2 == 1 {
+            v[n / 2]
+        } else {
+            0.5 * (v[n / 2 - 1] + v[n / 2])
+        };
+        newest + median
     }
 }
 
@@ -191,6 +209,31 @@ mod tests {
         let obs = t.tap(5.0 * 24_000.0).unwrap();
         assert!((obs.bpm.unwrap() - 120.0).abs() < 1e-9);
         assert!((obs.sample - 5.0 * 24_000.0).abs() < 1e-6);
+    }
+
+    /// A tap a third of a beat late, then back on the grid: the tempo
+    /// holds, the sequence is not restarted around the bad tap, and the grid
+    /// stays within a few milliseconds.
+    #[test]
+    fn a_displaced_tap_is_dropped_not_followed() {
+        for late in [0.3, 0.4, -0.3] {
+            let mut t = TapTempo::new(SR);
+            for k in 0..6 {
+                t.tap(f64::from(k) * 24_000.0);
+            }
+            let bad = t.tap(6.0 * 24_000.0 + late * 24_000.0).unwrap();
+            assert!((bad.bpm.unwrap() - 120.0).abs() < 1e-9, "{late}");
+            // Even as the newest tap, the bad one does not move the grid.
+            let off = (bad.sample / 24_000.0 - (bad.sample / 24_000.0).round()) * 500.0;
+            assert!(off.abs() < 1.0, "{late}: {off} ms");
+            for k in 7..10 {
+                let obs = t.tap(f64::from(k) * 24_000.0).unwrap();
+                assert!((obs.bpm.unwrap() - 120.0).abs() < 1e-9, "{late}");
+                let err_ms = (obs.sample - f64::from(k) * 24_000.0) / 48.0;
+                assert!(err_ms.abs() < 1.0, "{late}, tap {k}: {err_ms} ms");
+            }
+            assert!(t.count >= 5, "{late}: sequence kept ({} taps)", t.count);
+        }
     }
 
     #[test]

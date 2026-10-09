@@ -780,7 +780,7 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Copy, PartialEq)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     enum Kind {
         Bar,
         Beat,
@@ -1343,143 +1343,230 @@ mod tests {
         assert!((f.beat_at_sample(100_000.0) - before).abs() < 1e-9);
     }
 
+    // ---- adversarial conditions (review) -------------------------------------
+
+    /// Steady-state error bound per precision for the adversarial runs,
+    /// and when to start checking it.
+    fn bound(p: Precision) -> (f64, f64) {
+        match p {
+            Precision::Exact => (2.0, 0.5),
+            Precision::Fine => (2.0, 5.0),
+            Precision::Coarse => (90.0, 50.0),
+            Precision::Jittery => (2.0, 1.0),
+        }
+    }
+
+    const ALL: [Precision; 4] = [
+        Precision::Exact,
+        Precision::Fine,
+        Precision::Coarse,
+        Precision::Jittery,
+    ];
+
+    /// Slow and fast tempos, pitch-fader ramps both ways (120 <-> 128 BPM
+    /// over 8 s), 300 ms delivery stalls with bursts, and a source still
+    /// counting in (negative beats): one snap (the first lock), then
+    /// tracking within each precision's bound.
     #[test]
-    #[ignore = "exploration"]
-    fn explore_adversarial() {
+    fn adversarial_conditions_never_snap_spuriously() {
         type Edit = fn(&mut Scenario);
-        let edits: [(&str, Edit); 12] = [
-            ("steady", |_| {}),
-            ("60bpm", |sc| sc.bpm = 60.0),
-            ("200bpm", |sc| sc.bpm = 200.0),
-            ("ramp120-128/8s", |sc| {
+        let edits: [(&str, Edit); 7] = [
+            ("60 BPM", |sc| sc.bpm = 60.0),
+            ("200 BPM", |sc| sc.bpm = 200.0),
+            ("ramp up", |sc| {
                 sc.bpm = 120.0;
                 sc.ramp = Some((10.0, 18.0, 128.0));
             }),
-            ("ramp128-120/8s", |sc| {
+            ("ramp down", |sc| {
                 sc.bpm = 128.0;
                 sc.ramp = Some((10.0, 18.0, 120.0));
             }),
-            ("stall300ms/2s", |sc| sc.stall = Some((2.0, 0.3))),
-            ("stall300ms/0.7s", |sc| sc.stall = Some((0.7, 0.3))),
-            ("half-beat", |sc| sc.shift = Some((10.0, 0.5))),
-            ("half-beat-Beat", |sc| {
-                sc.kind = Kind::Beat;
-                sc.shift = Some((10.0, 0.5));
-            }),
-            ("negative", |sc| sc.source_start = -7.3),
-            ("bar-wrap 2 beats", |sc| sc.shift = Some((10.0, 2.0))),
-            ("no-bpm 60", |sc| {
-                sc.reports_bpm = false;
-                sc.bpm = 60.0;
-            }),
+            ("stalls", |sc| sc.stall = Some((2.0, 0.3))),
+            ("frequent stalls", |sc| sc.stall = Some((0.7, 0.3))),
+            ("negative beats", |sc| sc.source_start = -7.3),
         ];
-        for p in [
-            Precision::Exact,
-            Precision::Fine,
-            Precision::Coarse,
-            Precision::Jittery,
-        ] {
+        for p in ALL {
+            let (from, tol) = bound(p);
             for (name, edit) in edits {
                 let mut sc = typical(p);
                 edit(&mut sc);
-                let mut worst = [0.0f64; 4];
-                let mut snaps = (usize::MAX, 0);
-                let mut bpm_err: f64 = 0.0;
                 for r in seeds(sc) {
-                    worst[0] = worst[0].max(r.max_abs_error_between(3.0, 10.0));
-                    worst[1] = worst[1].max(r.max_abs_error_after(10.0));
-                    worst[2] = worst[2].max(r.max_abs_error_after(sc.seconds - 5.0));
-                    worst[3] = worst[3].max(r.max_rate_dev);
-                    snaps.0 = snaps.0.min(r.snaps.len());
-                    snaps.1 = snaps.1.max(r.snaps.len());
+                    assert_eq!(r.snaps.len(), 1, "{p:?} {name}: {:?}", r.snaps);
+                    let worst = r.max_abs_error_after(from);
+                    assert!(worst < tol, "{p:?} {name}: {worst:.2} ms");
                     let want = sc.reported_bpm(sc.seconds);
-                    bpm_err = bpm_err.max((r.follower.tempo_bpm() - want).abs());
+                    assert!((r.follower.tempo_bpm() - want).abs() < 1e-9);
                 }
-                println!(
-                    "{p:?} {name}: 3-10s {:.2} ms, after 10s {:.2} ms, end {:.2} ms, rate dev {:.4}, snaps {:?}, bpm err {:.4}",
-                    worst[0], worst[1], worst[2], worst[3], snaps, bpm_err
-                );
             }
         }
     }
 
+    /// The source jumps by exactly half a beat (the worst case for phase
+    /// wrapping: residuals straddle +-0.5 beat) or by two beats (+-half a
+    /// bar). Every precision but Coarse snaps once more after its hold;
+    /// Coarse is below its jump threshold for half a beat and slews.
     #[test]
-    #[ignore = "exploration"]
-    fn explore_no_bpm() {
-        let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
-        f.reset(0.0, 0.37);
-        let _ = f.take_discontinuity();
-        for k in 0..12u32 {
-            let s = f64::from(k) * 48_000.0 + 100.0;
-            f.observe(
-                &Observation {
-                    sample: s,
-                    phase: Phase::Bar(f64::from(k % 4)),
-                    bpm: None,
-                },
-                s + 96.0,
-            );
-            f.advance(s + 200.0);
-            println!(
-                "k {k}: bpm {:.4} snap {} ours {:.4} err {:.4} lock {:?} upd {}",
-                f.tempo_bpm(),
-                f.take_discontinuity(),
-                f.beat_at_sample(s),
-                f.phase_error(),
-                f.lock,
-                f.updates
-            );
+    fn half_a_beat_and_half_a_bar_off() {
+        for p in ALL {
+            let (_, tol) = bound(p);
+            for (kind, by) in [(Kind::Bar, 0.5), (Kind::Beat, 0.5), (Kind::Bar, 2.0)] {
+                if p == Precision::Coarse && kind == Kind::Beat {
+                    // +-200 ms of noise is +-0.4 beat: beat phase alone
+                    // cannot say which way half a beat off is. Coarse
+                    // sources report bar phase (ADR-0006).
+                    continue;
+                }
+                let mut sc = typical(p);
+                sc.kind = kind;
+                sc.shift = Some((10.0, by));
+                for r in seeds(sc) {
+                    let slews = p == Precision::Coarse && by < 1.0;
+                    let want = if slews { 1 } else { 2 };
+                    assert_eq!(r.snaps.len(), want, "{p:?} {by}: {:?}", r.snaps);
+                    let settled = if slews { 150.0 } else { r.snaps[1] + 1.0 };
+                    let worst = r.max_abs_error_after(settled);
+                    assert!(worst < tol, "{p:?} {kind:?} {by}: {worst:.2} ms");
+                }
+            }
         }
     }
 
+    /// Phases on either side of the bar line, including the out-of-range
+    /// `4.0` and a hair below `0.0`, all mean the same downbeat.
     #[test]
-    #[ignore = "exploration"]
-    fn explore_future_anchor() {
-        // First lock from a report stamped 0.3 s ahead of `now`.
+    fn phase_wraps_at_the_bar_and_beat_line() {
+        let mut f = FollowerClock::new(SR, 120.0, Precision::Exact);
+        feed_perfect(&mut f, 0, 8);
+        let _ = f.take_discontinuity();
+        let s = 8.0 * 24_000.0;
+        for phase in [
+            Phase::Bar(4.0),
+            Phase::Bar(4.0 - 1e-12),
+            Phase::Bar(-1e-12),
+            Phase::Bar(0.0),
+            Phase::Beat(1.0),
+            Phase::Beat(-1e-12),
+        ] {
+            let mut g = f.clone();
+            g.observe(
+                &Observation {
+                    sample: s,
+                    phase,
+                    bpm: Some(120.0),
+                },
+                s,
+            );
+            assert!(!g.take_discontinuity(), "{phase:?}");
+            assert!(g.phase_error().abs() < 1e-9, "{phase:?}: {}", g.phase_error());
+            assert!((g.beat_at_sample(s) - 8.0).abs() < 1e-9, "{phase:?}");
+        }
+    }
+
+    /// A source that reports no tempo, far from the follower's initial
+    /// 120 BPM: the first lock waits for the tempo measurement and snaps
+    /// once, on the measured tempo (it used to snap at the first report and
+    /// then slew a whole beat away at 60 BPM). A re-sync keeps the refined
+    /// tempo instead of re-measuring it from one interval.
+    #[test]
+    fn a_tempo_less_source_locks_once_at_its_measured_tempo() {
+        for bpm in [60.0, 90.0, 160.0] {
+            let mut sc = typical(Precision::Fine);
+            sc.reports_bpm = false;
+            sc.bpm = bpm;
+            for r in seeds(sc) {
+                assert_eq!(r.snaps.len(), 1, "{bpm}: {:?}", r.snaps);
+                let worst = r.max_abs_error_after(4.0);
+                assert!(worst < 10.0, "{bpm}: {worst:.2} ms");
+                let got = r.follower.tempo_bpm();
+                assert!((got - bpm).abs() < 0.1, "{bpm}: {got}");
+            }
+        }
+        // Resync with a refined tempo: snaps, tempo kept.
+        let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
+        let mut feed = |f: &mut FollowerClock, k: u32, jitter: f64| {
+            let s = f64::from(k) * 32_000.0 + jitter;
+            let o = Observation {
+                sample: s,
+                phase: Phase::Bar(f64::from(k % 4)),
+                bpm: None,
+            };
+            f.observe(&o, s + 100.0);
+            f.advance(s + 200.0);
+        };
+        for k in 0..40 {
+            feed(&mut f, k, if k % 2 == 0 { 120.0 } else { -120.0 });
+        }
+        let before = f.tempo_bpm();
+        assert!((before - 90.0).abs() < 0.2, "{before}");
+        f.request_resync();
+        feed(&mut f, 40, 140.0);
+        assert!(f.take_discontinuity());
+        feed(&mut f, 41, -140.0);
+        let after = f.tempo_bpm();
+        // Re-measuring from the one jittered interval would move it ~0.8.
+        assert!((after - before).abs() < 0.1, "{before} -> {after}");
+    }
+
+    /// First lock from a report stamped ahead of `now` (allowed, up to
+    /// `MAX_AHEAD_S`): re-planning the slew later must not move the beat at
+    /// `now`, which the scheduler has already committed to.
+    #[test]
+    fn a_snap_to_a_report_from_the_near_future_keeps_now_continuous() {
         let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
         let now = 100_000.0;
         f.observe(&obs(now + 14_400.0, Phase::Bar(0.0), 120.0), now);
-        let _ = f.take_discontinuity();
-        let before = f.beat_at_sample(now + 128.0);
-        // A later report 10 ms off: a slew is planned.
-        f.observe(&obs(now + 24_000.0 + 14_400.0, Phase::Bar(1.02), 120.0), now + 128.0);
-        let after = f.beat_at_sample(now + 128.0);
-        println!("future anchor: beat at now before {before:.6} after {after:.6} jump {:.3} ms", (after - before) * 500.0);
-        // And a report 1.5 s in the future blocks normal ones.
-        let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
-        feed_perfect(&mut f, 0, 8);
-        let s = 8.0 * 24_000.0;
-        f.observe(&obs(s + 72_000.0, Phase::Bar(1.0), 120.0), s);
-        let age = f.observation_age(s + 24_000.0);
-        f.observe(&obs(s + 24_000.0, Phase::Bar(1.0), 120.0), s + 24_000.0);
-        println!("after a future glitch: age {age:?}, newer report used: {}", f.observation_age(s + 24_000.0) == Some(0.0));
+        assert!(f.take_discontinuity());
+        for k in 1..6u32 {
+            let t = now + f64::from(k) * 128.0;
+            let before = f.beat_at_sample(t);
+            // Reports a few ms off: slews are planned, never jumps.
+            let s = now + 14_400.0 + f64::from(k) * 24_000.0;
+            let phase = f64::from(k).rem_euclid(4.0) + 0.02;
+            f.observe(&obs(s, Phase::Bar(phase), 120.0), t);
+            f.advance(t);
+            assert!(!f.take_discontinuity());
+            let after = f.beat_at_sample(t);
+            assert!((after - before).abs() < 1e-12, "{k}: {before} -> {after}");
+        }
     }
 
+    /// A report stamped far ahead (a clock-mapping glitch) is ignored; it
+    /// must not make the genuine reports after it look out of order.
     #[test]
-    #[ignore = "exploration"]
-    fn explore_outage() {
-        for p in [
-            Precision::Exact,
-            Precision::Fine,
-            Precision::Coarse,
-            Precision::Jittery,
-        ] {
-            for by in [0.0, 0.03, 1.0] {
-                let mut sc = typical(p);
-                sc.outage = Some((20.0, 24.0));
-                sc.shift = Some((22.0, by));
-                let mut worst = [0.0f64; 3];
-                let mut snaps = 0;
-                for r in seeds(sc) {
-                    worst[0] = worst[0].max(r.max_abs_error_between(25.0, 35.0));
-                    worst[1] = worst[1].max(r.max_abs_error_between(35.0, 60.0));
-                    worst[2] = worst[2].max(r.max_abs_error_after(60.0));
-                    snaps = snaps.max(r.snaps.len());
-                }
-                println!(
-                    "{p:?} outage, back shifted {by}: 25-35 s {:.1} ms, 35-60 s {:.1} ms, after 60 s {:.1} ms, snaps {snaps}",
-                    worst[0], worst[1], worst[2]
-                );
+    fn reports_far_ahead_of_now_are_ignored() {
+        let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
+        feed_perfect(&mut f, 0, 8);
+        let _ = f.take_discontinuity();
+        let s = 8.0 * 24_000.0;
+        f.observe(&obs(s + 72_000.0, Phase::Bar(3.5), 120.0), s);
+        assert_eq!(f.observation_age(s), Some(24_000.0), "glitch ignored");
+        f.observe(&obs(s + 24_000.0, Phase::Bar(1.0), 120.0), s + 24_000.0);
+        assert_eq!(f.observation_age(s + 24_000.0), Some(0.0), "next one used");
+    }
+
+    /// Back from an outage somewhere else: a Coarse source re-acquires the
+    /// way it first locked, averaging reports before it snaps, instead of
+    /// snapping to one report that is only good to +-200 ms.
+    #[test]
+    fn coarse_reacquisition_averages_before_snapping() {
+        let mut sc = typical(Precision::Coarse);
+        sc.outage = Some((20.0, 24.0));
+        sc.shift = Some((22.0, 1.0));
+        for r in seeds(sc) {
+            assert_eq!(r.snaps.len(), 2, "{:?}", r.snaps);
+            let worst = r.max_abs_error_between(25.0, 35.0);
+            assert!(worst < 120.0, "{worst:.1} ms");
+        }
+        // Same for the precise ones (one report is enough there).
+        for p in [Precision::Exact, Precision::Fine, Precision::Jittery] {
+            let (_, tol) = bound(p);
+            let mut sc = typical(p);
+            sc.outage = Some((10.0, 14.0));
+            sc.shift = Some((12.0, 1.0));
+            for r in seeds(sc) {
+                assert_eq!(r.snaps.len(), 2, "{p:?}: {:?}", r.snaps);
+                let worst = r.max_abs_error_after(r.snaps[1] + 1.0);
+                assert!(worst < tol, "{p:?}: {worst:.2} ms");
             }
         }
     }
