@@ -1619,6 +1619,26 @@ mod tests {
         }
     }
 
+    /// The DJ cues an Opus Quad deck: with +-200 ms of noise on every
+    /// report, consecutive outliers disagree by up to 400 ms, yet the run
+    /// must still be recognised as one jump and snapped to once, and the
+    /// timeline must never jump on noise around it.
+    #[test]
+    fn a_coarse_cue_jump_snaps_once() {
+        for by in [1.0, 1.5, 2.0, -1.5] {
+            let mut sc = typical(Precision::Coarse);
+            sc.shift = Some((60.0, by));
+            sc.seconds = 120.0;
+            for r in seeds(sc) {
+                assert_eq!(r.snaps.len(), 2, "{by}: {:?}", r.snaps);
+                let delay = r.snaps[1] - 60.0;
+                assert!(delay < 12.0, "{by}: {delay} s");
+                let worst = r.max_abs_error_after(r.snaps[1] + 0.01);
+                assert!(worst < 120.0, "{by}: {worst:.1} ms");
+            }
+        }
+    }
+
     // ---- tuning report (not a test) -----------------------------------------
 
     #[test]
