@@ -40,10 +40,12 @@ const HIGH_OSC_HZ: f32 = 800.0;
 const TUNE_LOW_FACTOR: f32 = 0.769_230_769;
 /// ln(1.3²): `tune = 1` is 1.3× the centre pitch.
 const TUNE_LN_RATIO: f32 = 0.524_728_529;
-/// Start phases (turns) of the two oscillators on a fresh hit. Starting the
-/// pair slightly apart avoids both edges landing on the very first sample.
-const LOW_OSC_PHASE: f32 = 0.0;
-const HIGH_OSC_PHASE: f32 = 0.37;
+/// On a fresh hit both squares start low and rise together this long after
+/// the trigger. Coinciding rising edges are where the filtered mix has its
+/// highest crest, so a fresh hit opens on the same peak a retrigger at a
+/// random phase could reach: every hit, flam or roll peaks at the calibrated
+/// level, and the attack is a single hard edge.
+const EDGE_ALIGN_S: f32 = 0.000_5;
 
 /// Band-pass centre at `tone = 0`.
 const BP_LOW_HZ: f32 = 1_600.0;
@@ -71,7 +73,7 @@ const TAIL_LN_RATIO: f32 = 1.832_581_464;
 const SLEW_TAU_S: f32 = 0.000_25;
 
 /// Output scaling so a full hit at `level = 1` peaks near −12 dBFS.
-const CALIBRATION: f32 = 0.22;
+const CALIBRATION: f32 = 0.146;
 /// Envelope level below which the voice goes idle (−100 dB).
 const IDLE_THRESHOLD: f32 = 1e-5;
 /// Level below which the fast stage is flushed to exactly zero (−180 dB).
@@ -191,13 +193,13 @@ impl Voice for Cowbell {
             return;
         }
         let sr = self.sample_rate;
+        let (low_hz, high_hz) = self.oscillator_frequencies_hz();
         if !self.active {
             // Fresh hit: start from a known state so every hit is the same.
             self.reset_state();
-            self.low_osc.reset(LOW_OSC_PHASE);
-            self.high_osc.reset(HIGH_OSC_PHASE);
+            self.low_osc.reset(-EDGE_ALIGN_S * low_hz);
+            self.high_osc.reset(-EDGE_ALIGN_S * high_hz);
         }
-        let (low_hz, high_hz) = self.oscillator_frequencies_hz();
         self.low_osc.set_frequency(low_hz, sr);
         self.high_osc.set_frequency(high_hz, sr);
         // Brightness follows the louder of the new hit and the ring it lands
@@ -403,7 +405,10 @@ mod tests {
         let out = hit(&mut short, 1.0, 14_400);
         assert!(!short.is_active());
         let last_sound = out.iter().rposition(|&s| s != 0.0).unwrap();
-        assert!(last_sound < 9_600, "short tail rang for {last_sound} samples");
+        assert!(
+            last_sound < 9_600,
+            "short tail rang for {last_sound} samples"
+        );
     }
 
     #[test]
@@ -421,7 +426,11 @@ mod tests {
 
     #[test]
     fn oscillators_sit_at_the_tuned_frequencies() {
-        for (tune, low, high) in [(0.0, 415.4, 615.4), (0.5, 540.0, 800.0), (1.0, 702.0, 1_040.0)] {
+        for (tune, low, high) in [
+            (0.0, 415.4, 615.4),
+            (0.5, 540.0, 800.0),
+            (1.0, 702.0, 1_040.0),
+        ] {
             let mut cowbell = with_params(SR, tune, 1.0, 0.5, 1.0);
             let (lo_hz, hi_hz) = cowbell.oscillator_frequencies_hz();
             assert!((lo_hz - low).abs() < 0.5 && (hi_hz - high).abs() < 0.5);
@@ -458,7 +467,10 @@ mod tests {
             energy(&out[7_200..14_400]) // 150–300 ms
         };
         let (short, mid, long) = (tail(0.0), tail(0.5), tail(1.0));
-        assert!(mid > short * 10.0 && long > mid * 4.0, "{short} {mid} {long}");
+        assert!(
+            mid > short * 10.0 && long > mid * 4.0,
+            "{short} {mid} {long}"
+        );
     }
 
     #[test]
@@ -473,9 +485,15 @@ mod tests {
         // Fall rates (dB per ms) over the first 20 ms and later in the tail.
         let fast_rate = (level(0, 5) - level(15, 20)) / 15.0;
         let tail_rate = (level(50, 60) - level(150, 160)) / 100.0;
-        assert!(fast_rate > tail_rate * 2.0, "{fast_rate} vs {tail_rate} dB/ms");
+        assert!(
+            fast_rate > tail_rate * 2.0,
+            "{fast_rate} vs {tail_rate} dB/ms"
+        );
         // The tail falls 60 dB in 200 ms.
-        assert!((tail_rate - 0.3).abs() < 0.03, "tail falls {tail_rate} dB/ms");
+        assert!(
+            (tail_rate - 0.3).abs() < 0.03,
+            "tail falls {tail_rate} dB/ms"
+        );
         // The attack stands well clear of the tail extrapolated back to it.
         let tail_at_start = level(50, 60) + tail_rate * 52.5;
         let spike = level(0, 5) - tail_at_start;
@@ -519,7 +537,10 @@ mod tests {
         let (p_norm, c_norm) = run(0.7);
         let (p_soft, _) = run(0.1);
         let accent_db = 20.0 * (p_acc / p_norm).log10();
-        assert!((2.0..=6.0).contains(&accent_db), "accent adds {accent_db} dB");
+        assert!(
+            (2.0..=6.0).contains(&accent_db),
+            "accent adds {accent_db} dB"
+        );
         assert!(p_soft < p_norm * 0.2, "{p_soft} vs {p_norm}");
         assert!(c_acc > c_norm * 1.02, "centroid {c_norm} -> {c_acc}");
     }
@@ -623,50 +644,5 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(acc.is_finite());
         assert!(elapsed.as_millis() < 100, "10 s took {elapsed:?}");
-    }
-}
-
-#[cfg(test)]
-mod diag {
-    use super::*;
-    #[test]
-    fn diag_cowbell() {
-        for sr in crate::SUPPORTED_SAMPLE_RATES {
-            let mut c = Cowbell::new(sr);
-            c.trigger(1.0);
-            let out: Vec<f32> = (0..(sr as usize)).map(|_| c.process()).collect();
-            let (mut pk, mut at) = (0.0f32, 0usize);
-            for (i, s) in out.iter().enumerate() { if s.abs() > pk { pk = s.abs(); at = i; } }
-            eprintln!("{sr}: peak {:.2} dB at {:.2} ms", 20.0 * pk.log10(), at as f32 * 1000.0 / sr);
-        }
-        let mut c = Cowbell::new(48_000.0);
-        c.trigger(1.0);
-        let out: Vec<f32> = (0..48_000).map(|_| c.process()).collect();
-        let mut line = String::new();
-        for w in 0..40 {
-            let seg = &out[w * 240..(w + 1) * 240];
-            let rms = (seg.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>() / 240.0).sqrt();
-            line += &format!("{:.1} ", 20.0 * rms.log10());
-        }
-        eprintln!("rms/5ms: {line}");
-        let level = |a: usize, b: usize| {
-            let seg = &out[a * 48..b * 48];
-            10.0 * (seg.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>() / seg.len() as f64).log10()
-        };
-        let fast_rate = (level(0, 5) - level(15, 20)) / 15.0;
-        let tail_rate = (level(50, 60) - level(150, 160)) / 100.0;
-        let spike = level(0, 5) - (level(50, 60) + tail_rate * 52.5);
-        eprintln!("fast {fast_rate} tail {tail_rate} spike {spike}");
-        for tone in [0.0f32, 0.5, 1.0] {
-            for tune in [0.0f32, 0.5, 1.0] {
-                for v in [0.7f32, 1.0] {
-                    let mut c = Cowbell::new(48_000.0);
-                    c.apply_params(&VoiceParams { tone, tune, ..VoiceParams::default() });
-                    c.trigger(v);
-                    let pk = (0..24_000).map(|_| c.process()).fold(0.0f32, |m, s| m.max(s.abs()));
-                    eprintln!("tone {tone} tune {tune} v {v}: {:.2} dB", 20.0 * pk.log10());
-                }
-            }
-        }
     }
 }

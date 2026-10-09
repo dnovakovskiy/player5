@@ -246,7 +246,8 @@ impl Voice for Rim {
         let factor = self.tune_factor();
         let t60 = self.decay_seconds();
         self.low.tune(LOW_PING_HZ * factor, t60, sr);
-        self.high.tune(HIGH_PING_HZ * factor, t60 * HIGH_DECAY_RATIO, sr);
+        self.high
+            .tune(HIGH_PING_HZ * factor, t60 * HIGH_DECAY_RATIO, sr);
         self.click_bp.set(CLICK_HZ * factor, CLICK_Q, sr);
 
         // Strike strength: a gentle curve so the accent stays audible after
@@ -413,7 +414,10 @@ mod tests {
             let mut rim = Rim::new(sr);
             let p = peak(&hit(&mut rim, 1.0, sr as usize / 5));
             let db = 20.0 * p.log10();
-            assert!((-11.5..=-8.5).contains(&db), "{sr} Hz: peak {p} = {db} dBFS");
+            assert!(
+                (-11.5..=-8.5).contains(&db),
+                "{sr} Hz: peak {p} = {db} dBFS"
+            );
         }
     }
 
@@ -490,7 +494,10 @@ mod tests {
             energy(&out[960..2_400]) // 20–50 ms
         };
         let (short, mid, long) = (tail(0.0), tail(0.5), tail(1.0));
-        assert!(mid > short * 2.0 && long > mid * 2.0, "{short} {mid} {long}");
+        assert!(
+            mid > short * 2.0 && long > mid * 2.0,
+            "{short} {mid} {long}"
+        );
         // Subtle: the first 5 ms barely change.
         let head = |decay: f32| {
             let mut rim = with_params(SR, 0.5, decay, 0.5, 1.0);
@@ -521,7 +528,10 @@ mod tests {
         let (p_norm, c_norm) = run(0.7);
         let (p_soft, _) = run(0.1);
         let accent_db = 20.0 * (p_acc / p_norm).log10();
-        assert!((2.0..=6.0).contains(&accent_db), "accent adds {accent_db} dB");
+        assert!(
+            (2.0..=6.0).contains(&accent_db),
+            "accent adds {accent_db} dB"
+        );
         assert!(p_soft < p_norm * 0.2, "{p_soft} vs {p_norm}");
         assert!(c_acc > c_norm * 1.03, "centroid {c_norm} -> {c_acc}");
     }
