@@ -404,8 +404,9 @@ pub extern "C" fn p5_host_time_ns() -> u64 {
 /// Starts a network clock source and switches to following it:
 /// `kind` 1 = Pro DJ Link, 2 = Opus Quad, 3 = Ableton Link, 4 = simulated
 /// (`bpm` used). `device_number` is the Pro DJ Link device number to claim
-/// (0 = default). Returns 0, 1 on bad input, 2 if this build lacks the
-/// source, 3 if starting failed (see [`p5_control_status`]).
+/// (0 = default, 5). Returns 0, 1 on bad input, 2 if this build lacks the
+/// source (Ableton Link needs the `ableton-link` feature, ADR-0005), 3 if
+/// starting failed (see [`p5_control_status`]).
 ///
 /// # Safety
 /// `control` must be a live handle.
@@ -417,14 +418,27 @@ pub unsafe extern "C" fn p5_control_start_source(
     bpm: f64,
 ) -> i32 {
     let Some(c) = ctl(control) else { return 1 };
-    let _ = device_number;
     c.source = None;
     let (result, precision) = match kind {
+        1 => {
+            let mut config = sync::prolink::ProlinkConfig::default();
+            if let Ok(n @ 1..=127) = u8::try_from(device_number) {
+                config.device_number = n;
+            }
+            (sync::prolink::start(config), Precision::Fine)
+        }
+        2 => (
+            sync::opus::start(sync::opus::OpusConfig::default()),
+            Precision::Coarse,
+        ),
+        3 => match start_link(bpm) {
+            Some(r) => (r, Precision::Exact),
+            None => return 2,
+        },
         4 => (
             sync::net::start_simulated(bpm_from(bpm).unwrap_or(120.0), Duration::from_millis(20)),
             Precision::Exact,
         ),
-        1..=3 => return 2,
         _ => return 1,
     };
     match result {
@@ -440,6 +454,19 @@ pub unsafe extern "C" fn p5_control_start_source(
             3
         }
     }
+}
+
+#[cfg(feature = "ableton-link")]
+fn start_link(bpm: f64) -> Option<std::io::Result<SourceHandle>> {
+    Some(sync::link::start(sync::link::LinkConfig {
+        initial_bpm: bpm_from(bpm).unwrap_or(120.0),
+        ..sync::link::LinkConfig::default()
+    }))
+}
+
+#[cfg(not(feature = "ableton-link"))]
+fn start_link(_bpm: f64) -> Option<std::io::Result<SourceHandle>> {
+    None
 }
 
 /// Stops the network clock source (the clock keeps free-running at the last
@@ -535,6 +562,21 @@ mod tests {
         unsafe {
             p5_split_new(48_000.0, &mut control, &mut renderer);
             assert_eq!(p5_control_start_source(control, 9, 0, 0.0), 1);
+            #[cfg(not(feature = "ableton-link"))]
+            assert_eq!(p5_control_start_source(control, 3, 0, 120.0), 2);
+            // Pro DJ Link and Opus Quad start (0) or report a bind failure
+            // (3) if another process owns the ports; either way they stop
+            // promptly when replaced.
+            for kind in [1, 2] {
+                let t = std::time::Instant::now();
+                let rc = p5_control_start_source(control, kind, 5, 0.0);
+                assert!(rc == 0 || rc == 3, "kind {kind}: {rc}");
+                p5_control_stop_source(control);
+                assert!(
+                    t.elapsed() < Duration::from_secs(2),
+                    "kind {kind} slow to stop"
+                );
+            }
             assert_eq!(p5_control_start_source(control, 4, 0, 133.0), 0);
             let mut out = vec![0.0f32; 480];
             // Render with real host times so observations can be mapped.

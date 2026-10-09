@@ -11,6 +11,12 @@ rust-version.workspace = true
 name = "player5"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = []
+# Ableton Link source for p5_control_start_source(kind 3). Off by default:
+# it compiles in the GPLv2+ Link SDK (ADR-0005).
+ableton-link = ["sync/ableton-link"]
+
 [dependencies]
 engine.workspace = true
 sequencer.workspace = true

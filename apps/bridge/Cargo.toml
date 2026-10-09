@@ -11,6 +11,12 @@ rust-version.workspace = true
 name = "player5-bridge"
 path = "src/main.rs"
 
+[features]
+default = []
+# Ableton Link source. Off by default: compiles in the GPLv2+ Link SDK
+# (ADR-0005).
+ableton-link = ["sync/ableton-link"]
+
 [dependencies]
 sync.workspace = true
 serde.workspace = true

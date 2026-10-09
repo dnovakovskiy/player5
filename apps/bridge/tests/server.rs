@@ -258,13 +258,15 @@ fn http_endpoints_and_static_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(not(feature = "ableton-link"))]
 #[test]
 fn unavailable_source_still_serves_with_an_error_status() {
+    // Without the ableton-link feature, the Link source cannot start.
     let srv = start(Config {
         bind: "127.0.0.1".parse().unwrap(),
         port: 0,
         web: None,
-        source: SourceKind::Opus,
+        source: SourceKind::Link,
         options: SourceOptions::default(),
         verbose: false,
     })
@@ -292,5 +294,70 @@ fn many_clients_receive_broadcasts() {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert_eq!(srv.clients(), 0, "dropped clients are unregistered");
+    srv.stop();
+}
+
+/// Pro DJ Link end to end over loopback: CDJ beat packets in, a locked
+/// bar-aligned timeline out.
+#[test]
+fn follows_pro_dj_link_beat_packets() {
+    use std::net::UdpSocket;
+    use sync::prolink::{build_beat_packet, BeatPacket};
+
+    // A port block unlikely to collide; the bridge binds base..base+2.
+    let base = 40_000 + (std::process::id() % 5_000) as u16 * 3;
+    let srv = start(Config {
+        bind: "127.0.0.1".parse().unwrap(),
+        port: 0,
+        web: None,
+        source: SourceKind::Prolink,
+        options: SourceOptions {
+            passive: true,
+            prolink_port_base: Some(base),
+            ..SourceOptions::default()
+        },
+        verbose: false,
+    })
+    .unwrap();
+    let mut c = Client::connect(srv.local_addr());
+
+    // A CDJ at 125 BPM, pitch 0 %: a beat every 480 ms, bar position 1-4.
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let feeder = std::thread::spawn(move || {
+        for k in 0..12u32 {
+            let p = BeatPacket {
+                device: 2,
+                name: "CDJ-3000".into(),
+                next_beat_ms: 480,
+                second_beat_ms: 960,
+                next_bar_ms: 480 * (4 - k % 4),
+                fourth_beat_ms: 1_440,
+                second_bar_ms: 480 * (8 - k % 4),
+                eighth_beat_ms: 3_360,
+                pitch: 0x0010_0000,
+                bpm_x100: 12_500,
+                beat_within_bar: (k % 4 + 1) as u8,
+            };
+            sender
+                .send_to(&build_beat_packet(&p), ("127.0.0.1", base + 1))
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(480));
+        }
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let t = loop {
+        let (t, _) = c
+            .next_of("timeline", Duration::from_secs(1))
+            .expect("timeline");
+        if t["locked"] == true && (t["bpm"].as_f64().unwrap() - 125.0).abs() < 0.5 {
+            break t;
+        }
+        assert!(Instant::now() < deadline, "never locked: {t}");
+    };
+    assert_eq!(t["source"], "prolink");
+    assert_eq!(t["bar_aligned"], true);
+    assert_eq!(t["device"], 2);
+    feeder.join().unwrap();
     srv.stop();
 }

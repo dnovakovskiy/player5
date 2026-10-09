@@ -35,6 +35,20 @@ jobs:
       - name: Render smoke test
         run: cargo run -p render -- patterns/four-on-the-floor.json /tmp/four.wav --fingerprint
 
+  link-feature:
+    name: Ableton Link feature build (GPL, off by default; ADR-0005)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy with ableton-link
+        run: cargo clippy -p sync -p player5-bridge -p player5-ffi --features "sync/ableton-link player5-bridge/ableton-link player5-ffi/ableton-link" --all-targets -- -D warnings
+      - name: Test with ableton-link
+        run: cargo test -p sync -p player5-bridge -p player5-ffi --features "sync/ableton-link player5-bridge/ableton-link player5-ffi/ableton-link"
+
   web:
     name: web (wasm + JS core + vite + playwright)
     runs-on: ubuntu-latest

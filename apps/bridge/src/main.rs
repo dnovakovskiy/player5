@@ -21,6 +21,7 @@ OPTIONS:
     --device-number <n>                Pro DJ Link device number to claim (default: 5)
     --interface <ipv4>                 Booth-network interface address (default: discover)
     --passive                          Listen only; do not join the network as a device
+    --prolink-port-base <port>         Testing: Pro DJ Link on 127.0.0.1 ports base..base+2
     --verbose                          Log every connection and source message
     -h, --help                         Print this help
 
@@ -81,6 +82,15 @@ fn parse(args: &[String]) -> Result<Config, String> {
                     Some(v.parse().map_err(|_| format!("bad --interface {v:?}"))?);
             }
             "--passive" => config.options.passive = true,
+            "--prolink-port-base" => {
+                let v = value("--prolink-port-base")?;
+                config.options.prolink_port_base = Some(
+                    v.parse::<u16>()
+                        .ok()
+                        .filter(|p| *p > 0 && *p < 65_534)
+                        .ok_or_else(|| format!("bad --prolink-port-base {v:?}"))?,
+                );
+            }
             "--verbose" => config.verbose = true,
             other => return Err(format!("unknown option {other:?}")),
         }

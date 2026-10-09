@@ -55,6 +55,10 @@ pub struct SourceOptions {
     pub interface: Option<Ipv4Addr>,
     /// Listen only; do not announce a virtual device.
     pub passive: bool,
+    /// For tests: Pro DJ Link listens on `base`, `base + 1`, `base + 2`
+    /// (announce, beat, status) on 127.0.0.1 instead of 50000–50002 on all
+    /// interfaces.
+    pub prolink_port_base: Option<u16>,
 }
 
 impl Default for SourceOptions {
@@ -64,6 +68,7 @@ impl Default for SourceOptions {
             device_number: 5,
             interface: None,
             passive: false,
+            prolink_port_base: None,
         }
     }
 }
@@ -73,9 +78,48 @@ pub fn start_source(kind: SourceKind, opts: &SourceOptions) -> Result<SourceHand
     match kind {
         SourceKind::Sim => sync::net::start_simulated(opts.sim_bpm, Duration::from_millis(10))
             .map_err(|e| format!("cannot start the simulated clock: {e}")),
-        SourceKind::Prolink | SourceKind::Opus | SourceKind::Link => Err(format!(
-            "the {} source is not available in this build yet",
-            kind.name()
-        )),
+        SourceKind::Prolink => {
+            let mut config = sync::prolink::ProlinkConfig {
+                device_number: opts.device_number,
+                interface: opts.interface,
+                passive: opts.passive,
+                ..sync::prolink::ProlinkConfig::default()
+            };
+            if let Some(base) = opts.prolink_port_base {
+                config.ports = sync::prolink::ProlinkPorts {
+                    announce: base,
+                    beat: base.saturating_add(1),
+                    status: base.saturating_add(2),
+                };
+                config.listen_address = std::net::Ipv4Addr::LOCALHOST;
+                config.broadcast = Some(std::net::Ipv4Addr::LOCALHOST);
+            }
+            sync::prolink::start(config)
+                .map_err(|e| format!("cannot start Pro DJ Link (UDP 50000-50002): {e}"))
+        }
+        SourceKind::Opus => {
+            let config = sync::opus::OpusConfig {
+                interface: opts.interface,
+                ..sync::opus::OpusConfig::default()
+            };
+            sync::opus::start(config).map_err(|e| format!("cannot start Opus Quad mode: {e}"))
+        }
+        SourceKind::Link => start_link(opts),
     }
+}
+
+#[cfg(feature = "ableton-link")]
+fn start_link(opts: &SourceOptions) -> Result<SourceHandle, String> {
+    sync::link::start(sync::link::LinkConfig {
+        initial_bpm: opts.sim_bpm,
+        ..sync::link::LinkConfig::default()
+    })
+    .map_err(|e| format!("cannot start Ableton Link: {e}"))
+}
+
+#[cfg(not(feature = "ableton-link"))]
+fn start_link(_opts: &SourceOptions) -> Result<SourceHandle, String> {
+    Err("this bridge was built without Ableton Link; rebuild with \
+         `cargo build -p player5-bridge --features ableton-link` (see ADR-0005: GPL)"
+        .to_string())
 }
