@@ -1,0 +1,13 @@
+{
+  "bpm": 112,
+  "shuffle": 0.6,
+  "accent": 0.6,
+  "voices": {
+    "kick":       { "steps": "X--- --x- X--- ----" },
+    "snare":      { "steps": "---- X--- ---- X--x", "snappy": 0.4 },
+    "closed_hat": { "steps": "xxxx xxxx xxxx xxXx", "decay": 0.25 },
+    "rim":        { "steps": "--x- ---- --x- -x--" },
+    "clap":       { "steps": "---- x--- ---- x---", "level": 0.6 }
+  },
+  "render": { "bars": 2, "sample_rate": 44100, "tail_seconds": 0.75, "block_size": 128 }
+}

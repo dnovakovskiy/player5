@@ -1,0 +1,14 @@
+{
+  "bpm": 132,
+  "accent": 0.9,
+  "flam": 0.3,
+  "voices": {
+    "kick":       { "steps": "X--- X--- X--- X---", "tune": 0.35, "decay": 0.6 },
+    "low_tom":    { "steps": "---x ---- --x- ----", "decay": 0.4, "level": 0.8 },
+    "mid_tom":    { "steps": "---- --x- ---- ---x", "decay": 0.3, "level": 0.7 },
+    "closed_hat": { "steps": "xxXx xxXx xxXx xxXx", "decay": 0.2, "tone": 0.7 },
+    "clap":       { "steps": "---- f--- ---- X---" },
+    "cowbell":    { "steps": "---- ---- ---- --x-", "level": 0.6 }
+  },
+  "render": { "bars": 2, "sample_rate": 48000, "tail_seconds": 0.75 }
+}

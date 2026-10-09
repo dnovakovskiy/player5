@@ -30,7 +30,7 @@ pub use clap::Clap;
 pub use cowbell::Cowbell;
 pub use hats::{ClosedHat, OpenHat};
 pub use kick::{Kick, KickParams};
-pub use kit::{slot, Kit, VOICE_COUNT};
+pub use kit::{slot, Kit, KIT_HEADROOM, VOICE_COUNT};
 pub use master::Master;
 pub use params::{Param, VoiceParams};
 pub use rim::Rim;

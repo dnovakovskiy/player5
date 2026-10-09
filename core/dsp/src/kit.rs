@@ -9,6 +9,15 @@ use crate::{
     Clap, ClosedHat, Cowbell, Kick, OpenHat, Param, Rim, Snare, Tom, TomRange, VoiceParams,
 };
 
+/// Fixed trim applied to the kit mix (0.75, about −2.5 dB).
+///
+/// Each voice is calibrated relative to the kick (which peaks near −6 dBFS
+/// on its own); hits that coincide in a busy groove add up, so the mix is
+/// trimmed once here to keep typical full-kit grooves near the product's
+/// default peak of −6 dBFS. A lone kick then peaks near −8.6 dBFS. See
+/// ADR-0009.
+pub const KIT_HEADROOM: f32 = 0.75;
+
 /// Number of voices in the kit.
 pub const VOICE_COUNT: usize = 10;
 
@@ -150,7 +159,8 @@ impl Kit {
             || self.cowbell.is_active()
     }
 
-    /// Renders one mono sample: the sum of every voice, in slot order.
+    /// Renders one mono sample: the sum of every voice in slot order, times
+    /// [`KIT_HEADROOM`].
     #[inline]
     pub fn process(&mut self) -> f32 {
         let mut sum = 0.0f32;
@@ -164,7 +174,7 @@ impl Kit {
         sum += self.closed_hat.process();
         sum += self.open_hat.process();
         sum += self.cowbell.process();
-        sum
+        sum * KIT_HEADROOM
     }
 }
 
@@ -183,13 +193,16 @@ mod tests {
 
     #[test]
     fn kick_slot_matches_bare_kick() {
-        // The mixer must not change a lone voice's samples at all.
+        // The mixer only applies the fixed headroom trim to a lone voice.
         let mut kit = Kit::new(48_000.0);
         let mut kick = Kick::new(48_000.0);
         kit.trigger(slot::KICK, 1.0);
         kick.trigger(1.0);
         for _ in 0..24_000 {
-            assert_eq!(kit.process().to_bits(), kick.process().to_bits());
+            assert_eq!(
+                kit.process().to_bits(),
+                (kick.process() * KIT_HEADROOM).to_bits()
+            );
         }
     }
 

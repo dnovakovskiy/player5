@@ -1,0 +1,13 @@
+{
+  "bpm": 118,
+  "accent": 0.7,
+  "voices": {
+    "kick":       { "steps": "X--x --X- --x- -x--", "decay": 0.7 },
+    "snare":      { "steps": "---- X--- ---- F--x", "snappy": 0.7, "tone": 0.6 },
+    "closed_hat": { "steps": "x-xx x-x- x-xx x-x-" },
+    "open_hat":   { "steps": "---- ---x ---- ----" },
+    "cowbell":    { "steps": "x--x --x- ---- x---", "tune": 0.55, "level": 0.7 },
+    "high_tom":   { "steps": "---- ---- ---- -x--" }
+  },
+  "render": { "bars": 2, "sample_rate": 48000, "tail_seconds": 0.75 }
+}

@@ -974,7 +974,8 @@ mod tests {
         assert!(!open.is_active(), "open hat still active after 20 ms");
         assert!(fade[600..].iter().all(|&s| s == 0.0));
 
-        // The kit's mix is then exactly a lone closed hat.
+        // The kit's mix is then exactly a lone closed hat (times the kit's
+        // fixed headroom trim).
         let mix: Vec<f32> = (0..9_600).map(|_| kit.process()).collect();
         let mut lone = ClosedHat::new(SR);
         lone.trigger(1.0);
@@ -982,15 +983,16 @@ mod tests {
         assert!(mix[960..]
             .iter()
             .zip(&lone[960..])
-            .all(|(a, b)| a.to_bits() == b.to_bits()));
+            .all(|(a, b)| a.to_bits() == (b * crate::KIT_HEADROOM).to_bits()));
 
         // An open-hat hit after the choke rings out with its full decay.
         kit.trigger(slot::OPEN_HAT, 1.0);
         let reopened: Vec<f32> = (0..14_400).map(|_| kit.process()).collect();
         let fresh = hit(true, SR, VoiceParams::default(), 1.0, 14_400);
         let late = |x: &[f32]| rms_db(&x[9_600..]);
+        let trim_db = 20.0 * f64::from(crate::KIT_HEADROOM).log10();
         assert!(
-            (late(&reopened) - late(&fresh)).abs() < 2.0,
+            (late(&reopened) - (late(&fresh) + trim_db)).abs() < 2.0,
             "{} vs {} dB",
             late(&reopened),
             late(&fresh)

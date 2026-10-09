@@ -1,0 +1,12 @@
+{
+  "bpm": 124,
+  "accent": 0.8,
+  "voices": {
+    "kick":       { "steps": "X--- x--- X--- x---" },
+    "clap":       { "steps": "---- X--- ---- X---", "decay": 0.4 },
+    "closed_hat": { "steps": "x-x- x-x- x-x- x-xx", "decay": 0.3 },
+    "open_hat":   { "steps": "--x- --x- --x- --x-", "decay": 0.35, "level": 0.8 },
+    "rim":        { "steps": "---- ---x ---- --x-", "level": 0.7 }
+  },
+  "render": { "bars": 2, "sample_rate": 48000, "tail_seconds": 0.75 }
+}

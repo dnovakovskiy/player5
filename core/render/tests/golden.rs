@@ -158,9 +158,10 @@ fn every_pattern_stays_within_headroom() {
             fp.peak_dbfs
         );
         if spec.render.output_gain == 1.0 && !spec.render.limiter {
-            // Default headroom: nothing louder than -5 dBFS.
+            // Default headroom (ADR-0009): the busiest full-kit grooves
+            // peak near -5 dBFS, a lone voice lower; nothing above -4 dBFS.
             assert!(
-                fp.peak_dbfs <= -5.0,
+                fp.peak_dbfs <= -4.0,
                 "{}: peak {} dBFS exceeds default headroom",
                 pattern.display(),
                 fp.peak_dbfs
