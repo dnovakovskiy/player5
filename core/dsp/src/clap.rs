@@ -25,14 +25,16 @@
 //!
 //! Controls (all `0..=1`; `tune` and `snappy` are ignored):
 //!
-//! * `tone` – band-pass centre for bursts and tail, 0.85–1.9 kHz
-//!   (≈ 1.27 kHz at the centre of travel);
+//! * `tone` – burst band-pass centre, 0.85–1.9 kHz (≈ 1.27 kHz at the
+//!   centre of travel); the tail band-pass follows at 0.78 × that;
 //! * `decay` – tail length, 0.08–0.4 s to −60 dB;
 //! * `level` – output level. It applies immediately, smoothed over a few
 //!   milliseconds so moving it mid-hit never clicks.
 //!
-//! `tone` and `decay` take effect on the next hit. A hit with velocity 0 is
-//! ignored.
+//! `tone` and `decay` take effect on the next hit. Both paths share their
+//! filters and the tail envelope across hits, so the next hit also retunes
+//! (and re-times) whatever is still ringing from the previous one, masked
+//! by its own first burst. A hit with velocity 0 is ignored.
 //!
 //! Accent (velocity): louder (gain follows velocity) and slightly brighter
 //! (the band-pass centre rises by about 7 % from an unaccented 0.7 to a full
