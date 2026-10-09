@@ -1,0 +1,17 @@
+# Opus Quad fixture: constructed-opus-keep-alive
+# Constructed from the documented layout, not a capture: no published
+# source quotes the bytes of the Opus Quad's own keep-alive. The analysis
+# only says it "always starts with 51 73 70 74 31 57 6d 4a 4f 4c 06" and is
+# similar to the CDJ keep-alive
+#   (https://github.com/kyleawayan/opus-quad-pro-dj-link-analysis/blob/main/README.md#2-initialization),
+# and beat-link recognises it as a 0x36-byte keep-alive named "OPUS-QUAD"
+#   (https://github.com/Deep-Symmetry/beat-link/blob/main/src/main/java/org/deepsymmetry/beatlink/DeviceAnnouncement.java).
+# Layout: https://djl-analysis.deepsymmetry.org/djl-analysis/startup.html#cdj-keep-alive
+# Documented in: docs/protocols/opus-quad.md#what-the-unit-sends
+# Values are invented for the test: device 0x01, MAC 02:00:00:00:00:09,
+# IP 192.168.2.10, 2 peers.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 06 00 4f 50 55 53
+2d 51 55 41 44 00 00 00 00 00 00 00 00 00 00 00
+01 02 00 36 01 01 02 00 00 00 00 09 c0 a8 02 0a
+02 00 00 00 01 00

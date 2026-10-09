@@ -1,0 +1,14 @@
+# Opus Quad fixture: opus-lighting-hello-prefix
+# Quoted bytes, not a full capture: the first 0x24 bytes of the type-0x10
+# packet an Opus Quad sends to port 50002 of a device that announced itself
+# as rekordbox, as matched by
+#   https://github.com/kyleawayan/opus-quad-pro-dj-link-analysis/blob/main/pro-dj-link.js
+#     (array `firstPacketOn50002FromOpusQuad`)
+# The rest of the packet is not published; this prefix is what the
+# analysis script compares to recognise the unit.
+# Documented in: docs/protocols/opus-quad.md#what-the-unit-sends
+# Name "OPUS-QUAD", device byte 0x21 = 0x09 (deck 1).
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 10 4f 50 55 53 2d
+51 55 41 44 00 00 00 00 00 00 00 00 00 00 00 01
+00 09 00 00
