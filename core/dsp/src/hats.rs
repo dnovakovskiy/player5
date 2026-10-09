@@ -24,9 +24,11 @@
 //!   at 6–7.8 kHz that tracks `tone` at half the rate. Everything below
 //!   2 kHz ends up more than 30 dB under the main band (about 45 dB in
 //!   practice).
-//! * **low-pass** – a 2-pole Butterworth at 16 kHz that removes the
-//!   ultrasonic harmonics a 96 kHz render would otherwise keep, so every
-//!   sample rate sounds the same.
+//! * **low-pass** – a 2-pole Butterworth at 16 kHz that removes most of
+//!   the ultrasonic harmonics a 96 kHz render would otherwise keep. The
+//!   rates still differ a little at the very top: near Nyquist the
+//!   bilinear-transformed filters cut harder at 44.1/48 kHz, so a 96 kHz
+//!   render has about 4 dB more 14–18 kHz air relative to the main band.
 //!
 //! Controls are normalised `0..=1`: `tune` (the whole cluster ±25 %),
 //! `decay` (60 dB fall time: closed 40–120 ms, open 0.25–1.5 s), `tone` and
@@ -36,8 +38,9 @@
 //! A full-velocity hit at `level = 1.0` peaks close to −14 dBFS for both
 //! hats, well under the kick. Being metal, no two hits are identical: at
 //! 48 kHz single-hit peaks spread about ±3 dB around that, and a 96 kHz
-//! render reads 1–1.5 dB hotter because its samples land closer to the
-//! true peaks of a signal that lives at 7–12 kHz. The kit calls
+//! render reads 1–1.5 dB hotter: its samples land closer to the true peaks
+//! of a signal that lives at 7–12 kHz, and it keeps a little more top end
+//! (about 1 dB more RMS). The kit calls
 //! [`OpenHat`]'s [`Voice::choke`] whenever the closed hat triggers; the open
 //! hat then fades out over about 5 ms.
 
