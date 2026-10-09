@@ -138,7 +138,9 @@ impl Kit {
         if slot >= VOICE_COUNT {
             return;
         }
-        if slot == slot::CLOSED_HAT {
+        // A silent (velocity 0) closed hat is ignored by the voice, so it
+        // must not choke the open hat either.
+        if slot == slot::CLOSED_HAT && velocity > 0.0 {
             self.open_hat.choke();
         }
         self.voice_mut(slot).trigger(velocity);
@@ -220,6 +222,20 @@ mod tests {
             }
             assert!(!kit.is_active(), "slot {slot} still active after 6 s");
         }
+    }
+
+    #[test]
+    fn a_silent_closed_hat_does_not_choke_the_open_hat() {
+        let mut kit = Kit::new(48_000.0);
+        kit.trigger(slot::OPEN_HAT, 1.0);
+        for _ in 0..4_800 {
+            kit.process();
+        }
+        kit.trigger(slot::CLOSED_HAT, 0.0);
+        for _ in 0..4_800 {
+            kit.process();
+        }
+        assert!(kit.open_hat.is_active());
     }
 
     #[test]
