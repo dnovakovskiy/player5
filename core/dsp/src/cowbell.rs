@@ -10,8 +10,10 @@
 //! This model keeps those ingredients:
 //!
 //! * **oscillators** – two PolyBLEP squares ([`Square`]) at ≈ 540 Hz and
-//!   ≈ 800 Hz at `tune = 0.5`, summed. They start from a fixed phase on a
-//!   fresh hit and keep running through a retrigger;
+//!   ≈ 800 Hz at `tune = 0.5`, summed. A fresh hit starts them with their
+//!   rising edges lined up 0.5 ms in, which is both the hardest attack and
+//!   the highest crest the pair can reach, so every hit peaks at the same
+//!   level; a retrigger keeps them running;
 //! * **filter** – a state-variable band-pass around 2.5 kHz (the clank) plus a
 //!   share of the same filter's low-pass output, so the two fundamentals stay
 //!   audible underneath;
@@ -21,9 +23,9 @@
 //! * **accent** – velocity sets the level and nudges the band-pass up, so
 //!   accented hits are brighter as well as louder.
 //!
-//! Controls (all `0..=1`): `tune` shifts both oscillators from −23 % to +30 %
-//! (equal ratios per unit of travel; 1.3× either way in ratio), `decay` sets
-//! the tail (80–500 ms to −60 dB), `tone` moves the band-pass from 1.6 kHz to
+//! Controls (all `0..=1`): `tune` shifts both oscillators by up to 1.3× either
+//! way (−23 % to +30 %, equal ratios per unit of travel), `decay` sets the
+//! tail (80–500 ms to −60 dB), `tone` moves the band-pass from 1.6 kHz to
 //! 4 kHz and `level` scales the output. `snappy` is ignored. A full-velocity
 //! hit at the default controls peaks near −12 dBFS.
 
@@ -40,8 +42,8 @@ const HIGH_OSC_HZ: f32 = 800.0;
 const TUNE_LOW_FACTOR: f32 = 0.769_230_769;
 /// ln(1.3²): `tune = 1` is 1.3× the centre pitch.
 const TUNE_LN_RATIO: f32 = 0.524_728_529;
-/// On a fresh hit both squares start low and rise together this long after
-/// the trigger. Coinciding rising edges are where the filtered mix has its
+/// On a fresh hit both squares are phased so that their rising edges coincide
+/// this long after the trigger. Coinciding rising edges are where the filtered mix has its
 /// highest crest, so a fresh hit opens on the same peak a retrigger at a
 /// random phase could reach: every hit, flam or roll peaks at the calibrated
 /// level, and the attack is a single hard edge.
@@ -362,6 +364,40 @@ mod tests {
             assert!(
                 (-13.5..=-10.5).contains(&db),
                 "{sr} Hz: peak {p} = {db} dBFS"
+            );
+        }
+    }
+
+    #[test]
+    fn rolls_and_flams_peak_at_the_calibrated_level() {
+        // A fresh hit opens on the pair's highest crest, so retriggering at
+        // whatever phase the oscillators have reached is no louder.
+        for sr in crate::SUPPORTED_SAMPLE_RATES {
+            let mut cowbell = Cowbell::new(sr);
+            let mut roll = 0.0f32;
+            for i in 0..(sr as usize * 2) {
+                if i % 351 == 0 {
+                    cowbell.trigger(1.0);
+                }
+                roll = roll.max(cowbell.process().abs());
+            }
+            let db = 20.0 * roll.log10();
+            assert!(
+                (-13.5..=-10.5).contains(&db),
+                "{sr} Hz: roll peaks at {db} dBFS"
+            );
+
+            let mut flam = 0.0f32;
+            for gap in (384..1_920).step_by(37) {
+                let mut cowbell = Cowbell::new(sr);
+                cowbell.trigger(0.6);
+                flam = flam.max(peak(&render(&mut cowbell, gap)));
+                flam = flam.max(peak(&hit(&mut cowbell, 1.0, 4_800)));
+            }
+            let db = 20.0 * flam.log10();
+            assert!(
+                (-13.5..=-10.5).contains(&db),
+                "{sr} Hz: flams peak at {db} dBFS"
             );
         }
     }

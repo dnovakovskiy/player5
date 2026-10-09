@@ -458,6 +458,25 @@ mod tests {
     }
 
     #[test]
+    fn never_produces_denormals() {
+        let mut rim = with_params(SR, 0.0, 1.0, 0.0, 1.0); // longest ring
+        rim.trigger(1.0);
+        for _ in 0..9_600 {
+            let s = rim.process();
+            assert!(!s.is_subnormal());
+            let states = [
+                rim.click_env,
+                rim.low.re,
+                rim.low.im,
+                rim.high.re,
+                rim.high.im,
+            ];
+            assert!(states.iter().all(|x| !x.is_subnormal()), "{states:?}");
+        }
+        assert!(!rim.is_active());
+    }
+
+    #[test]
     fn pings_sit_at_the_tuned_frequencies() {
         let mut rim = with_params(SR, 0.5, 1.0, 0.5, 1.0);
         let out = hit(&mut rim, 0.7, 4_096);
