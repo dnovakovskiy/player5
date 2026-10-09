@@ -388,9 +388,8 @@ impl Voice for Snare {
         // A gentle taper (like an audio pot): the first half of the travel
         // brings in three quarters of the wires.
         let snappy = p.snappy * (2.0 - p.snappy);
-        let noise_level = NOISE_GAIN
-            * snappy
-            * (NOISE_VELOCITY_FLOOR + (1.0 - NOISE_VELOCITY_FLOOR) * velocity);
+        let noise_level =
+            NOISE_GAIN * snappy * (NOISE_VELOCITY_FLOOR + (1.0 - NOISE_VELOCITY_FLOOR) * velocity);
 
         // Start the hit.
         self.low_env = LOW_BODY_GAIN - LOW_BODY_TONE_CUT * p.tone;
@@ -410,7 +409,7 @@ impl Voice for Snare {
             return 0.0;
         }
 
-        // Body: two pitch-blipped sines, summed and gently saturated.
+        // Body: two pitch-blipped sines, summed and soft-clipped.
         let low = math::sin_turns(self.low_phase) * self.low_env;
         let high = math::sin_turns(self.high_phase) * self.high_env;
         self.low_phase += self.low_inc * (1.0 + self.low_blip_depth * self.blip_env);
@@ -604,7 +603,10 @@ mod tests {
                     }
                     let rms = (acc / f64::from(n)).sqrt() as f32;
                     let error = db(rms / NOISE_DRIVE_RMS);
-                    assert!(error.abs() < 1.5, "{sr} Hz tone {tone} v {velocity}: {error} dB");
+                    assert!(
+                        error.abs() < 1.5,
+                        "{sr} Hz tone {tone} v {velocity}: {error} dB"
+                    );
                 }
             }
         }
@@ -615,7 +617,10 @@ mod tests {
         for sr in crate::SUPPORTED_SAMPLE_RATES {
             // A fresh voice's first hit (what a pattern's first step plays).
             let first = db(peak(&hit(sr, 1.0, |_| {})));
-            assert!((-10.5..=-7.5).contains(&first), "{sr} Hz: first hit {first} dBFS");
+            assert!(
+                (-10.5..=-7.5).contains(&first),
+                "{sr} Hz: first hit {first} dBFS"
+            );
 
             // Consecutive hits see different noise, so the peak wanders a
             // little from hit to hit: the typical hit sits on target and
@@ -629,9 +634,18 @@ mod tests {
                 .collect();
             peaks.sort_by(f32::total_cmp);
             let median = peaks[100];
-            assert!((-9.5..=-8.5).contains(&median), "{sr} Hz: median {median} dBFS");
-            let inside = peaks.iter().filter(|&&p| (-10.5..=-7.5).contains(&p)).count();
-            assert!(inside >= 196, "{sr} Hz: {inside}/200 hits in window, {peaks:?}");
+            assert!(
+                (-9.5..=-8.5).contains(&median),
+                "{sr} Hz: median {median} dBFS"
+            );
+            let inside = peaks
+                .iter()
+                .filter(|&&p| (-10.5..=-7.5).contains(&p))
+                .count();
+            assert!(
+                inside >= 196,
+                "{sr} Hz: {inside}/200 hits in window, {peaks:?}"
+            );
             assert!(peaks[0] > -11.5 && peaks[199] < -6.5, "{sr} Hz: {peaks:?}");
         }
     }
@@ -739,7 +753,10 @@ mod tests {
             });
             let window = hann(&out[960..4_800]); // 20–100 ms
             let f = dominant_hz(&window, SR, 80.0, 600.0);
-            assert!((f - low).abs() < low * 0.02, "tune {tune}: {f} Hz, expected {low}");
+            assert!(
+                (f - low).abs() < low * 0.02,
+                "tune {tune}: {f} Hz, expected {low}"
+            );
             let upper = dominant_hz(&window, SR, high * 0.85, high * 1.15);
             assert!(
                 (upper - high).abs() < high * 0.02,
@@ -848,7 +865,10 @@ mod tests {
         let accent = hit(SR, 1.0, |_| {});
         let (pg, pp, pa) = (peak(&ghost), peak(&plain), peak(&accent));
         assert!(pp > pg * 1.4 && pa > pp * 1.3, "{pg} {pp} {pa}");
-        let (cp, ca) = (centroid_hz(&plain[..4_800], SR), centroid_hz(&accent[..4_800], SR));
+        let (cp, ca) = (
+            centroid_hz(&plain[..4_800], SR),
+            centroid_hz(&accent[..4_800], SR),
+        );
         assert!(ca > cp * 1.05, "{cp} {ca}");
     }
 
@@ -861,9 +881,10 @@ mod tests {
         let ra = render(&mut a, 1_200);
         let rb = render(&mut b, 1_200);
         assert_eq!(ra, rb);
-        let mut p = VoiceParams::default();
-        p.level = 0.5;
-        b.apply_params(&p);
+        b.apply_params(&VoiceParams {
+            level: 0.5,
+            ..VoiceParams::default()
+        });
         let ra = render(&mut a, 4_800);
         let rb = render(&mut b, 4_800);
         // The gain starts moving on the very next sample, glides down
@@ -891,9 +912,10 @@ mod tests {
             let mut s = Snare::new(SR);
             let mut out = Vec::new();
             for (velocity, tone) in [(1.0, 0.5), (0.7, 0.2), (0.42, 0.9)] {
-                let mut p = VoiceParams::default();
-                p.tone = tone;
-                s.apply_params(&p);
+                s.apply_params(&VoiceParams {
+                    tone,
+                    ..VoiceParams::default()
+                });
                 s.trigger(velocity);
                 out.extend(render(&mut s, 7_000));
             }
