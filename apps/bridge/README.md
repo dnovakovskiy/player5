@@ -62,7 +62,11 @@ cargo run -p player5-bridge -- --source sim --sim-bpm 124 --web apps/web/dist
   clients may use the WebSocket; any other web page open on the laptop is
   refused (it could otherwise switch the follow target mid-set). To use a
   copy of the app hosted elsewhere, start the bridge with
-  `--allow-origin <that site's origin>` (ADR-0012).
+  `--allow-origin <that site's origin>` (ADR-0012). Recent Chrome also
+  asks you once to let that site reach devices on your local network
+  ([Local Network Access](https://wicg.github.io/local-network-access/));
+  allow it, or the connection fails before it reaches the bridge. The app
+  the bridge serves itself never needs either.
 - Stop it with Ctrl-C.
 
 ## Endpoints

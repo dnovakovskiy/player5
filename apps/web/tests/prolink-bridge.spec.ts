@@ -207,6 +207,18 @@ test("a page from another origin cannot drive the bridge; the app explains why",
   owner.send(JSON.stringify({ type: "follow", target: 3 }));
   await expect.poll(() => timelines.at(-1)?.device, { timeout: 10_000 }).toBe(3);
 
+  // Chrome asks before a public page may reach the loopback address (Local
+  // Network Access). Grant it, so what is tested is the bridge's own check:
+  // a DJ who clicks "Allow" on some page is still protected.
+  await page
+    .context()
+    .grantPermissions(["local-network-access"], { origin: "http://foreign.test" })
+    .catch(() => {}); // Chromium builds that predate the permission
+  await page
+    .context()
+    .grantPermissions(["local-network-access"], { origin: "http://player5.test" })
+    .catch(() => {});
+
   // Any web page open on the DJ laptop tries to switch the booth to device 2.
   await page.route("http://foreign.test/**", (route) =>
     route.fulfill({ contentType: "text/html", body: "<!doctype html><title>elsewhere</title>" }),
