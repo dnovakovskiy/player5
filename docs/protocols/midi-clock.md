@@ -1,8 +1,9 @@
 # MIDI clock
 
-Status: digested (clock-following session). Covers MIDI 1.0 System
-Real-Time clock messages and receiving them through Web MIDI; CoreMIDI and
-the DJM-specific behaviour are open (see the end).
+Status: digested. Covers MIDI 1.0 System Real-Time clock messages,
+receiving them through Web MIDI (browser) and through CoreMIDI's Universal
+MIDI Packet input (macOS shell). The DJM-specific behaviour is open (see the
+end).
 
 ## How the sources were read
 
@@ -24,6 +25,27 @@ the DJM-specific behaviour are open (see the end).
   branch `main`, `index.bs`).
 - **DOM Standard**, WHATWG, https://dom.spec.whatwg.org/, read from its
   source (https://github.com/whatwg/dom, `dom.bs`).
+- **Universal MIDI Packet (UMP) Format and MIDI 2.0 Protocol**, MIDI
+  Association document M2-104-UM,
+  https://midi.org/universal-midi-packet-ump-and-midi-2-0-protocol-specification:
+  **not read — midi.org was not reachable** (HTTP 403 from the build
+  container's proxy, 2026-10-09). The UMP facts below are taken from two
+  sources that were read and agree with each other: Apple's CoreMIDI
+  headers and an independent MIT-licensed MIDI 2.0 library. Re-check them
+  against M2-104-UM when it is reachable.
+- **CoreMIDI** (Apple). Reference pages read through Apple's documentation
+  JSON (`developer.apple.com/tutorials/data/documentation/coremidi/…`):
+  [`MIDIEventPacket`](https://developer.apple.com/documentation/coremidi/midieventpacket),
+  [`MIDITimeStamp`](https://developer.apple.com/documentation/coremidi/miditimestamp),
+  [`MIDIInputPortCreateWithProtocol`](https://developer.apple.com/documentation/coremidi/midiinputportcreatewithprotocol(_:_:_:_:_:)).
+  Header text (with the message-type sizes, which the reference pages do
+  not give) read from the macOS 11.3 SDK as mirrored in
+  https://github.com/phracker/MacOSX-SDKs (`MacOSX11.3.sdk/System/Library/Frameworks/CoreMIDI.framework/Versions/A/Headers/`,
+  files `MIDIMessages.h` and `MIDIServices.h`), via
+  `raw.githubusercontent.com`. Line links below point into that mirror.
+- **AM MIDI 2.0 Lib** (midi2-dev, MIT), an independent UMP implementation:
+  https://github.com/midi2-dev/AM_MIDI2.0Lib, `include/utils.h` and
+  `src/umpProcessor.cpp` on `main`.
 - Secondary, for MIDI 1.0 facts: JUCE's `MidiMessage` documentation
   (https://github.com/juce-framework/JUCE/blob/master/modules/juce_audio_basics/midi/juce_MidiMessage.h)
   and the mido message table
@@ -149,6 +171,79 @@ latency control (ADR-0001). The worklet-side frame counter and
 `contextTime` must share an origin; that is the web shell's job
 (ADR-0004).
 
+## CoreMIDI and the Universal MIDI Packet (macOS)
+
+What `apps/mac/Sources/Player5Kit/Clock/MIDIClockInput.swift` relies on.
+
+- An input port created with `MIDIInputPortCreateWithProtocol` receives
+  MIDI as a `MIDIEventList` of `MIDIEventPacket`s in UMP form, converted by
+  the system to the protocol the port asks for; we ask for MIDI 1.0
+  (`kMIDIProtocol_1_0`). Available from macOS 11. The receive block runs on
+  a separate high-priority thread owned by CoreMIDI. Source: Apple,
+  `MIDIInputPortCreateWithProtocol` reference page;
+  [MIDIServices.h L1328–L1361](https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX11.3.sdk/System/Library/Frameworks/CoreMIDI.framework/Versions/A/Headers/MIDIServices.h#L1328-L1361).
+- A `MIDIEventPacket` is `timeStamp` (`MIDITimeStamp`, 64 bits),
+  `wordCount` (32 bits), then `words`: native-endian 32-bit UMP words,
+  declared as 64 words, but `wordCount` "may be larger than 64 words if
+  the packet is dynamically allocated". A 64-bit message never straddles
+  two packets. Source: [MIDIServices.h L404–L436](https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX11.3.sdk/System/Library/Frameworks/CoreMIDI.framework/Versions/A/Headers/MIDIServices.h#L404-L436)
+  (structure packed to 4 bytes, `#pragma pack(push, 4)` at L403).
+- Packets in a list are variable-length and must be walked, not indexed;
+  the next packet starts right after the current packet's `wordCount`
+  words (`MIDIEventPacketNext` is `&pkt->words[pkt->wordCount]`). Source:
+  [MIDIServices.h L437–L469](https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX11.3.sdk/System/Library/Frameworks/CoreMIDI.framework/Versions/A/Headers/MIDIServices.h#L437-L469),
+  [L2378–L2392](https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX11.3.sdk/System/Library/Frameworks/CoreMIDI.framework/Versions/A/Headers/MIDIServices.h#L2378-L2392). Our walker therefore
+  advances by the full `wordCount`, never by a capped one.
+- `MIDITimeStamp` is a host clock time as returned by
+  `mach_absolute_time()`; on a received packet it is the time the events
+  occurred, and zero means "now". Sources: Apple, `MIDITimeStamp` and
+  `MIDIEventPacket` reference pages;
+  [MIDIServices.h L227–L239](https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX11.3.sdk/System/Library/Frameworks/CoreMIDI.framework/Versions/A/Headers/MIDIServices.h#L227-L239),
+  [L408–L412](https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX11.3.sdk/System/Library/Frameworks/CoreMIDI.framework/Versions/A/Headers/MIDIServices.h#L408-L412). The shell converts ticks with
+  the same `mach_timebase_info` scaling as `sync::host_time` (ADR-0008),
+  and stamps a zero timestamp with the current host time.
+- The message type is the top four bits of a UMP message's first word.
+  Sources: [MIDIMessages.h L137](https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX11.3.sdk/System/Library/Frameworks/CoreMIDI.framework/Versions/A/Headers/MIDIMessages.h#L137)
+  (`MIDIMessageTypeForUPWord`: `word >> 28`);
+  [AM MIDI 2.0 Lib, umpProcessor.cpp L34](https://github.com/midi2-dev/AM_MIDI2.0Lib/blob/main/src/umpProcessor.cpp#L34).
+- Message sizes by type, in 32-bit words:
+
+  | Type | Words | Meaning |
+  |---|---|---|
+  | `0x0` | 1 | Utility |
+  | `0x1` | 1 | System Real-Time and System Common (not SysEx) |
+  | `0x2` | 1 | MIDI 1.0 Channel Voice |
+  | `0x3` | 2 | Data (7-bit SysEx) |
+  | `0x4` | 2 | MIDI 2.0 Channel Voice |
+  | `0x5` | 4 | Data (128-bit) |
+  | `0x6`, `0x7` | 1 | reserved |
+  | `0x8`, `0x9`, `0xA` | 2 | reserved |
+  | `0xB`, `0xC` | 3 | reserved |
+  | `0xD`, `0xE`, `0xF` | 4 | `0xD` Flex Data, `0xF` UMP Stream, `0xE` reserved |
+
+  Sources: [MIDIMessages.h L24–L44](https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX11.3.sdk/System/Library/Frameworks/CoreMIDI.framework/Versions/A/Headers/MIDIMessages.h#L24-L44) (sizes of
+  every type, including the undefined ones); the same grouping in
+  [AM MIDI 2.0 Lib, umpProcessor.cpp L37–L38, L129–L130, L232–L233,
+  L239–L240](https://github.com/midi2-dev/AM_MIDI2.0Lib/blob/main/src/umpProcessor.cpp#L37-L240) and the type names in
+  [utils.h L179–L186](https://github.com/midi2-dev/AM_MIDI2.0Lib/blob/main/include/utils.h#L179-L186). A walker that steps
+  by these sizes never mistakes the payload of a longer message for a
+  clock message.
+- A type-`0x1` message is one word: type in bits 28–31, group in bits
+  24–27, the MIDI 1.0 status byte in bits 16–23, then two data bytes in
+  bits 8–15 and 0–7. Sources: [MIDIMessages.h L174–L176](https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX11.3.sdk/System/Library/Frameworks/CoreMIDI.framework/Versions/A/Headers/MIDIMessages.h#L174-L176)
+  (`MIDI1UPSystemCommon` packs `status << 16`);
+  [AM MIDI 2.0 Lib, umpProcessor.cpp L49–L54](https://github.com/midi2-dev/AM_MIDI2.0Lib/blob/main/src/umpProcessor.cpp#L49-L54)
+  (reads `umpMess[0] >> 16 & 0xFF` as the status of a type-`0x1`
+  message).
+- The System status bytes are the MIDI 1.0 ones: `F8` Timing Clock, `FA`
+  Start, `FB` Continue, `FC` Stop, `FE` Active Sensing, `FF` Reset, `F2`
+  Song Position Pointer. Source: [MIDIMessages.h L68–L86](https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX11.3.sdk/System/Library/Frameworks/CoreMIDI.framework/Versions/A/Headers/MIDIMessages.h#L68-L86).
+
+**What we do:** connect one MIDI 1.0 port to every source, walk each packet
+by message size, and forward type-`0x1` messages whose status is `F8`,
+`FA`, `FB` or `FC` to `p5_control_midi_host` with the packet's host time in
+nanoseconds. Everything else is skipped.
+
 ## How player5 follows MIDI clock
 
 Code: `core/sync/src/midi.rs` (`MidiClockFollower`), `Precision::Jittery`
@@ -183,5 +278,8 @@ ADR-0006.
 - DJM-series MIDI clock output: whether the mixer sends Start/Stop at all,
   whether Clock runs while stopped, and its timing resolution. Needs the
   mixer's MIDI implementation chart (AlphaTheta support site), per model.
-- CoreMIDI packet timestamps on macOS/iOS (host-time units, how to map
-  them onto `AVAudioTime.hostTime`): to be digested with the mac shell.
+- CoreMIDI on real hardware: whether a DJM's USB MIDI driver sends zero
+  timestamps (ADR-0008 lists it as untested) and how much jitter its
+  timestamps carry. iOS has no MIDI clock input yet.
+- The UMP facts above come from Apple's headers and one independent
+  library, not from M2-104-UM itself (unreachable); re-check them there.

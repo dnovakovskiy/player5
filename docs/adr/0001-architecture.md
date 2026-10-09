@@ -64,3 +64,18 @@ with three audio APIs must sound identical and stay in step.
   golden-master tests possible (session 1) and keeps the CLI harness honest.
 - Session 1 delivers only the `Internal` clock and the kick voice; the trait
   and event model are shaped for the rest.
+
+## Clarifications (appended 2026-10-09, final review; the decision stands)
+
+Item 4 was written before the sources existed. As built (ADR-0006 and
+`docs/protocols/`):
+
+- `ProDjLink` takes phase from beat packets; CDJ-3000 high-precision
+  position refreshes tempo only, because turning a playhead into a beat
+  needs beat-grid queries player5 does not make.
+- `OpusQuad` narrows the ±200 ms status-packet timing itself before the
+  follower sees it (`sync::opus::tracker`).
+- `MidiClockIn` is not tempo-only: beats are counted from the first Timing
+  Clock after Start/Continue and reported as bar phase.
+- The "PLL" is `sync::FollowerClock`, a second-order (alpha-beta) tracker
+  with per-precision tuning (ADR-0006).

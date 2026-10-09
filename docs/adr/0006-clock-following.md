@@ -240,3 +240,28 @@ test drives the follower with seeded xorshift noise.
   beats). Not exposed through the FFI yet.
 - Song Position Pointer is not handled (`MidiMessage` has no variant for
   it); adding it is an ABI-visible change for a later session.
+
+## Clarifications (appended 2026-10-09, final review; the decision stands)
+
+The Context table above was written before the network sources were
+merged. What the merged sources actually report:
+
+- **CDJ-3000 precise position is not `Exact`.** The packet carries the
+  playhead in milliseconds and no beat information; turning it into a beat
+  needs the track's beat grid, which player5 does not download. The Pro DJ
+  Link source uses it to refresh tempo only and reports every phase
+  observation as `Fine`, from beat packets
+  (`docs/protocols/pro-dj-link.md`, "Precise position";
+  `core/sync/src/prolink/source.rs`). Today only Ableton Link (and the
+  simulated test source) reports `Exact`.
+- **Opus Quad.** Still `Coarse`, but the source does not hand the follower
+  raw ±200 ms packet arrivals: `sync::opus::tracker` brackets each beat
+  between two status packets, intersects the brackets of up to 16 beats,
+  reports the bracket's midpoint (so the one-sided lateness of a packet
+  arrival is already removed) and drops estimates wider than ±150 ms
+  (`docs/protocols/opus-quad.md`, "Timing precision"). The Coarse tuning
+  above is unchanged and stays conservative for it.
+- **Browser bridge.** The bridge forwards the precision of the source it
+  follows, and the browser's follower takes that tuning (ADR-0007,
+  Consequences; `apps/bridge/src/clock.rs`, `apps/web/src/clock/bridge.ts`).
+  `Fine` is only the default before the first observation.

@@ -108,7 +108,10 @@
 
         /// Walks an event list and reports the clock messages. Reads the
         /// packed structs through raw pointers (packets are variable-length,
-        /// 4-byte aligned) instead of copying them.
+        /// 4-byte aligned) instead of copying them. A packet's `wordCount`
+        /// may exceed the 64 words `MIDIEventPacket` declares, so the next
+        /// packet starts after all of them, as `MIDIEventPacketNext` does
+        /// (`docs/protocols/midi-clock.md`).
         static func scan(_ list: UnsafePointer<MIDIEventList>, _ handler: Handler) {
             let packetCount = Int(list.pointee.numPackets)
             let firstPacketOffset = MemoryLayout<MIDIEventList>.offset(of: \MIDIEventList.packet) ?? 8
@@ -117,7 +120,7 @@
             var packet = UnsafeRawPointer(list) + firstPacketOffset
             for _ in 0..<packetCount {
                 let timeStamp = packet.loadUnaligned(as: UInt64.self)
-                let words = min(Int(packet.loadUnaligned(fromByteOffset: countOffset, as: UInt32.self)), 64)
+                let words = Int(packet.loadUnaligned(fromByteOffset: countOffset, as: UInt32.self))
                 let wordBase = packet + wordsOffset
                 let hostNanoseconds =
                     timeStamp == 0
