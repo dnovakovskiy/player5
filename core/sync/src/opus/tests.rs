@@ -405,12 +405,17 @@ fn discovers_the_unit_and_announces() {
     assert_eq!(ka, KeepAlive::rekordbox(0x17, fallback_mac(US), US));
     out.clear();
 
-    s.on_announce(&unit_keep_alive(), from_unit(ANNOUNCE_PORT), 10 * MS, &mut out);
+    s.on_announce(
+        &unit_keep_alive(),
+        from_unit(ANNOUNCE_PORT),
+        10 * MS,
+        &mut out,
+    );
     assert_eq!(s.unit(), Some(UNIT));
     let ev = events(&out);
-    assert!(ev
-        .iter()
-        .any(|e| matches!(e, SourceEvent::Status { message, .. } if message.contains("Opus Quad found"))));
+    assert!(ev.iter().any(
+        |e| matches!(e, SourceEvent::Status { message, .. } if message.contains("Opus Quad found"))
+    ));
     let devices = ev
         .iter()
         .find_map(|e| match e {
@@ -623,6 +628,40 @@ fn switches_decks_on_command_and_falls_back_without_master() {
 }
 
 #[test]
+fn master_policy_prefers_what_is_audible() {
+    let mut s = Session::new(settings(Some(US)), 0);
+    let mut out = Vec::new();
+    let mut feed = |s: &mut Session, deck, playing, master| {
+        s.on_update(
+            &status(deck, playing, master, 12_400, 9),
+            from_unit(UPDATE_PORT),
+            MS,
+            &mut out,
+        );
+    };
+    s.on_announce(
+        &unit_keep_alive(),
+        from_unit(ANNOUNCE_PORT),
+        0,
+        &mut Vec::new(),
+    );
+    // A stopped master and one playing deck: follow the playing one.
+    feed(&mut s, 1, false, true);
+    feed(&mut s, 2, true, false);
+    assert_eq!(s.followed(), Some(2));
+    // Nothing plays: the stopped master.
+    feed(&mut s, 2, false, false);
+    assert_eq!(s.followed(), Some(1));
+    // Two playing masters during a hand-off: stay on the current one.
+    feed(&mut s, 3, true, true);
+    assert_eq!(s.followed(), Some(3));
+    feed(&mut s, 1, true, true);
+    assert_eq!(s.followed(), Some(3));
+    feed(&mut s, 3, true, false);
+    assert_eq!(s.followed(), Some(1));
+}
+
+#[test]
 fn recovers_zero_status_flags_like_beat_link() {
     let mut s = Session::new(settings(Some(US)), 0);
     let mut out = Vec::new();
@@ -688,9 +727,9 @@ fn expires_the_unit_and_peers() {
     assert_eq!(s.unit(), None);
     assert!(s.devices().is_empty());
     let ev = events(&out);
-    assert!(ev
-        .iter()
-        .any(|e| matches!(e, SourceEvent::Status { warning: true, message } if message.contains("lost"))));
+    assert!(ev.iter().any(
+        |e| matches!(e, SourceEvent::Status { warning: true, message } if message.contains("lost"))
+    ));
     assert!(ev
         .iter()
         .any(|e| matches!(e, SourceEvent::Devices(d) if d.is_empty())));
@@ -749,7 +788,10 @@ struct Seen {
 
 /// Deck 1: master, 150 BPM. Deck 2: 120 BPM. Beat n of a deck starts at
 /// `origin + offset + (n - 1) * period`.
-const DECKS: [(u8, u16, u64, u64); 2] = [(1, 15_000, 400 * MS, 37 * MS), (2, 12_000, 500 * MS, 211 * MS)];
+const DECKS: [(u8, u16, u64, u64); 2] = [
+    (1, 15_000, 400 * MS, 37 * MS),
+    (2, 12_000, 500 * MS, 211 * MS),
+];
 
 impl FakeUnit {
     fn run(self, stop: &AtomicBool) -> Seen {
@@ -794,8 +836,9 @@ impl FakeUnit {
                     for (deck, bpm_x100, period, offset) in DECKS {
                         let start = self.origin + offset;
                         let beat = (now.saturating_sub(start) / period) as u32 + 1;
-                        let mut st = DeckStatus::parse(&status(deck, true, deck == 1, bpm_x100, beat))
-                            .unwrap();
+                        let mut st =
+                            DeckStatus::parse(&status(deck, true, deck == 1, bpm_x100, beat))
+                                .unwrap();
                         st.bar_beat = ((beat - 1) % 4 + 1) as u8;
                         let _ = self.update.send_to(&st.to_bytes(), to);
                     }

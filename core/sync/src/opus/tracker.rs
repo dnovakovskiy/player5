@@ -258,7 +258,10 @@ mod tests {
             // Never worse than the single-bracket bound.
             assert!(err <= 110_000_000, "beat {i}: error {err} ns");
             // The truth is inside the claimed window (plus slack).
-            assert!(err <= est.uncertainty_ns + SLACK_NS, "beat {i}: {est:?} vs {truth}");
+            assert!(
+                err <= est.uncertainty_ns + SLACK_NS,
+                "beat {i}: {est:?} vs {truth}"
+            );
         }
         let late: Vec<u64> = estimates[8..]
             .iter()

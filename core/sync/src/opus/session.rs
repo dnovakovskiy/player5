@@ -263,7 +263,13 @@ impl Session {
     }
 
     /// Handles a datagram received on the announce port.
-    pub fn on_announce(&mut self, bytes: &[u8], from: SocketAddrV4, now: u64, out: &mut Vec<Action>) {
+    pub fn on_announce(
+        &mut self,
+        bytes: &[u8],
+        from: SocketAddrV4,
+        now: u64,
+        out: &mut Vec<Action>,
+    ) {
         let Ok(AnnouncePacket::KeepAlive(ka)) = parse_announce(bytes) else {
             return;
         };
@@ -311,7 +317,10 @@ impl Session {
             None => Self::status(
                 out,
                 true,
-                format!("device number {} is taken and no other is free", self.number),
+                format!(
+                    "device number {} is taken and no other is free",
+                    self.number
+                ),
             ),
         }
     }
@@ -412,25 +421,33 @@ impl Session {
         match self.follow {
             FollowTarget::Device(d) => (1..=4).contains(&d).then_some(d),
             FollowTarget::Master => {
-                let masters: Vec<u8> = (1..=4)
-                    .filter(|&d| status(d).is_some_and(DeckStatus::is_master))
-                    .collect();
-                if let Some(&d) = masters
+                // Playing tempo master (staying put during a hand-off),
+                // else the deck already followed while it plays, else the
+                // only playing deck, else a stopped master.
+                let decks = |f: fn(&DeckStatus) -> bool| -> Vec<u8> {
+                    (1..=4).filter(|&d| status(d).is_some_and(f)).collect()
+                };
+                let masters = decks(DeckStatus::is_master);
+                let playing = decks(DeckStatus::is_playing);
+                let playing_masters: Vec<u8> = masters
                     .iter()
-                    .find(|&&d| status(d).is_some_and(DeckStatus::is_playing))
-                    .or(masters.first())
-                {
+                    .copied()
+                    .filter(|d| playing.contains(d))
+                    .collect();
+                let current = self.followed;
+                if let Some(c) = current.filter(|c| playing_masters.contains(c)) {
+                    return Some(c);
+                }
+                if let Some(&d) = playing_masters.first() {
                     return Some(d);
                 }
-                let playing: Vec<u8> = (1..=4)
-                    .filter(|&d| status(d).is_some_and(DeckStatus::is_playing))
-                    .collect();
-                if let Some(current) = self.followed {
-                    if playing.contains(&current) {
-                        return Some(current);
-                    }
+                if let Some(c) = current.filter(|c| playing.contains(c)) {
+                    return Some(c);
                 }
-                (playing.len() == 1).then(|| playing[0])
+                if playing.len() == 1 {
+                    return Some(playing[0]);
+                }
+                masters.first().copied()
             }
         }
     }
@@ -447,7 +464,8 @@ impl Session {
                 (Some(d), FollowTarget::Master) => format!("following deck {d} (tempo master)"),
                 (Some(d), FollowTarget::Device(_)) => format!("following deck {d}"),
                 (None, FollowTarget::Master) => {
-                    "no deck to follow: no tempo master and not exactly one deck playing".to_string()
+                    "no deck to follow: no tempo master and not exactly one deck playing"
+                        .to_string()
                 }
                 (None, FollowTarget::Device(d)) => format!("deck {d} does not exist (1-4)"),
             };
@@ -467,7 +485,8 @@ impl Session {
             Self::status(
                 out,
                 true,
-                "no Opus Quad seen yet: check the network cable and that the unit is on".to_string(),
+                "no Opus Quad seen yet: check the network cable and that the unit is on"
+                    .to_string(),
             );
         }
         self.announce(now, out);
@@ -482,11 +501,16 @@ impl Session {
             return;
         }
         self.next_announce = Some(now + self.settings.announce_interval_ns);
-        let broadcast = self.settings.broadcast.unwrap_or_else(|| default_broadcast(ip));
+        let broadcast = self
+            .settings
+            .broadcast
+            .unwrap_or_else(|| default_broadcast(ip));
         out.push(Action::Send {
             via: Via::Announce,
             to: SocketAddrV4::new(broadcast, self.settings.peer_announce_port),
-            bytes: KeepAlive::rekordbox(self.number, mac, ip).to_bytes().to_vec(),
+            bytes: KeepAlive::rekordbox(self.number, mac, ip)
+                .to_bytes()
+                .to_vec(),
         });
         if let Some(unit) = &self.unit {
             out.push(Action::Send {

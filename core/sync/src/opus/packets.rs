@@ -449,7 +449,8 @@ impl DeckStatus {
         if self.length >= STATUS_FLAGS_MIN_LEN {
             self.flags & FLAG_PLAYING != 0 || self.p2_moving()
         } else {
-            matches!(self.play_state_1, 0x03 | 0x04) || (self.play_state_1 == 0x09 && self.p2_moving())
+            matches!(self.play_state_1, 0x03 | 0x04)
+                || (self.play_state_1 == 0x09 && self.p2_moving())
         }
     }
 
