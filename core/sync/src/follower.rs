@@ -327,8 +327,11 @@ impl FollowerClock {
         self.phase_error
     }
 
-    /// Asks for the next observation to be applied as a hard phase snap
-    /// (quantized re-sync) rather than a gradual correction.
+    /// Asks for a hard phase snap (quantized re-sync) rather than a gradual
+    /// correction: acquisition restarts at the next phase observation and
+    /// the timeline snaps as soon as it completes (on that observation for
+    /// every precision but [`Precision::Coarse`], which first averages as
+    /// many reports as a first lock).
     pub fn request_resync(&mut self) {
         self.resync_requested = true;
     }
@@ -519,9 +522,12 @@ impl FollowerClock {
         self.phase_error = out_err;
 
         if core::mem::take(&mut self.resync_requested) {
-            // Quantized re-sync: snap to this report (or, for a source whose
-            // tempo is still unknown, as soon as it is measured).
-            self.begin_acquire(s, ours + out_err, 1);
+            // Quantized re-sync: acquire afresh from this report and snap as
+            // soon as acquisition completes: at once for the precise
+            // sources, after as many reports as a first lock for Coarse
+            // (one report there is only good to +-200 ms), and for a source
+            // whose tempo is still unknown, as soon as it is measured.
+            self.begin_acquire(s, ours + out_err, self.tuning.acquire_obs);
             return;
         }
         match self.lock {
@@ -819,6 +825,8 @@ mod tests {
         /// `(from_s, to_s)`: the source sends nothing (lost, or the DJ
         /// stopped the deck); combine with `shift` to come back elsewhere.
         outage: Option<(f64, f64)>,
+        /// Seconds at which the DJ presses re-sync.
+        resync_at: Option<f64>,
         seed: u64,
     }
 
@@ -840,6 +848,7 @@ mod tests {
                 source_start: 0.0,
                 stall: None,
                 outage: None,
+                resync_at: None,
                 seed: 0x9E37_79B9_7F4A_7C15,
             }
         }
@@ -954,6 +963,12 @@ mod tests {
             }
             beat = beat1;
             now += TICK;
+            if sc
+                .resync_at
+                .is_some_and(|at| now / SR >= at && (now - TICK) / SR < at)
+            {
+                f.request_resync();
+            }
             if let Some((at, shift)) = sc.shift {
                 if !shifted && now / SR >= at {
                     shifted = true;
@@ -1485,7 +1500,7 @@ mod tests {
         }
         // Resync with a refined tempo: snaps, tempo kept.
         let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
-        let mut feed = |f: &mut FollowerClock, k: u32, jitter: f64| {
+        let feed = |f: &mut FollowerClock, k: u32, jitter: f64| {
             let s = f64::from(k) * 32_000.0 + jitter;
             let o = Observation {
                 sample: s,
@@ -1573,25 +1588,37 @@ mod tests {
         }
     }
 
+    /// Re-sync on a Coarse source must not snap to a single report that
+    /// is only good to +-200 ms: it averages as many reports as a first
+    /// lock would, then snaps once, and the error stays well under the
+    /// source's noise. The precise ones still snap on the very next report.
     #[test]
-    #[ignore = "probe"]
-    fn probe_jittery_nudge() {
-        for (name, nudge) in [("nudge", true), ("ramp", false)] {
-            let mut sc = typical(Precision::Jittery);
-            if nudge {
-                sc.shift = Some((10.0, 0.024 * sc.bpm / 60.0));
-            } else {
-                sc.ramp = Some((10.0, 14.0, sc.bpm + 6.0));
-            }
+    fn resync_on_a_coarse_source_averages_before_snapping() {
+        let mut sc = typical(Precision::Coarse);
+        sc.resync_at = Some(60.0);
+        sc.seconds = 120.0;
+        for r in seeds(sc) {
+            assert_eq!(r.snaps.len(), 2, "{:?}", r.snaps);
+            let delay = r.snaps[1] - 60.0;
+            // Eight reports at one per beat.
+            assert!(delay > 3.0 && delay < 5.0, "{delay}");
+            let worst = r.max_abs_error_after(60.0);
+            assert!(worst < 120.0, "{worst:.1} ms");
+        }
+        for p in [Precision::Exact, Precision::Fine, Precision::Jittery] {
+            let (_, tol) = bound(p);
+            let mut sc = typical(p);
+            sc.resync_at = Some(10.0);
             for r in seeds(sc) {
-                let mut line = String::new();
-                for t0 in [9.0, 10.5, 11.0, 12.0, 14.0, 16.0, 18.0, 20.0, 25.0, 29.0] {
-                    line += &format!(" {t0}:{:.2}", r.max_abs_error_between(t0, t0 + 1.0));
-                }
-                println!("{name}{line} drift {:.6}", r.follower.drift);
+                assert_eq!(r.snaps.len(), 2, "{p:?}: {:?}", r.snaps);
+                let delay = r.snaps[1] - 10.0;
+                assert!(delay < 60.0 / sc.bpm * sc.every + 0.01, "{p:?}: {delay}");
+                let worst = r.max_abs_error_after(10.0);
+                assert!(worst < tol, "{p:?}: {worst:.2} ms");
             }
         }
     }
+
     // ---- tuning report (not a test) -----------------------------------------
 
     #[test]
