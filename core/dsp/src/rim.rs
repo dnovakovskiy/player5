@@ -15,7 +15,7 @@
 //! * **click** – a sub-millisecond exponential pulse, band-passed around
 //!   4 kHz, for the stick attack;
 //! * **high-pass** – a 12 dB/oct state-variable high-pass at 250 Hz on the
-//!   mix, which also removes the click's DC;
+//!   mix, so nothing below the low ping reaches the mixer;
 //! * **saturation** – a fixed-drive soft clip. Velocity sets how hard the
 //!   resonators are struck, so accented hits are louder *and* clip harder
 //!   (brighter), as on the hardware.
