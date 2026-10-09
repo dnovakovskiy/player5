@@ -1,0 +1,10 @@
+# Pro DJ Link fixture: status-djm-2000nexus
+# Real capture: https://github.com/Deep-Symmetry/dysentery/blob/main/doc/assets/to-virtual.pcapng
+#   (to-virtual.pcapng, frame 4; 172.16.42.4:7409 -> 172.16.42.2:50002, UDP payload 0x38 bytes)
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/vcdj.html#mixer-status-packets
+# Mixer status from device 0x21: F = d0 (not master), 120.00 BPM, beat-within-bar 3.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 29 44 4a 4d 2d 32
+30 30 30 6e 65 78 75 73 00 00 00 00 00 00 00 01
+00 21 00 14 21 00 00 d0 00 10 00 00 80 00 2e e0
+00 10 00 00 00 09 00 03

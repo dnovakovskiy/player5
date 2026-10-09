@@ -1,0 +1,10 @@
+# Pro DJ Link fixture: player5-hello
+# Constructed from the documented layout, not a capture: no published
+# capture contains this packet. Golden bytes for the builders in
+# core/sync/src/prolink/packets.rs.
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/startup.html#cdj-3000-initial-announcement
+# Our CDJ-3000-compatible hello: structure byte 04, length 0x26, payload 01 40.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 0a 00 70 6c 61 79
+65 72 35 00 00 00 00 00 00 00 00 00 00 00 00 00
+01 04 00 26 01 40

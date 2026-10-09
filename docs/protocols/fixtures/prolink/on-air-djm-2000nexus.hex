@@ -1,0 +1,9 @@
+# Pro DJ Link fixture: on-air-djm-2000nexus
+# Real capture: https://github.com/Deep-Symmetry/dysentery/blob/main/doc/assets/to-virtual.pcapng
+#   (to-virtual.pcapng, frame 7; 172.16.42.4:7410 -> 172.16.42.255:50001, UDP payload 0x2d bytes)
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/mixer_integration.html#channels-on-air
+# Channels-on-air broadcast: channels 2, 3 and 4 on air, channel 1 off.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 03 44 4a 4d 2d 32
+30 30 30 6e 65 78 75 73 00 00 00 00 00 00 00 01
+02 21 00 09 00 01 01 01 00 00 00 00 00

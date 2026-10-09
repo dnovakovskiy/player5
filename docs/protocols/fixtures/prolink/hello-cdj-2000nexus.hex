@@ -1,0 +1,9 @@
+# Pro DJ Link fixture: hello-cdj-2000nexus
+# Real capture: https://github.com/Deep-Symmetry/dysentery/blob/main/doc/assets/powerup.pcapng
+#   (powerup.pcapng, frame 304; 172.16.42.5:50000 -> 172.16.42.255:50000, UDP payload 0x25 bytes)
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/startup.html#cdj-initial-announcement
+# Initial announcement (hello) from a CDJ-2000nexus; final byte 01 = CDJ.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 0a 00 43 44 4a 2d
+32 30 30 30 6e 65 78 75 73 00 00 00 00 00 00 00
+01 02 00 25 01

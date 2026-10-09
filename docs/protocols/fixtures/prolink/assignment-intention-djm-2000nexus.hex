@@ -1,0 +1,9 @@
+# Pro DJ Link fixture: assignment-intention-djm-2000nexus
+# Real capture: https://github.com/Deep-Symmetry/dysentery/blob/main/doc/assets/LinkInfo.pcapng
+#   (LinkInfo.pcapng, frame 128; 169.254.99.60:50000 -> 169.254.192.112:50000, UDP payload 0x2f bytes)
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/startup.html#assignment-intention-packet
+# Mixer (169.254.99.60) tells a booting CDJ it will assign its number (unicast).
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 01 00 44 4a 4d 2d
+32 30 30 30 6e 65 78 75 73 00 00 00 00 00 00 00
+01 02 00 2f a9 fe 63 3c 74 5e 1c 35 63 3c 01

@@ -1,0 +1,11 @@
+# Pro DJ Link fixture: player5-keep-alive
+# Constructed from the documented layout, not a capture: no published
+# capture contains this packet. Golden bytes for the builders in
+# core/sync/src/prolink/packets.rs.
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/startup.html#startup-3000
+# Our CDJ-3000-compatible keep-alive: device 5, 3 peers, byte 0x35 = 64.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 06 00 70 6c 61 79
+65 72 35 00 00 00 00 00 00 00 00 00 00 00 00 00
+01 02 00 36 05 01 02 70 a9 fe 00 05 a9 fe 00 05
+03 00 00 00 01 64

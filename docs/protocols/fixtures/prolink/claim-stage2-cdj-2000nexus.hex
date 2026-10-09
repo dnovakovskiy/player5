@@ -1,0 +1,10 @@
+# Pro DJ Link fixture: claim-stage2-cdj-2000nexus
+# Real capture: https://github.com/Deep-Symmetry/dysentery/tree/main/doc/assets/captures/S01-cold-boot-a
+#   (S01-cold-boot-a/run.pcap, frame 38; 169.254.103.172:50000 -> 169.254.255.255:50000, UDP payload 0x32 bytes)
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/startup.html#cdj-assign-stage-2
+# Second-stage claim for device 1 (N = 1), a = 02 (specific number), deck booting alone.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 02 00 43 44 4a 2d
+32 30 30 30 6e 65 78 75 73 00 00 00 00 00 00 00
+01 02 00 32 a9 fe 67 ac 74 5e 1c 56 67 ac 01 01
+01 02

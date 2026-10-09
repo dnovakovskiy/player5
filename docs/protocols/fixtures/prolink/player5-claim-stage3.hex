@@ -1,0 +1,10 @@
+# Pro DJ Link fixture: player5-claim-stage3
+# Constructed from the documented layout, not a capture: no published
+# capture contains this packet. Golden bytes for the builders in
+# core/sync/src/prolink/packets.rs.
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/startup.html#startup-3000
+# Our final-stage claim for device 5, N = 1.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 04 00 70 6c 61 79
+65 72 35 00 00 00 00 00 00 00 00 00 00 00 00 00
+01 03 00 26 05 01

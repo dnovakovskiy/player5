@@ -1,0 +1,11 @@
+# Pro DJ Link fixture: keep-alive-virtual-cdj
+# Real capture: https://github.com/Deep-Symmetry/dysentery/blob/main/doc/assets/to-virtual.pcapng
+#   (to-virtual.pcapng, frame 18; 172.16.42.2:50002 -> 172.16.42.255:50000, UDP payload 0x36 bytes)
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/vcdj.html#creating-vcdj
+# Keep-alive of a virtual CDJ (device 5, name 'Virtual CDJ') sent from UDP
+# source port 50002, after which the players unicast status to it.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 06 00 56 69 72 74
+75 61 6c 20 43 44 4a 00 00 00 00 00 00 00 00 00
+01 02 00 36 05 01 3c 15 c2 e7 08 6c ac 10 2a 02
+01 00 00 00 01 00

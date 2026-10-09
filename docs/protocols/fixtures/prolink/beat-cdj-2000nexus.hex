@@ -1,0 +1,13 @@
+# Pro DJ Link fixture: beat-cdj-2000nexus
+# Real capture: https://github.com/Deep-Symmetry/dysentery/tree/main/doc/assets/captures/S06-load-and-play
+#   (S06-load-and-play/run.pcapng, frame 2139; 169.254.103.172:3532 -> 169.254.255.255:50001, UDP payload 0x60 bytes)
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/beats.html#beat-packets
+# Beat packet from a playing CDJ-2000nexus: device 1, track BPM 132.01,
+# pitch 0x0f8312 (-3.05 %), effective 127.98 BPM, beat 1 of the bar, next beat in 454 ms.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 28 43 44 4a 2d 32
+30 30 30 6e 65 78 75 73 00 00 00 00 00 00 00 01
+00 01 00 3c 00 00 01 c6 00 00 03 8d 00 00 07 1a
+00 00 07 1a 00 00 0e 34 00 00 0e 34 ff ff ff ff
+ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff
+ff ff ff ff 00 0f 83 12 00 00 33 91 01 00 00 01

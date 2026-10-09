@@ -1,0 +1,10 @@
+# Pro DJ Link fixture: keep-alive-cdj-2000nexus
+# Real capture: https://github.com/Deep-Symmetry/dysentery/blob/main/doc/assets/to-virtual.pcapng
+#   (to-virtual.pcapng, frame 8; 172.16.42.3:50000 -> 172.16.42.255:50000, UDP payload 0x36 bytes)
+# Documented in: https://djl-analysis.deepsymmetry.org/djl-analysis/startup.html#cdj-keep-alive
+# CDJ-2000nexus keep-alive: device 3, IP 172.16.42.3, MAC 74:5e:1c:56:c0:70, 4 peers.
+# Bytes: UDP payload, hex, 16 per line.
+51 73 70 74 31 57 6d 4a 4f 4c 06 00 43 44 4a 2d
+32 30 30 30 6e 65 78 75 73 00 00 00 00 00 00 00
+01 02 00 36 03 01 74 5e 1c 56 c0 70 ac 10 2a 03
+04 00 00 00 01 00
