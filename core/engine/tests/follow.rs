@@ -45,6 +45,9 @@ enum Feed {
     Beats,
     /// MIDI clock: 24 pulses per beat after a Start.
     Midi,
+    /// Bar-phase reports several times per beat, unrelated to the steps
+    /// (precise position packets, Link).
+    Position,
 }
 
 #[derive(Clone, Copy)]
@@ -63,6 +66,12 @@ struct Source {
     seconds: f64,
     /// When playback starts (the follower must be locked by then).
     start_s: f64,
+    /// Press re-sync every this many seconds after the start (each one
+    /// snaps on the next report: a stream of small snaps).
+    resync_every: Option<f64>,
+    /// `(period_s, length_s)`: delivery stalls for `length_s` at the start
+    /// of every `period_s`; what was due arrives in one burst.
+    stall: Option<(f64, f64)>,
     seed: u64,
 }
 
@@ -78,6 +87,8 @@ impl Source {
             jump: None,
             seconds: 60.0,
             start_s: 1.0,
+            resync_every: None,
+            stall: None,
             seed: 0x2545_F491_4F6C_DD1D,
         }
     }
@@ -176,6 +187,10 @@ struct Outcome {
     start: u64,
     peak: f32,
     bpm: f64,
+    /// The source's starting tempo (for converting errors to ms).
+    source_bpm: f64,
+    /// Re-sync presses during the run.
+    resyncs: usize,
 }
 
 /// Runs a source for `src.seconds`; playback starts at `src.start_s`.
@@ -194,6 +209,7 @@ fn run(src: Source) -> Outcome {
     let per_beat = match src.feed {
         Feed::Beats => 1.0,
         Feed::Midi => 24.0,
+        Feed::Position => 7.0,
     };
     let mut next_index = (beat * per_beat).ceil() as i64;
     // MIDI: the source's song starts (Start) about 0.8 s in, before our
@@ -202,6 +218,8 @@ fn run(src: Source) -> Outcome {
     let origin_index = (midi_origin * per_beat) as i64;
     let mut jumped = false;
     let mut start = None;
+    let mut next_resync: Option<f64> = None;
+    let mut resyncs = 0usize;
     while (rig.now() as f64) < src.seconds * SR {
         let now = rig.now() as f64;
         let t = now / SR;
@@ -216,7 +234,7 @@ fn run(src: Source) -> Outcome {
             let sample = at + rng.sym(src.jitter_s) * SR;
             let latency = (0.002 + 0.004 * rng.unit()) * SR;
             let event = match src.feed {
-                Feed::Beats => Report::Obs(Observation {
+                Feed::Beats | Feed::Position => Report::Obs(Observation {
                     sample,
                     phase: Phase::Bar(next_report.rem_euclid(4.0)),
                     bpm: Some(src.reported_bpm(at / SR)),
@@ -229,7 +247,14 @@ fn run(src: Source) -> Outcome {
                     Report::Midi(MidiMessage::Clock, sample)
                 }
             };
-            pending.push((at.max(sample) + latency, event));
+            let mut due = at.max(sample) + latency;
+            if let Some((period, length)) = src.stall {
+                let phase = (due / SR).rem_euclid(period);
+                if phase < length {
+                    due += (length - phase) * SR;
+                }
+            }
+            pending.push((due, event));
             next_index += 1;
         }
         beat = end;
@@ -254,6 +279,14 @@ fn run(src: Source) -> Outcome {
             assert!(rig.control.is_locked(), "locked by {} s", src.start_s);
             rig.control.start(now);
             start = Some(now);
+            next_resync = src.resync_every.map(|every| t + every);
+        }
+        if let Some(at) = next_resync {
+            if t >= at {
+                rig.control.resync(now);
+                resyncs += 1;
+                next_resync = src.resync_every.map(|every| at + every);
+            }
         }
         rig.block();
     }
@@ -270,6 +303,8 @@ fn run(src: Source) -> Outcome {
         start: start.unwrap(),
         peak: rig.peak,
         bpm: rig.control.tempo(),
+        source_bpm: src.bpm,
+        resyncs,
     }
 }
 
@@ -288,7 +323,7 @@ impl Outcome {
             .map(|&(s, _)| {
                 let steps = self.truth.beat_at(s) * 4.0;
                 let k = steps.round();
-                let bpm = 124.0;
+                let bpm = self.source_bpm;
                 (s as f64 / SR, k as i64, (steps - k) / 4.0 * 60_000.0 / bpm)
             })
             .collect()
@@ -310,7 +345,7 @@ impl Outcome {
     /// once (apart from `allowed_gaps` deliberate skips at jumps).
     fn assert_every_step_once(&self, allowed_gaps: usize) {
         let hits = self.hat_hits();
-        assert!(hits.len() > 400, "{} hits", hits.len());
+        assert!(hits.len() > 100, "{} hits", hits.len());
         let mut gaps = 0;
         for w in hits.windows(2) {
             let d = w[1].1 - w[0].1;
@@ -320,6 +355,26 @@ impl Outcome {
             }
         }
         assert!(gaps <= allowed_gaps, "{gaps} skips");
+    }
+
+    /// No two hat hits closer than half a step in time: nothing doubled or
+    /// flammed by a realign, whatever the source did.
+    fn assert_no_double_in_time(&self) {
+        let half_step = 0.5 * 0.25 * 60.0 * SR / self.source_bpm;
+        let hats: Vec<u64> = self
+            .hits
+            .iter()
+            .filter(|(_, v)| *v == VoiceId::ClosedHat)
+            .map(|h| h.0)
+            .collect();
+        for w in hats.windows(2) {
+            assert!(
+                (w[1] - w[0]) as f64 > 0.8 * half_step,
+                "hits {} samples apart at {:.3} s",
+                w[1] - w[0],
+                w[1] as f64 / SR
+            );
+        }
     }
 
     /// Kicks fall on source downbeats (not a beat away): our bar is the
@@ -463,4 +518,76 @@ fn engine_api_follows_and_free_runs_after_loss() {
     assert!(!engine.is_locked());
     assert!(engine.is_playing());
     assert!((engine.tempo() - bpm).abs() < 1e-9);
+}
+
+/// A DJ who keeps pressing re-sync: every press is a (tiny) snap, a flush
+/// and a realign, and none of them may drop or double a step.
+#[test]
+fn a_resync_storm_never_drops_or_doubles_a_step() {
+    for (feed, precision, bpm, jitter) in [
+        (Feed::Beats, Precision::Fine, 124.0, 0.003),
+        (Feed::Position, Precision::Exact, 200.0, 0.000_2),
+        // Noisier than `Exact` promises: it slews at its full 5 % between
+        // presses, so queued steps move by milliseconds before each snap,
+        // and the snaps fall anywhere between steps.
+        (Feed::Position, Precision::Exact, 174.0, 0.004),
+        (Feed::Beats, Precision::Fine, 60.0, 0.003),
+        (Feed::Midi, Precision::Jittery, 128.0, 0.001),
+    ] {
+        let mut src = Source::new(feed, precision);
+        src.bpm = bpm;
+        src.jitter_s = jitter;
+        src.ramp = Some((20.0, 28.0, bpm * 1.0667));
+        src.resync_every = Some(0.77);
+        src.seconds = 40.0;
+        let out = run(src);
+        assert!(out.resyncs > 40);
+        // Each press snaps once on the next report (two presses between
+        // reports, at 60 BPM, snap together).
+        let flushes = out.flushes_after_start();
+        assert!(
+            flushes <= out.resyncs && 4 * flushes >= 3 * out.resyncs,
+            "{bpm}: {flushes} flushes for {} presses",
+            out.resyncs
+        );
+        out.assert_every_step_once(0);
+        out.assert_no_double_in_time();
+        out.assert_bars_aligned();
+    }
+}
+
+/// Congested network: delivery stalls for 300 ms every 2 s and the reports
+/// arrive in bursts. Late is not wrong: nothing realigns.
+#[test]
+fn network_stalls_never_realign() {
+    for precision in [Precision::Exact, Precision::Fine, Precision::Coarse] {
+        let mut src = Source::new(Feed::Beats, precision);
+        src.stall = Some((2.0, 0.3));
+        if precision == Precision::Coarse {
+            src.jitter_s = 0.2;
+            src.start_s = 6.0;
+        }
+        let out = run(src);
+        assert_eq!(out.flushes_after_start(), 0, "{precision:?}");
+        out.assert_every_step_once(0);
+        out.assert_bars_aligned();
+    }
+}
+
+/// The DJ jumps back (a hot cue behind the playhead). One realign; nothing
+/// is doubled or flammed, and after it every hit is back on the source's
+/// grid and bar.
+#[test]
+fn a_backward_cue_realigns_once_without_doubling() {
+    for by in [-1.5, -0.5, -2.0] {
+        let mut src = Source::new(Feed::Beats, Precision::Fine);
+        src.jump = Some((30.0, by));
+        let out = run(src);
+        assert_eq!(out.flushes_after_start(), 1, "{by}: one snap for one jump");
+        out.assert_no_double_in_time();
+        let snap = *out.flushes.last().unwrap();
+        let worst = out.max_error_after(snap as f64 / SR + 0.1);
+        assert!(worst < 4.0, "{by}: {worst:.3} ms");
+        out.assert_bars_aligned_except((30.0 * SR) as u64, snap);
+    }
 }
