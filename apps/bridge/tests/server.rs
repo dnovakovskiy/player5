@@ -1,0 +1,296 @@
+//! End-to-end: a real server on 127.0.0.1 with the simulated clock, driven
+//! by a hand-rolled WebSocket client and plain HTTP requests.
+
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::time::{Duration, Instant};
+
+use player5_bridge::ws::{self, Opcode};
+use player5_bridge::{start, Config, SourceKind, SourceOptions};
+use serde_json::Value;
+
+fn server(web: Option<std::path::PathBuf>) -> player5_bridge::Server {
+    start(Config {
+        bind: "127.0.0.1".parse().unwrap(),
+        port: 0,
+        web,
+        source: SourceKind::Sim,
+        options: SourceOptions {
+            sim_bpm: 124.0,
+            ..SourceOptions::default()
+        },
+        verbose: false,
+    })
+    .unwrap()
+}
+
+struct Client {
+    stream: TcpStream,
+    buf: Vec<u8>,
+}
+
+impl Client {
+    fn connect(addr: SocketAddr) -> Self {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let req = format!(
+            "GET /ws HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+        let mut buf = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let head_end = loop {
+            if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break p;
+            }
+            assert!(Instant::now() < deadline, "no handshake response");
+            let mut chunk = [0u8; 1024];
+            if let Ok(n) = stream.read(&mut chunk) {
+                buf.extend_from_slice(&chunk[..n]);
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+        assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+        assert!(head.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
+        buf.drain(..head_end + 4);
+        Self { stream, buf }
+    }
+
+    fn send(&mut self, text: &str) {
+        let frame = ws::client_frame(Opcode::Text, true, text.as_bytes(), [1, 2, 3, 4]);
+        self.stream.write_all(&frame).unwrap();
+    }
+
+    fn next_frame(&mut self, timeout: Duration) -> Option<ws::Frame> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(f) = ws::parse_server_frame(&mut self.buf) {
+                return Some(f);
+            }
+            if Instant::now() > deadline {
+                return None;
+            }
+            let mut chunk = [0u8; 4096];
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return None,
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(_) => {}
+            }
+        }
+    }
+
+    /// Next JSON message of the given type (skipping others).
+    fn next_of(&mut self, kind: &str, timeout: Duration) -> Option<(Value, Instant)> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let f = self.next_frame(deadline - Instant::now())?;
+            if f.opcode != Opcode::Text {
+                continue;
+            }
+            let v: Value = serde_json::from_slice(&f.payload).unwrap();
+            if v["type"] == kind {
+                return Some((v, Instant::now()));
+            }
+        }
+        None
+    }
+}
+
+fn http_get(addr: SocketAddr, path: &str) -> (u16, String, Vec<u8>) {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    let mut out = Vec::new();
+    let _ = s.read_to_end(&mut out);
+    let end = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8_lossy(&out[..end]).to_string();
+    let status = head[9..12].parse().unwrap();
+    (status, head, out[end + 4..].to_vec())
+}
+
+#[test]
+fn websocket_session_follows_the_simulated_clock() {
+    let srv = server(None);
+    let mut c = Client::connect(srv.local_addr());
+
+    let (hello, _) = c.next_of("hello", Duration::from_secs(2)).expect("hello");
+    assert_eq!(hello["protocol"], 1);
+    assert_eq!(hello["source"], "sim");
+    assert!(hello["server_us"].as_u64().is_some());
+
+    // Wait for a locked timeline.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let (t1, _) = loop {
+        let (t, at) = c
+            .next_of("timeline", Duration::from_secs(1))
+            .expect("timeline");
+        if t["locked"] == true {
+            break (t, at);
+        }
+        assert!(Instant::now() < deadline, "never locked");
+    };
+    assert_eq!(t1["source"], "sim");
+    assert_eq!(t1["bar_aligned"], true);
+    assert_eq!(t1["precision"], "exact");
+    assert!((t1["bpm"].as_f64().unwrap() - 124.0).abs() < 1e-6);
+
+    // Beat advances at 124 BPM between two timeline messages, consistent with
+    // their own anchors (both are on the server clock).
+    std::thread::sleep(Duration::from_millis(300));
+    let (t2, _) = c.next_of("timeline", Duration::from_secs(1)).unwrap();
+    let du = (t2["anchor_us"].as_u64().unwrap() - t1["anchor_us"].as_u64().unwrap()) as f64;
+    let db = t2["anchor_beat"].as_f64().unwrap() - t1["anchor_beat"].as_f64().unwrap();
+    let expected = du / 1e6 * 124.0 / 60.0;
+    // Allow 2 ms of beat time for the simulator's own sampling.
+    assert!(
+        (db - expected).abs() < 0.002 * 124.0 / 60.0 + 1e-3,
+        "beat advanced {db}, expected {expected}"
+    );
+
+    // Ping is answered with the fields echoed.
+    c.send(r#"{"type":"ping","id":7,"client_ms":1234.5}"#);
+    let (pong, _) = c.next_of("pong", Duration::from_secs(2)).expect("pong");
+    assert_eq!(pong["id"], 7);
+    assert_eq!(pong["client_ms"], 1234.5);
+    assert!(pong["server_us"].as_u64().unwrap() >= t2["anchor_us"].as_u64().unwrap());
+
+    // Follow commands and unknown messages are accepted silently.
+    c.send(r#"{"type":"follow","target":3}"#);
+    c.send(r#"{"type":"follow","target":"master"}"#);
+    c.send(r#"{"type":"something-new"}"#);
+    c.send("not json");
+    assert!(c.next_of("timeline", Duration::from_secs(1)).is_some());
+
+    // WebSocket ping control frame gets a pong frame.
+    c.stream
+        .write_all(&ws::client_frame(Opcode::Ping, true, b"hi", [9, 9, 9, 9]))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let f = c.next_frame(Duration::from_secs(1)).unwrap();
+        if f.opcode == Opcode::Pong {
+            assert_eq!(f.payload, b"hi");
+            break;
+        }
+        assert!(Instant::now() < deadline);
+    }
+
+    // Close handshake.
+    c.stream
+        .write_all(&ws::client_frame(
+            Opcode::Close,
+            true,
+            &1000u16.to_be_bytes(),
+            [5, 6, 7, 8],
+        ))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let f = c.next_frame(Duration::from_secs(1)).expect("close reply");
+        if f.opcode == Opcode::Close {
+            assert_eq!(&f.payload[..2], &1000u16.to_be_bytes());
+            break;
+        }
+        assert!(Instant::now() < deadline);
+    }
+    srv.stop();
+}
+
+#[test]
+fn protocol_violation_closes_with_1002() {
+    let srv = server(None);
+    let mut c = Client::connect(srv.local_addr());
+    // An unmasked client frame.
+    c.stream.write_all(&[0x81, 0x01, b'x']).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let f = c.next_frame(Duration::from_secs(2)).expect("close");
+        if f.opcode == Opcode::Close {
+            assert_eq!(&f.payload[..2], &1002u16.to_be_bytes());
+            break;
+        }
+        assert!(Instant::now() < deadline);
+    }
+    srv.stop();
+}
+
+#[test]
+fn http_endpoints_and_static_files() {
+    let dir = std::env::temp_dir().join(format!("p5-bridge-web-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::write(dir.join("index.html"), "<title>player5</title>").unwrap();
+    std::fs::write(dir.join("assets/core.wasm"), [0u8, 97, 115, 109]).unwrap();
+    let srv = server(Some(dir.clone()));
+    let addr = srv.local_addr();
+
+    let (status, head, body) = http_get(addr, "/bridge.json");
+    assert_eq!(status, 200);
+    assert!(head.contains("Access-Control-Allow-Origin: *"));
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["protocol"], 1);
+    assert_eq!(v["ws"], "/ws");
+
+    let (status, head, body) = http_get(addr, "/");
+    assert_eq!(status, 200);
+    assert!(head.contains("text/html"));
+    assert_eq!(body, b"<title>player5</title>");
+
+    let (status, head, _) = http_get(addr, "/assets/core.wasm?v=1");
+    assert_eq!(status, 200);
+    assert!(head.contains("application/wasm"));
+
+    assert_eq!(http_get(addr, "/../Cargo.toml").0, 404);
+    assert_eq!(http_get(addr, "/%2e%2e/etc/passwd").0, 404);
+    assert_eq!(http_get(addr, "/nope").0, 404);
+    // /ws without the upgrade headers.
+    assert_eq!(http_get(addr, "/ws").0, 400);
+
+    // Garbage request line.
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.write_all(b"\x00\x01garbage\r\n\r\n").unwrap();
+    let mut out = String::new();
+    let _ = s.read_to_string(&mut out);
+    assert!(out.starts_with("HTTP/1.1 400"), "{out}");
+
+    srv.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unavailable_source_still_serves_with_an_error_status() {
+    let srv = start(Config {
+        bind: "127.0.0.1".parse().unwrap(),
+        port: 0,
+        web: None,
+        source: SourceKind::Opus,
+        options: SourceOptions::default(),
+        verbose: false,
+    })
+    .unwrap();
+    let mut c = Client::connect(srv.local_addr());
+    // The error status arrives as backlog or broadcast.
+    let (status, _) = c.next_of("status", Duration::from_secs(2)).expect("status");
+    assert_eq!(status["level"], "error");
+    let (t, _) = c.next_of("timeline", Duration::from_secs(2)).unwrap();
+    assert_eq!(t["locked"], false);
+    srv.stop();
+}
+
+#[test]
+fn many_clients_receive_broadcasts() {
+    let srv = server(None);
+    let mut clients: Vec<Client> = (0..8).map(|_| Client::connect(srv.local_addr())).collect();
+    for c in &mut clients {
+        assert!(c.next_of("timeline", Duration::from_secs(2)).is_some());
+    }
+    assert_eq!(srv.clients(), 8);
+    drop(clients);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while srv.clients() > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(srv.clients(), 0, "dropped clients are unregistered");
+    srv.stop();
+}
