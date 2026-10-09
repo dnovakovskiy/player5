@@ -55,12 +55,8 @@ const BURSTS: usize = 4;
 /// Burst onsets after the trigger (seconds) and their levels relative to
 /// the hit. Slightly uneven spacing keeps the flutter from sounding like a
 /// buzz.
-const BURST_SCHEDULE: [(f32, f32); BURSTS] = [
-    (0.0, 0.9),
-    (0.010, 1.0),
-    (0.021, 0.92),
-    (0.031, 0.85),
-];
+const BURST_SCHEDULE: [(f32, f32); BURSTS] =
+    [(0.0, 0.9), (0.010, 1.0), (0.021, 0.92), (0.031, 0.85)];
 /// Time constant of each burst's decay: about −25 dB by the next burst.
 const BURST_TAU_S: f32 = 0.0035;
 /// Attack slew of the burst envelope (sharp, but not a step).
@@ -340,9 +336,9 @@ impl Voice for Clap {
         // One noise source, two band-passes, each normalised and rounded.
         let white = self.noise.tick();
         let burst_noise = math::soft_clip(self.burst_bp.process(white).band * self.burst_scale);
-        let tail_noise = self
-            .tail_lp
-            .lowpass(math::soft_clip(self.tail_bp.process(white).band * self.tail_scale));
+        let tail_noise = self.tail_lp.lowpass(math::soft_clip(
+            self.tail_bp.process(white).band * self.tail_scale,
+        ));
 
         // Slewed amplitude envelopes (the amplifiers' response).
         self.burst_amp += self.burst_slew * (self.burst_env - self.burst_amp);
@@ -350,7 +346,14 @@ impl Voice for Clap {
         let mix = burst_noise * self.burst_amp + tail_noise * self.tail_amp;
         let out = self.hp.process(mix).high;
 
-        self.level_now += self.level_coef * (self.params.level - self.level_now);
+        // Level smoother; snaps onto the target once within -120 dB of it,
+        // so a fade towards zero never goes denormal.
+        let level_gap = self.params.level - self.level_now;
+        self.level_now = if level_gap.abs() < FLUSH_THRESHOLD {
+            self.params.level
+        } else {
+            self.level_now + self.level_coef * level_gap
+        };
         let y = out * self.level_now * CALIBRATION;
 
         // Advance envelopes.
@@ -540,10 +543,7 @@ mod tests {
             let mut clap = clap_with(sr, 0.5, 0.5, 1.0);
             for hit in 0..8 {
                 let p = db(peak(&full_hit(&mut clap, 1.0, (sr * 0.6) as usize)));
-                assert!(
-                    (-11.5..=-8.5).contains(&p),
-                    "{sr} Hz, hit {hit}: {p} dBFS"
-                );
+                assert!((-11.5..=-8.5).contains(&p), "{sr} Hz, hit {hit}: {p} dBFS");
             }
         }
     }
@@ -717,9 +717,13 @@ mod tests {
             level: 0.0,
             ..VoiceParams::default()
         });
-        out.extend(render(&mut clap, 2_400));
+        out.extend(render(&mut clap, 9_600));
         assert!(max_step(&out[2_350..2_450]) < max_step(&a));
         assert!(peak(&out[3_600..]) < peak(&out[..2_400]) * 0.01);
+        // The fade lands exactly on zero (no denormal crawl) while the tail
+        // is still running.
+        assert!(clap.is_active());
+        assert!(out[7_200..].iter().all(|&s| s == 0.0));
     }
 
     #[test]
@@ -787,7 +791,11 @@ mod tests {
             .filter(|&&(f, _)| f <= 100.0)
             .map(|&(_, p)| p)
             .sum();
-        assert!(low < total * 1e-3, "{:.2e} of the power below 100 Hz", low / total);
+        assert!(
+            low < total * 1e-3,
+            "{:.2e} of the power below 100 Hz",
+            low / total
+        );
     }
 
     #[test]
@@ -804,126 +812,5 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(acc.is_finite() && acc > 0.0);
         assert!(elapsed.as_millis() < 100, "10 s took {elapsed:?}");
-    }
-
-    #[test]
-    #[ignore = "diagnostic report"]
-    fn report() {
-        for sr in crate::SUPPORTED_SAMPLE_RATES {
-            let mut c = clap_with(sr, 0.5, 0.5, 1.0);
-            for v in [1.0, 0.7] {
-                let mut peaks = Vec::new();
-                for _ in 0..8 {
-                    c.trigger(v);
-                    let out = render(&mut c, (sr * 0.6) as usize);
-                    peaks.push((db(peak(&out)) * 100.0).round() / 100.0);
-                }
-                println!("sr {sr} v {v} peaks {peaks:?}");
-            }
-        }
-        let mut c = clap_with(SR, 0.5, 0.5, 1.0);
-        c.trigger(1.0);
-        let out = render(&mut c, 48_000);
-        let fr = frame_rms(&out[..4_800], SR);
-        println!(
-            "frames {:?}",
-            fr.iter()
-                .map(|&x| (db(x) * 10.0).round() / 10.0)
-                .collect::<Vec<_>>()
-        );
-        let idle_at = {
-            let mut c = clap_with(SR, 0.5, 1.0, 1.0);
-            c.trigger(1.0);
-            let mut n = 0;
-            while c.is_active() {
-                c.process();
-                n += 1;
-            }
-            n as f32 / SR
-        };
-        println!("idle after {idle_at} s at decay 1");
-        for tone in [0.0, 0.5, 1.0] {
-            let mut c = clap_with(SR, tone, 0.5, 1.0);
-            c.trigger(0.7);
-            let out = render(&mut c, 9_600);
-            println!(
-                "tone {tone}: centroid bursts {:.0} tail {:.0}",
-                centroid_hz(&out[..1_600], SR),
-                centroid_hz(&out[2_400..7_200], SR)
-            );
-        }
-        for v in [0.7, 1.0] {
-            let mut c = clap_with(SR, 0.5, 0.5, 1.0);
-            c.trigger(v);
-            let out = render(&mut c, 9_600);
-            println!(
-                "v {v}: centroid {:.0} peak {:.2}",
-                centroid_hz(&out[..4_800], SR),
-                db(peak(&out))
-            );
-        }
-        let mut clean = clap_with(SR, 0.5, 0.5, 1.0);
-        let reference = max_step(&full_hit(&mut clean, 1.0, 24_000));
-        for (at, first, second) in [
-            (240, 1.0, 1.0),
-            (1_150, 0.6, 1.0),
-            (2_900, 1.0, 0.7),
-            (6_000, 1.0, 1.0),
-            (1_700, 1.0, 0.1),
-        ] {
-            let mut clap = clap_with(SR, 0.5, 0.5, 1.0);
-            let mut out = full_hit(&mut clap, first, at);
-            out.extend(full_hit(&mut clap, second, 480));
-            let around = max_step(&out[at - 48..at + 48]);
-            let at_edge = (out[at] - out[at - 1]).abs();
-            println!("retrigger {at}: around {around:.4} edge {at_edge:.4} ref {reference:.4} local peak {:.4}", peak(&out[at - 48..at + 48]));
-        }
-        for sr in crate::SUPPORTED_SAMPLE_RATES {
-            for tone in [0.0, 1.0] {
-                let mut clap = clap_with(sr, tone, 1.0, 1.0);
-                let gap = (sr * 0.0625) as usize;
-                let mut out = Vec::new();
-                for _ in 0..32 {
-                    out.extend(full_hit(&mut clap, 1.0, gap));
-                }
-                println!("roll {sr} tone {tone}: {:.2} dBFS", db(peak(&out)));
-            }
-            for velocity in [0.7, 1.0] {
-                let mut clap = clap_with(sr, 0.5, 0.5, 1.0);
-                let out = full_hit(&mut clap, velocity, (sr * 0.04) as usize);
-                println!(
-                    "maxima {sr} v {velocity}: {:?}",
-                    distinct_maxima(&frame_rms(&out, sr))
-                );
-            }
-        }
-        let mut clap = clap_with(SR, 0.0, 1.0, 1.0);
-        let out = full_hit(&mut clap, 1.0, 9_600);
-        let n = out.len() as f64;
-        let mean = out.iter().map(|&s| f64::from(s)).sum::<f64>() / n;
-        let rms = (energy(&out) / n).sqrt();
-        let spec = spectrum(&out, SR);
-        let total: f64 = spec.iter().map(|&(_, p)| p).sum();
-        let low: f64 = spec
-            .iter()
-            .filter(|&&(f, _)| f <= 100.0)
-            .map(|&(_, p)| p)
-            .sum();
-        println!("dc {mean:.2e} rms {rms:.3e} low fraction {:.2e}", low / total);
-        let mut clap = clap_with(SR, 0.5, 1.0, 1.0);
-        let start = std::time::Instant::now();
-        let mut acc = 0.0f32;
-        for i in 0..480_000 {
-            if i % 6_000 == 0 {
-                clap.trigger(1.0);
-            }
-            acc += std::hint::black_box(clap.process()).abs();
-        }
-        println!("10 s in {:?} ({acc})", start.elapsed());
-        for tone in [0.0, 0.5, 1.0] {
-            let mut clap = clap_with(SR, tone, 0.5, 1.0);
-            let out = full_hit(&mut clap, 0.7, 4_800);
-            println!("tone {tone} centroid {:.0}", centroid_hz(&out, SR));
-        }
     }
 }
