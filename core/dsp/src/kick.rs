@@ -67,6 +67,22 @@ const DRIVE_VELOCITY: f32 = 0.5;
 const CALIBRATION: f32 = 0.5;
 /// Envelope level below which the voice goes idle (−100 dB).
 const IDLE_THRESHOLD: f32 = 1e-5;
+/// Decaying states are zeroed below this, long before they could go
+/// subnormal (denormal arithmetic is slow on x86 and in WASM). It sits far
+/// below the last bit of anything they are added to (the pitch factor is
+/// exactly 1.0 by then, and the click is under one ULP of the body), so
+/// flushing does not change the rendered audio.
+const FLUSH_THRESHOLD: f32 = 1e-30;
+
+/// Zeroes a decaying state once it is far below audibility.
+#[inline]
+fn flush(x: f32) -> f32 {
+    if x.abs() < FLUSH_THRESHOLD {
+        0.0
+    } else {
+        x
+    }
+}
 
 /// The bass drum voice. See the [module docs](self).
 #[derive(Clone, Debug)]
@@ -232,8 +248,8 @@ impl Voice for Kick {
         // Click: pulse → one-pole high-pass → one-pole low-pass.
         let hp = self.click_hp_coef * (self.hp_y1 + self.click_env - self.hp_x1);
         self.hp_x1 = self.click_env;
-        self.hp_y1 = hp;
-        self.lp_y1 += (1.0 - self.click_lp_coef) * (hp - self.lp_y1);
+        self.hp_y1 = flush(hp);
+        self.lp_y1 = flush(self.lp_y1 + (1.0 - self.click_lp_coef) * (hp - self.lp_y1));
         let click = self.lp_y1 * CLICK_GAIN;
 
         // Saturate the mix; normalise so a full-scale body still peaks at 1.
@@ -241,8 +257,8 @@ impl Voice for Kick {
 
         // Advance envelopes.
         self.amp_env *= self.amp_coef;
-        self.pitch_env *= self.sweep_coef;
-        self.click_env *= self.click_coef;
+        self.pitch_env = flush(self.pitch_env * self.sweep_coef);
+        self.click_env = flush(self.click_env * self.click_coef);
         if self.amp_env < IDLE_THRESHOLD && self.click_env < IDLE_THRESHOLD {
             self.reset_state();
         }
