@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use dsp::{Param, VoiceParams, VOICE_COUNT};
 use sequencer::queue::Producer;
-use sequencer::{Event, MasterParam, ParamTarget, Pattern, Scheduler, VoiceId, VoiceParam};
+use sequencer::{
+    Event, MasterParam, ParamTarget, Pattern, Scheduler, VoiceId, VoiceParam, FLUSH_RESERVE,
+};
 use sync::{
     AdjustedClock, ClockControls, ClockSource, FollowerClock, InternalClock, MidiClockFollower,
     MidiMessage, Observation, Phase, Precision, TapTempo,
@@ -28,10 +30,13 @@ const COMMITTED_BLOCKS: u64 = 2;
 /// longer lookaheads.
 const QUEUED_MEMORY: usize = 32;
 
-/// One scheduled step and the sample it was queued at.
+/// One scheduled step and where it was queued.
 #[derive(Clone, Copy, Debug, Default)]
 struct Queued {
     step: u64,
+    /// Its earliest event: the grace note of a flam, else the grid hit.
+    first: u64,
+    /// Its grid hit.
     sample: u64,
 }
 
@@ -50,14 +55,14 @@ struct QueuedLog {
 impl QueuedLog {
     const fn new() -> Self {
         Self {
-            entries: [Queued { step: 0, sample: 0 }; QUEUED_MEMORY],
+            entries: [Queued {
+                step: 0,
+                first: 0,
+                sample: 0,
+            }; QUEUED_MEMORY],
             head: 0,
             len: 0,
         }
-    }
-
-    fn clear(&mut self) {
-        self.len = 0;
     }
 
     fn push(&mut self, queued: Queued) {
@@ -71,14 +76,51 @@ impl QueuedLog {
         self.entries[(self.head + 2 * QUEUED_MEMORY - 1 - i) % QUEUED_MEMORY]
     }
 
-    /// Forgets the steps queued at or after `sample` (a flush dropped
-    /// them). Queued samples only grow, so they are the newest entries.
+    /// Forgets the steps whose grid hit a flush at `sample` dropped (with
+    /// [`QueuedLog::cut`], all of their events). Queued samples only grow,
+    /// so they are the newest entries.
     fn flush_from(&mut self, sample: u64) {
         while self.len > 0 && self.newest(0).sample >= sample {
             self.head = (self.head + QUEUED_MEMORY - 1) % QUEUED_MEMORY;
             self.len -= 1;
         }
     }
+
+    /// Splits the queued steps at `commit`, the first sample a flush can
+    /// still take back, into steps that are heard whole and steps that are
+    /// dropped whole. A step whose grace note falls before `commit` but
+    /// whose grid hit does not is heard whole: the flush moves past its hit
+    /// rather than leave a grace note that the replayed step would sound a
+    /// second time.
+    fn cut(&self, commit: u64) -> Cut {
+        let mut cut = Cut {
+            flush: commit,
+            heard: None,
+            dropped: None,
+        };
+        for i in (0..self.len).rev() {
+            let q = self.newest(i);
+            if q.first < cut.flush {
+                cut.flush = cut.flush.max(q.sample + 1);
+                cut.heard = Some(q);
+            } else {
+                cut.dropped = Some(q.step);
+                break;
+            }
+        }
+        cut
+    }
+}
+
+/// Where a realign cuts the queued steps ([`QueuedLog::cut`]).
+#[derive(Clone, Copy, Debug)]
+struct Cut {
+    /// The sample to flush from.
+    flush: u64,
+    /// The newest step heard whole.
+    heard: Option<Queued>,
+    /// The first step the flush drops, if it drops any.
+    dropped: Option<u64>,
 }
 
 /// Which clock drives the sequencer.
@@ -153,6 +195,10 @@ pub struct Control {
     /// block (or more, if the control half looks less often). `0` until
     /// two have been seen.
     render_block: u64,
+    /// A flush that did not fit in the queue. It is retried before
+    /// anything else is scheduled, so no step of the new timeline can be
+    /// queued in front of it (and then dropped by it).
+    pending_flush: Option<u64>,
 }
 
 impl Control {
@@ -183,6 +229,7 @@ impl Control {
             queued: QueuedLog::new(),
             published: 0,
             render_block: 0,
+            pending_flush: None,
         }
     }
 
@@ -328,32 +375,36 @@ impl Control {
     }
 
     /// Starts playback at `now`. Internal clock: beat 0 and step 0 fall on
-    /// `now`. Following: joins the external timeline in phase at the next
-    /// step, so the pattern position matches the source's bar position.
+    /// the commit point ([`Control::commit_point`]: `now` in lockstep, the
+    /// first sample the renderer has not committed to when it runs on its
+    /// own thread), after any latency compensation, so the downbeat sounds
+    /// on time. Following: joins the external timeline in phase at the
+    /// next step, so the pattern position matches the source's bar
+    /// position.
     ///
-    /// Following, a start shortly after a stop (or while playing) must not
-    /// replay what is still queued from before: those steps are flushed,
-    /// and the new run begins at least half a step after the last one
-    /// heard.
+    /// A start shortly after a stop (or while playing) must not let what is
+    /// still queued from before play on top of the new run: those steps are
+    /// flushed. Following, the new run also begins at least half a step
+    /// after the last step heard, so no step sounds twice. A stop-after
+    /// count ([`Control::set_stop_after`]) counts from the first step of
+    /// the new run.
     pub fn start(&mut self, now: u64) {
+        let commit = self.commit_point(now);
         match self.mode {
             ClockMode::Internal => {
-                self.queued.clear();
-                self.internal.reset(now as f64);
+                self.drop_queued_from(commit);
+                self.restart_internal_at(commit);
                 self.scheduler.start();
             }
             ClockMode::Follow(_) => {
-                let commit = self.commit_point(now);
-                if self.queued.len > 0 && self.queued.newest(0).sample >= commit {
-                    let _ = self.producer.push(Event::flush(commit));
+                let cut = self.queued.cut(commit);
+                if cut.dropped.is_some() {
+                    self.send_flush(cut.flush);
                 }
-                let heard = self.last_heard_before(commit).map(|q| q.sample);
-                self.queued.flush_from(commit);
-                let mut from = now;
-                if let Some(heard) = heard {
-                    let half_step =
-                        0.5 * sequencer::BEATS_PER_STEP * self.follower.samples_per_beat();
-                    from = from.max((heard as f64 + half_step).ceil() as u64);
+                self.queued.flush_from(cut.flush);
+                let mut from = commit;
+                if let Some(heard) = cut.heard {
+                    from = from.max(self.half_step_after(heard.sample as f64));
                 }
                 let active = self.active();
                 let clock = AdjustedClock::new(&active, self.controls);
@@ -368,7 +419,10 @@ impl Control {
         self.scheduler.stop();
     }
 
-    /// Stops automatically after `steps` steps (`None` loops forever).
+    /// Stops automatically after `steps` steps (`None` loops forever),
+    /// counted from the first step of the next start, or from the next
+    /// unscheduled step if set while playing. Realigns keep the count of
+    /// steps still to play.
     pub fn set_stop_after(&mut self, steps: Option<u64>) {
         self.scheduler.set_stop_after(steps);
     }
@@ -398,6 +452,13 @@ impl Control {
     /// Feeds a MIDI clock message received at `sample`. While following,
     /// Start and Continue request a re-sync: the source's song position
     /// jumped, so the next pulse snaps instead of slewing.
+    ///
+    /// Song Position Pointer is not supported (`MidiMessage` has no variant
+    /// for it; see `docs/protocols/midi-clock.md`): after an SPP and a
+    /// Continue the bar phase continues from our own pulse count, so a
+    /// source that relocates mid-bar is followed a fraction of a bar off
+    /// until its next Start. The realign that Continue triggers still never
+    /// doubles or drops a step.
     pub fn midi(&mut self, message: MidiMessage, sample: f64, now: u64) {
         if matches!(message, MidiMessage::Start | MidiMessage::Continue)
             && matches!(self.mode, ClockMode::Follow(_))
@@ -410,90 +471,128 @@ impl Control {
     }
 
     /// Registers a tap at `sample`. Internal clock: sets tempo and pulls the
-    /// beat grid onto the tap. Following: treated as an observation.
+    /// beat grid onto the tap; a running pattern continues on the new grid
+    /// without repeating the step just heard (as after a follower snap).
+    /// Following: treated as an observation.
     pub fn tap(&mut self, sample: f64, now: u64) {
         let Some(obs) = self.tap.tap(sample) else {
             return;
         };
         match self.mode {
             ClockMode::Internal => {
+                let before = self.internal;
                 if let Some(bpm) = obs.bpm {
                     self.internal.set_tempo(bpm, sample);
                 }
                 let beat = self.internal.beat_at_sample(sample);
                 self.internal.align(sample, beat.round());
-                self.realign(now);
+                if self.scheduler.is_playing() {
+                    let commit = self.commit_point(now);
+                    self.realign_continuous(commit, &before);
+                }
             }
             ClockMode::Follow(_) => self.observe(&obs, now),
         }
     }
 
     /// Quantized re-sync. Following: the next observation snaps phase
-    /// instead of slewing. Internal: the bar restarts at `now`.
+    /// instead of slewing. Internal: the bar restarts at the commit point
+    /// (`now` in lockstep; see [`Control::start`]).
     pub fn resync(&mut self, now: u64) {
         match self.mode {
             ClockMode::Internal => {
-                self.internal.reset(now as f64);
-                self.realign(now);
+                let commit = self.commit_point(now);
+                if !self.scheduler.is_playing() {
+                    self.restart_internal_at(commit);
+                    return;
+                }
+                let unplayed = self.drop_queued_from(commit);
+                self.restart_internal_at(commit);
+                let active = self.active();
+                let clock = AdjustedClock::new(&active, self.controls);
+                let step = self.scheduler.first_step_at_or_after(&clock, commit);
+                self.scheduler.seek(step, unplayed);
             }
             ClockMode::Follow(_) => self.follower.request_resync(),
         }
     }
 
-    /// After the timeline moved: drop already-queued triggers from `now` on
-    /// and continue from the first step at or after `now`.
-    fn realign(&mut self, now: u64) {
-        if !self.scheduler.is_playing() {
-            return;
-        }
-        let _ = self.producer.push(Event::flush(now));
-        self.queued.flush_from(now);
+    /// Puts the internal clock's beat 0 where step 0 will sound at
+    /// `sample`: latency compensation and nudge shift the steps against the
+    /// beat grid, and a restart is about when the downbeat is heard.
+    fn restart_internal_at(&mut self, sample: u64) {
+        let spb = self.internal.samples_per_beat();
+        let latency = self.controls.latency_ms * f64::from(self.sample_rate) / 1_000.0;
+        let anchor = sample as f64 + latency - self.controls.nudge_beats * spb;
+        self.internal.align(anchor, 0.0);
+        // Rounding must not move step 0 off `sample`.
         let active = self.active();
         let clock = AdjustedClock::new(&active, self.controls);
-        let step = self.scheduler.first_step_at_or_after(&clock, now);
-        self.scheduler.start_at(step);
+        let first = self.scheduler.step_sample(&clock, 0);
+        if first != sample {
+            self.internal
+                .align(anchor + sample as f64 - first as f64, 0.0);
+        }
     }
 
-    /// [`Control::realign`] after a follower snap. Nothing is heard twice:
-    /// the steps already heard (queued before `now`) stay as they were,
-    /// and nothing new lands within half a step after the last of them (a
-    /// small jump either way, or a forward jump of a whole number of steps,
-    /// would otherwise repeat that same musical moment). Within that limit
-    /// a step the jump left just behind `now` (by up to [`SNAP_GRACE_S`])
-    /// is played late instead of skipped, and after a jump back the new
-    /// timeline's steps play at once: the source replays what it jumped
-    /// back over, and so do we, instead of falling silent until our old
-    /// step number comes round again.
-    ///
-    /// What was heard comes from [`QueuedLog`], the samples steps were
-    /// actually queued at: the follower re-plans its timeline at every
-    /// report, so by now even the pre-snap timeline (`before`) can put a
-    /// queued step on the other side of `now`. `before` is only the
-    /// fallback when the log does not reach back to `now`.
-    ///
-    /// "Already heard" means queued before the commit point
-    /// ([`Control::commit_point`]): `now` when control and render run in
-    /// lockstep, a little later when the renderer runs on its own thread
-    /// and may already be playing past `now`.
+    /// For a restart: flushes every step queued from `commit` on (a step
+    /// whose grace note was already heard loses its hit, which leaves the
+    /// grace note as a pickup into the new downbeat rather than a second
+    /// hit just after it). Returns the first step dropped, or the next
+    /// unscheduled one.
+    fn drop_queued_from(&mut self, commit: u64) -> u64 {
+        let mut dropped = None;
+        for i in 0..self.queued.len {
+            let q = self.queued.newest(i);
+            if q.sample < commit {
+                break;
+            }
+            dropped = Some(q.step);
+        }
+        if dropped.is_some() {
+            self.send_flush(commit);
+        }
+        self.queued.flush_from(commit);
+        dropped.unwrap_or(self.scheduler.next_step())
+    }
+
+    /// [`Control::realign_continuous`] after a follower snap.
     fn realign_after_snap(&mut self, now: u64, before: &FollowerClock) {
         if !self.scheduler.is_playing() {
             return;
         }
         let commit = self.commit_point(now);
-        let _ = self.producer.push(Event::flush(commit));
-        // Walk back from the newest queued step: those at or after the
-        // commit point were just flushed; the first one before it was the
-        // last heard.
-        let mut unplayed = self.scheduler.next_step();
-        let mut heard = None;
-        for i in 0..self.queued.len {
-            let q = self.queued.newest(i);
-            if q.sample < commit {
-                heard = Some(q.sample as f64);
-                break;
-            }
-            unplayed = q.step;
-        }
+        self.realign_continuous(commit, before);
+    }
+
+    /// After the timeline moved under a running pattern (a follower snap,
+    /// a tap): flush what is queued from the commit point on and continue
+    /// on the new timeline. Nothing is heard twice: the steps already heard
+    /// (queued before `commit`; with a flam, if its grace note was) stay as
+    /// they were, and nothing new lands within half a step after the last
+    /// of them (a small jump either way, or a forward jump of a whole
+    /// number of steps, would otherwise repeat that same musical moment).
+    /// Within that limit a step the jump left just behind `commit` (by up
+    /// to [`SNAP_GRACE_S`]) is played late instead of skipped, and after a
+    /// jump back the new timeline's steps play at once: the source replays
+    /// what it jumped back over, and so do we, instead of falling silent
+    /// until our old step number comes round again.
+    ///
+    /// What was heard comes from [`QueuedLog`], the samples steps were
+    /// actually queued at: the follower re-plans its timeline at every
+    /// report, so by now even the pre-snap timeline (`before`) can put a
+    /// queued step on the other side of `commit`. `before` is only the
+    /// fallback when the log does not reach back to `commit`.
+    ///
+    /// "Already heard" means queued before the commit point
+    /// ([`Control::commit_point`]): `now` when control and render run in
+    /// lockstep, a little later when the renderer runs on its own thread
+    /// and may already be playing past `now`.
+    fn realign_continuous<C: ClockSource>(&mut self, commit: u64, before: &C) {
+        let cut = self.queued.cut(commit);
+        self.send_flush(cut.flush);
+        let unplayed = cut.dropped.unwrap_or(self.scheduler.next_step());
+        let mut heard = cut.heard.map(|q| q.sample as f64);
         if heard.is_none() && self.queued.len == QUEUED_MEMORY {
             // Everything remembered is still ahead: estimate the last step
             // heard from the old timeline.
@@ -503,23 +602,40 @@ impl Control {
                 heard = Some(old.sample_at_beat(self.scheduler.pattern().step_beat(last)));
             }
         }
-        self.queued.flush_from(commit);
+        self.queued.flush_from(cut.flush);
         let grace = (SNAP_GRACE_S * f64::from(self.sample_rate)).round() as u64;
         let mut from = commit.saturating_sub(grace);
         if let Some(heard) = heard {
-            let half_step = 0.5 * sequencer::BEATS_PER_STEP * self.follower.samples_per_beat();
-            from = from.max((heard + half_step).ceil().max(0.0) as u64);
+            from = from.max(self.half_step_after(heard));
         }
-        let new = AdjustedClock::new(&self.follower, self.controls);
+        let active = self.active();
+        let new = AdjustedClock::new(&active, self.controls);
         let step = self.scheduler.first_step_at_or_after(&new, from);
-        self.scheduler.start_at(step);
+        self.scheduler.seek(step, unplayed);
     }
 
-    /// The newest queued step stamped before `sample`.
-    fn last_heard_before(&self, sample: u64) -> Option<Queued> {
-        (0..self.queued.len)
-            .map(|i| self.queued.newest(i))
-            .find(|q| q.sample < sample)
+    /// The first sample at least half a step (on the active clock) after
+    /// `heard`.
+    fn half_step_after(&self, heard: f64) -> u64 {
+        let half_step = 0.5 * sequencer::BEATS_PER_STEP * self.active().samples_per_beat();
+        (heard + half_step).ceil().max(0.0) as u64
+    }
+
+    /// Queues a flush from `at`, or keeps it for the next tick if the queue
+    /// is full (it cannot be while every other producer honours
+    /// [`FLUSH_RESERVE`], unless several realigns pile up before the
+    /// renderer pulls). Two pending flushes merge into the earlier one.
+    fn send_flush(&mut self, at: u64) {
+        let at = self.pending_flush.take().map_or(at, |p| p.min(at));
+        if self.producer.push(Event::flush(at)).is_err() {
+            self.pending_flush = Some(at);
+        }
+    }
+
+    /// Pushes a non-flush event unless that would eat into the slots kept
+    /// free for a flush.
+    fn push_reserved(&mut self, event: Event) -> bool {
+        self.producer.vacant() > FLUSH_RESERVE && self.producer.push(event).is_ok()
     }
 
     /// Learns the render block from the positions the renderer publishes.
@@ -567,10 +683,7 @@ impl Control {
         value: f32,
         at: u64,
     ) -> bool {
-        let ok = self
-            .producer
-            .push(Event::param(at, ParamTarget::Voice(voice, param), value))
-            .is_ok();
+        let ok = self.push_reserved(Event::param(at, ParamTarget::Voice(voice, param), value));
         if ok {
             self.sent_params[voice.index()].set(dsp_param(param), value);
         }
@@ -601,14 +714,11 @@ impl Control {
         if gain == self.sent_gain {
             return true;
         }
-        let ok = self
-            .producer
-            .push(Event::param(
-                at,
-                ParamTarget::Master(MasterParam::OutputGain),
-                gain,
-            ))
-            .is_ok();
+        let ok = self.push_reserved(Event::param(
+            at,
+            ParamTarget::Master(MasterParam::OutputGain),
+            gain,
+        ));
         if ok {
             self.sent_gain = gain;
         }
@@ -622,14 +732,11 @@ impl Control {
             return true;
         }
         let value = if enabled { 1.0 } else { 0.0 };
-        let ok = self
-            .producer
-            .push(Event::param(
-                at,
-                ParamTarget::Master(MasterParam::Limiter),
-                value,
-            ))
-            .is_ok();
+        let ok = self.push_reserved(Event::param(
+            at,
+            ParamTarget::Master(MasterParam::Limiter),
+            value,
+        ));
         if ok {
             self.sent_limiter = enabled;
         }
@@ -681,6 +788,12 @@ impl Control {
                 self.realign_after_snap(now, &before);
             }
         }
+        if let Some(at) = self.pending_flush.take() {
+            self.send_flush(at);
+            if self.pending_flush.is_some() {
+                return 0;
+            }
+        }
         let active = active_of(self.mode, &self.internal, &self.follower);
         let clock = AdjustedClock::new(&active, self.controls);
         let first = self.scheduler.next_step();
@@ -691,9 +804,12 @@ impl Control {
         // for realigning after a snap.
         let end = self.scheduler.next_step();
         for step in first.max(end.saturating_sub(QUEUED_MEMORY as u64))..end {
-            let beat = self.scheduler.pattern().step_beat(step);
-            let sample = clock.sample_at_beat(beat).round().max(0.0) as u64;
-            self.queued.push(Queued { step, sample });
+            let (first, sample) = self.scheduler.step_span(&clock, step);
+            self.queued.push(Queued {
+                step,
+                first,
+                sample,
+            });
         }
         pushed
     }
@@ -809,13 +925,21 @@ mod tests {
         ctl.set_pattern(kicks());
         ctl.start(0);
         ctl.tick(0);
+        // Queues the kick on beat 1 (24 000).
+        ctl.tick(20_000);
         drain(&mut c);
-        ctl.resync(10_000);
-        ctl.tick(10_000);
+        ctl.resync(22_000);
+        ctl.tick(22_000);
         let events = drain(&mut c);
         assert!(matches!(events[0].kind, EventKind::Flush));
-        assert_eq!(events[0].sample, 10_000);
-        assert_eq!(events[1].sample, 10_000);
+        assert_eq!(events[0].sample, 22_000);
+        assert_eq!(events[1].sample, 22_000);
+        // Stopped, a re-sync only moves the bar; nothing is queued.
+        ctl.stop();
+        ctl.resync(30_000);
+        ctl.tick(30_000);
+        assert!(drain(&mut c).is_empty());
+        assert!(ctl.beat_at(30_000).abs() < 1e-12);
     }
 
     #[test]
@@ -1094,6 +1218,279 @@ mod tests {
             for w in hits.windows(2) {
                 assert_eq!(w[1] - w[0], 6_000, "{stop_at:?} {start_at}: {hits:?}");
             }
+        }
+    }
+
+    /// What the renderer would play: `(sample, voice, velocity)` triggers
+    /// in time order, every flush dropping the triggers at or after its
+    /// sample that were queued before it.
+    fn heard_triggers(events: &[Event]) -> Vec<(u64, VoiceId, f32)> {
+        let mut out = Vec::new();
+        for e in events {
+            match e.kind {
+                EventKind::Trigger { voice, velocity } => out.push((e.sample, voice, velocity)),
+                EventKind::Flush => out.retain(|t: &(u64, VoiceId, f32)| t.0 < e.sample),
+                EventKind::Param { .. } => {}
+            }
+        }
+        out.sort_by_key(|t| t.0);
+        out
+    }
+
+    /// Following with a one-bar limit, joining the source mid-song (at an
+    /// absolute step far from 0), plays exactly one bar.
+    #[test]
+    fn following_with_stop_after_plays_one_bar_from_the_join() {
+        let (mut ctl, mut c) = control();
+        ctl.set_pattern(sixteenths());
+        ctl.set_clock_mode(ClockMode::Follow(Precision::Exact), 0);
+        // The source is at beat 13.3 at sample 0: we join at step 54.
+        ctl.observe(&bar_obs(0.0, 13.3, 120.0), 0);
+        ctl.set_stop_after(Some(16));
+        ctl.start(0);
+        let mut events = Vec::new();
+        let mut now = 0;
+        while now < 200_000 {
+            ctl.tick(now);
+            events.extend(drain(&mut c));
+            now += 512;
+        }
+        assert_eq!(heard(&events).len(), 16);
+        assert!(!ctl.is_playing());
+    }
+
+    fn flams() -> Pattern {
+        let mut p = Pattern::empty();
+        *p.track_mut(VoiceId::Snare) = Track::parse("ffff ffff ffff ffff").unwrap();
+        p.flam = 1.0; // 40 ms = 1 920 samples
+        p
+    }
+
+    /// Every grace note is followed by exactly one main hit of its voice,
+    /// at most `flam` samples later, and every main hit has exactly one
+    /// grace.
+    fn assert_flams_whole(hits: &[(u64, VoiceId, f32)], flam: u64) {
+        let graces: Vec<u64> = hits.iter().filter(|h| h.2 < 0.65).map(|h| h.0).collect();
+        let mains: Vec<u64> = hits.iter().filter(|h| h.2 >= 0.65).map(|h| h.0).collect();
+        assert_eq!(
+            graces.len(),
+            mains.len(),
+            "graces {graces:?} mains {mains:?}"
+        );
+        for (g, m) in graces.iter().zip(&mains) {
+            assert!(m >= g && m - g <= flam, "grace {g} main {m}: {hits:?}");
+        }
+    }
+
+    /// A snap whose commit point falls between a step's grace note (heard)
+    /// and its main hit (not yet): the step is kept whole, never replayed
+    /// with a second grace note.
+    #[test]
+    fn a_snap_between_grace_and_hit_never_repeats_the_grace() {
+        for ahead in [0.000_1, 0.02, -0.02] {
+            let (mut ctl, mut c) = control();
+            ctl.set_pattern(flams());
+            ctl.set_clock_mode(ClockMode::Follow(Precision::Fine), 0);
+            ctl.observe(&bar_obs(0.0, 0.0, 120.0), 0);
+            ctl.start(0);
+            let mut events = Vec::new();
+            ctl.tick(0);
+            // Queues step 1: grace at 4 080, hit at 6 000.
+            ctl.tick(1_300);
+            events.extend(drain(&mut c));
+            ctl.resync(5_000);
+            let ours = ctl.follower_clock().beat_at_sample(5_000.0);
+            ctl.observe(&bar_obs(5_000.0, ours + ahead, 120.0), 5_000);
+            let mut now = 5_000;
+            while now < 60_000 {
+                ctl.tick(now);
+                now += 128;
+            }
+            events.extend(drain(&mut c));
+            let hits = heard_triggers(&events);
+            assert_flams_whole(&hits, 1_920);
+            let mains: Vec<u64> = hits.iter().filter(|h| h.2 >= 0.65).map(|h| h.0).collect();
+            assert_eq!(&mains[..2], &[0, 6_000], "{ahead}");
+            for w in mains.windows(2) {
+                assert!(w[1] - w[0] >= 3_000, "{ahead}: {mains:?}");
+            }
+        }
+    }
+
+    /// Parameter changes fill the queue: a re-sync's flush must still get
+    /// through, or the old timeline's steps play on top of the new one's.
+    #[test]
+    fn a_flush_gets_through_a_queue_full_of_param_changes() {
+        let (p, mut c) = event_queue(64);
+        let mut ctl = Control::new(48_000.0, p, Arc::new(SharedTiming::default()));
+        ctl.set_pattern(sixteenths());
+        ctl.start(0);
+        ctl.tick(0);
+        let mut events = drain(&mut c);
+        ctl.tick(2_000); // queues step 1 at 6 000
+        let mut value = 0.0;
+        while ctl.set_voice_param(VoiceId::Kick, VoiceParam::Tune, value, 2_000) {
+            value += 0.001;
+        }
+        ctl.resync(3_000);
+        events.extend(drain(&mut c));
+        let mut now = 3_000;
+        while now < 30_000 {
+            ctl.tick(now);
+            events.extend(drain(&mut c));
+            now += 128;
+        }
+        let hits = heard(&events);
+        assert_eq!(&hits[..3], &[0, 3_000, 9_000], "{hits:?}");
+    }
+
+    /// Re-sync pressed again and again while the renderer is stalled (no
+    /// pulls): flushes pile up past the reserve and some do not fit. They
+    /// wait, and nothing is scheduled in front of them. (With the reserve
+    /// honoured, a flush that does not fit only ever follows another flush
+    /// that already covered it, so this exercises the retry path rather
+    /// than proving it necessary.)
+    #[test]
+    fn flushes_that_do_not_fit_are_retried_before_anything_else() {
+        let (p, mut c) = event_queue(64);
+        let mut ctl = Control::new(48_000.0, p, Arc::new(SharedTiming::default()));
+        ctl.set_pattern(sixteenths());
+        ctl.start(0);
+        ctl.tick(0);
+        for _ in 0..200 {
+            ctl.resync(1_000);
+            ctl.tick(1_000);
+        }
+        let mut events = drain(&mut c);
+        let mut now = 1_000;
+        while now < 30_000 {
+            ctl.tick(now);
+            events.extend(drain(&mut c));
+            now += 128;
+        }
+        let hits = heard(&events);
+        assert_eq!(&hits[..4], &[0, 1_000, 7_000, 13_000], "{hits:?}");
+    }
+
+    /// The split API: control reads the renderer's published block start,
+    /// and the renderer has already pulled (and is playing) that block. An
+    /// internal re-sync restarts the bar at the commit point, not at the
+    /// stale block start, so the new downbeat is neither late nor laid on
+    /// top of a step that was already heard.
+    #[test]
+    fn split_internal_resync_restarts_at_the_commit_point() {
+        let timing = Arc::new(SharedTiming::default());
+        let (p, mut c) = event_queue(1_024);
+        let mut ctl = Control::new(48_000.0, p, Arc::clone(&timing));
+        ctl.set_pattern(sixteenths());
+        ctl.start(0);
+        let mut events = Vec::new();
+        for k in 0..=20u64 {
+            timing.publish(k * 512, 0);
+            ctl.tick_shared();
+        }
+        events.extend(drain(&mut c));
+        // Published 10 240; the renderer may play up to 11 264 before it
+        // sees a flush.
+        ctl.resync(timing.read().position);
+        ctl.tick_shared();
+        let after = drain(&mut c);
+        assert!(matches!(after[0].kind, EventKind::Flush));
+        assert_eq!(after[0].sample, 11_264);
+        assert_eq!(trigger_samples(&after)[0], 11_264);
+        events.extend(after);
+        for k in 21..=40u64 {
+            timing.publish(k * 512, 0);
+            ctl.tick_shared();
+        }
+        events.extend(drain(&mut c));
+        assert_eq!(&heard(&events)[..5], &[0, 6_000, 11_264, 17_264, 23_264]);
+    }
+
+    /// Internal clock, playing: a tap pulls the grid onto a beat that lies
+    /// after a step that was already heard. That step is not played again.
+    #[test]
+    fn an_internal_tap_never_doubles_a_step() {
+        let (mut ctl, mut c) = control();
+        ctl.set_pattern(sixteenths());
+        ctl.start(0);
+        let mut events = Vec::new();
+        let mut now = 0;
+        // Taps 30 ms behind the beat, each processed as it happens.
+        let taps = [49_440u64, 73_440, 97_440, 121_440];
+        while now < 160_000 {
+            for &t in &taps {
+                if (now..now + 128).contains(&t) {
+                    ctl.tap(t as f64, t);
+                }
+            }
+            ctl.tick(now);
+            events.extend(drain(&mut c));
+            now += 128;
+        }
+        let hits = heard(&events);
+        for w in hits.windows(2) {
+            assert!(w[1] - w[0] >= 3_000, "{hits:?}");
+            assert!(w[1] - w[0] <= 9_000, "{hits:?}");
+        }
+        // And the grid did move onto the taps.
+        assert!(hits.contains(&(121_440 + 6_000)), "{hits:?}");
+    }
+
+    /// Internal clock: pressing start while playing, or stop and start
+    /// within the lookahead, restarts the bar without the old run's queued
+    /// steps playing on top of the new run's.
+    #[test]
+    fn an_internal_restart_drops_the_old_runs_queued_steps() {
+        for stop in [false, true] {
+            let (mut ctl, mut c) = control();
+            ctl.set_pattern(sixteenths());
+            ctl.start(0);
+            let mut events = Vec::new();
+            let mut now = 0;
+            while now < 40_000 {
+                if now == 9_984 {
+                    if stop {
+                        ctl.stop();
+                    }
+                    ctl.start(now);
+                }
+                ctl.tick(now);
+                events.extend(drain(&mut c));
+                now += 128;
+            }
+            let hits = heard(&events);
+            assert_eq!(&hits[..5], &[0, 6_000, 9_984, 15_984, 21_984], "{hits:?}");
+        }
+    }
+
+    /// A restart between a queued step's grace note (heard) and its hit:
+    /// the old run's hit must not play after the new downbeat. (Deciding
+    /// "queued at or after the restart" by the grace note skipped the
+    /// flush altogether.)
+    #[test]
+    fn a_restart_between_grace_and_hit_drops_the_old_hit() {
+        for latency in [0.0, 7.5] {
+            let (mut ctl, mut c) = control();
+            ctl.set_pattern(flams());
+            ctl.set_latency_ms(latency);
+            ctl.start(0);
+            let mut events = Vec::new();
+            let mut now = 0;
+            while now < 30_000 {
+                if now == 4_992 {
+                    ctl.start(now);
+                }
+                ctl.tick(now);
+                events.extend(drain(&mut c));
+                now += 128;
+            }
+            let mains: Vec<u64> = heard_triggers(&events)
+                .iter()
+                .filter(|h| h.2 >= 0.65)
+                .map(|h| h.0)
+                .collect();
+            assert_eq!(&mains[..3], &[0, 4_992, 10_992], "{latency}: {mains:?}");
         }
     }
 }

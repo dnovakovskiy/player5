@@ -197,7 +197,8 @@ pub unsafe extern "C" fn p5_engine_stop(engine: *mut P5Engine) {
     }
 }
 
-/// Stops automatically after `steps` steps from the next start; `0` loops
+/// Stops automatically after `steps` steps, counted from the first step of
+/// the next start (set while playing: from the next step); `0` loops
 /// forever.
 ///
 /// # Safety

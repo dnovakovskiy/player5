@@ -25,4 +25,4 @@ pub use pattern::{
     Pattern, PatternParseError, Step, Track, VoiceId, BEATS_PER_STEP, FLAM_GRACE_RATIO,
     FLAM_SPACING_RANGE_S, MAX_SHUFFLE_BEATS, STEP_COUNT, UNACCENTED_VELOCITY,
 };
-pub use scheduler::Scheduler;
+pub use scheduler::{Scheduler, FLUSH_RESERVE};

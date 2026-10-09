@@ -208,8 +208,9 @@ impl Engine {
         Some((step % sequencer::STEP_COUNT as u64) as usize)
     }
 
-    /// Stops automatically after `steps` steps from the next start
-    /// (`None` loops forever).
+    /// Stops automatically after `steps` steps, counted from the first step
+    /// of the next start (set while playing: from the next step); `None`
+    /// loops forever. See [`Control::set_stop_after`].
     pub fn set_stop_after(&mut self, steps: Option<u64>) {
         self.control.set_stop_after(steps);
     }
