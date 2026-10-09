@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- App Sandbox for the distributable macOS app (ADR-0008). -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- Clock sources: Pro DJ Link, Opus Quad and Ableton Link send and
+	     receive UDP on the booth LAN, including binding well-known ports. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+	<!-- Audio output needs no entitlement. Audio input is reserved for
+	     measuring output latency through a loopback cable; the app does not
+	     open an input yet, so no microphone prompt appears. -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
+</plist>

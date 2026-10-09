@@ -1,0 +1,62 @@
+# XcodeGen spec for the distributable macOS app (ADR-0008).
+#
+#   scripts/build-xcframework.sh            # from the repo root, once per core change
+#   cd apps/mac && xcodegen generate        # writes Player5Mac.xcodeproj (gitignored)
+#   open Player5Mac.xcodeproj               # or: xcodebuild -project Player5Mac.xcodeproj -scheme Player5Mac
+#
+# One app target compiles the package's sources (Sources/Player5Kit and
+# Sources/Player5Mac) into a single module and links the Rust core from
+# Frameworks/Player5Core.xcframework. A project that sits next to
+# Package.swift does not reference its own directory as a local package;
+# the iOS project (apps/ios/project.yml) does consume the package.
+name: Player5Mac
+
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  Player5Mac:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/Player5Kit
+      - path: Sources/Player5Mac
+    dependencies:
+      # Static library + header + module map: link it, never embed it.
+      - framework: Frameworks/Player5Core.xcframework
+        embed: false
+        link: true
+    settings:
+      base:
+        PRODUCT_NAME: Player5
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.player5
+        INFOPLIST_FILE: App/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: App/Player5.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Automatic
+        # Ad-hoc signing for local builds; set a Developer ID team to
+        # distribute. CI builds with CODE_SIGNING_ALLOWED=NO.
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        COMBINE_HIDPI_IMAGES: YES
+
+schemes:
+  Player5Mac:
+    build:
+      targets:
+        Player5Mac: all
+    run:
+      config: Debug
+    archive:
+      config: Release

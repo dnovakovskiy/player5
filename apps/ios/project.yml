@@ -1,0 +1,64 @@
+# XcodeGen spec for the iOS app (ADR-0008).
+#
+#   scripts/build-xcframework.sh            # from the repo root, once per core change
+#   cd apps/ios && xcodegen generate        # writes Player5.xcodeproj (gitignored)
+#   open Player5.xcodeproj
+#
+# All app code lives in the shared Swift package at ../mac (product
+# Player5Kit, which carries the Rust core as a binary target). This target
+# adds only the @main entry point, Info.plist and signing settings.
+name: Player5
+
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+
+packages:
+  Player5Kit:
+    path: ../mac
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  Player5:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Sources
+    dependencies:
+      - package: Player5Kit
+        product: Player5Kit
+    settings:
+      base:
+        PRODUCT_NAME: Player5
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.player5
+        INFOPLIST_FILE: Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        # CI builds unsigned (xcodebuild ... CODE_SIGNING_ALLOWED=NO). Set
+        # your team here or in Xcode to run on a device.
+        DEVELOPMENT_TEAM: ""
+        # Enable once Apple grants com.apple.developer.networking.multicast
+        # (docs/ios-multicast-entitlement.md), together with the key in
+        # Player5.entitlements. Until then network clocks fail to start on
+        # devices and the app says so; the internal clock works.
+        # CODE_SIGN_ENTITLEMENTS: Player5.entitlements
+
+schemes:
+  Player5:
+    build:
+      targets:
+        Player5: all
+    run:
+      config: Debug
+    archive:
+      config: Release
