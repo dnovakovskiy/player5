@@ -11,7 +11,8 @@
     "check": "tsc --noEmit",
     "gen-core": "node scripts/gen-core.mjs",
     "verify-wasm": "node scripts/verify-wasm.mjs",
-    "test": "playwright test"
+    "test": "playwright test",
+    "build:artifact": "npm run build:single && node scripts/artifact.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
