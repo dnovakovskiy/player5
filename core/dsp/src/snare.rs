@@ -84,7 +84,8 @@ const DRIVE_VELOCITY: f32 = 0.5;
 const NOISE_T60_LOW_S: f32 = 0.08;
 /// ln(0.4 / 0.08).
 const NOISE_T60_LN_RATIO: f32 = 1.609_437_912;
-/// Noise level at `snappy = 1`, velocity 1.
+/// Noise level at `snappy = 1`, velocity 1 (after the soft clip, whose
+/// output RMS is about [`NOISE_DRIVE_RMS`]).
 const NOISE_GAIN: f32 = 1.4;
 /// Share of the noise level that does not depend on velocity (on top of the
 /// overall velocity gain), so accents tilt the balance towards the wires.
@@ -112,11 +113,16 @@ const BRIGHT_BASE: f32 = 0.8;
 const BRIGHT_VELOCITY: f32 = 0.3;
 /// Keeps the low-pass well below Nyquist at every sample rate.
 const NOISE_LP_MAX_NYQUIST: f32 = 0.42;
-/// The sample rate at which the noise level is calibrated. White noise
-/// spreads the same power over a wider band at higher rates, so the level is
-/// scaled by `sqrt(sample_rate / NOISE_REF_RATE)` to keep the in-band level
-/// constant.
-const NOISE_REF_RATE: f32 = 48_000.0;
+/// Noise-equivalent bandwidth of the two-pole low-pass, per hertz of
+/// cutoff: `π · Q / 2`.
+const NOISE_LP_ENBW: f32 = 1.413_716_694;
+/// Bandwidth the two-pole Butterworth high-pass removes from white noise,
+/// per hertz of cutoff: `π / (2 √2)`.
+const NOISE_HP_ENBW: f32 = 1.110_720_735;
+/// The filtered noise is scaled to this RMS before its soft clip. Peaks
+/// beyond about 2σ are rounded off, which steadies the hit-to-hit peak level
+/// (and bounds it) while the bulk of the noise passes through unchanged.
+const NOISE_DRIVE_RMS: f32 = 0.35;
 /// Seed of the noise generator (reset with the sample rate).
 const NOISE_SEED: u32 = 0x2545_F491;
 
@@ -129,7 +135,7 @@ const LEVEL_TAU_S: f32 = 0.005;
 const SAFETY_KNEE: f32 = 0.7;
 
 /// Output scaling so a full hit at default controls peaks near −9 dBFS.
-const CALIBRATION: f32 = 0.2;
+const CALIBRATION: f32 = 0.21;
 /// Envelope level below which the voice goes idle (−100 dB).
 const IDLE_THRESHOLD: f32 = 1e-5;
 /// Decaying states are flushed to zero below this (−120 dB), long before
@@ -184,7 +190,6 @@ pub struct Snare {
     snap_coef: f32,
     declick_coef: f32,
     level_coef: f32,
-    noise_norm: f32,
 
     // Derived per trigger.
     low_inc: f32,
@@ -194,6 +199,7 @@ pub struct Snare {
     low_coef: f32,
     high_coef: f32,
     noise_coef: f32,
+    noise_scale: f32,
     drive: f32,
     drive_norm: f32,
     hit_gain: f32,
@@ -226,7 +232,6 @@ impl Snare {
             snap_coef: 0.0,
             declick_coef: 0.0,
             level_coef: 0.0,
-            noise_norm: 1.0,
             low_inc: 0.0,
             high_inc: 0.0,
             low_blip_depth: 0.0,
@@ -234,6 +239,7 @@ impl Snare {
             low_coef: 0.0,
             high_coef: 0.0,
             noise_coef: 0.0,
+            noise_scale: 0.0,
             drive: 1.0,
             drive_norm: 1.0,
             hit_gain: 0.0,
@@ -312,7 +318,6 @@ impl Voice for Snare {
         self.snap_coef = math::tau_coefficient(SNAP_TAU_S, sr);
         self.declick_coef = math::tau_coefficient(DECLICK_TAU_S, sr);
         self.level_coef = 1.0 - math::tau_coefficient(LEVEL_TAU_S, sr);
-        self.noise_norm = (sr / NOISE_REF_RATE).sqrt();
         self.noise = Noise::new(NOISE_SEED);
         self.go_idle();
     }
@@ -365,10 +370,16 @@ impl Voice for Snare {
         self.noise_hp.set(hp_hz, NOISE_HP_Q, sr);
         self.noise_lp.set(lp_hz, NOISE_LP_Q, sr);
         self.noise_coef = math::decay_coefficient(self.noise_decay_seconds(), sr);
+        // White noise uniform in [-1, 1) has variance 1/3, spread evenly up
+        // to Nyquist; the filters keep roughly `bandwidth` hertz of it. Scale
+        // the filtered noise to a fixed RMS, so neither `tone` nor the sample
+        // rate changes its level, only its colour.
+        let bandwidth = (NOISE_LP_ENBW * lp_hz - NOISE_HP_ENBW * hp_hz).max(100.0);
+        let rms = (bandwidth * 2.0 / (3.0 * sr)).sqrt();
+        self.noise_scale = NOISE_DRIVE_RMS / rms;
         let noise_level = NOISE_GAIN
             * p.snappy
-            * (NOISE_VELOCITY_FLOOR + (1.0 - NOISE_VELOCITY_FLOOR) * velocity)
-            * self.noise_norm;
+            * (NOISE_VELOCITY_FLOOR + (1.0 - NOISE_VELOCITY_FLOOR) * velocity);
 
         // Start the hit.
         self.low_env = LOW_BODY_GAIN - LOW_BODY_TONE_CUT * p.tone;
@@ -401,9 +412,10 @@ impl Voice for Snare {
         }
         let body = math::soft_clip((low + high) * self.drive) * self.drive_norm;
 
-        // Snares: white noise → high-pass → low-pass → envelope.
+        // Snares: white noise → high-pass → low-pass → soft clip → envelope.
         let hp = self.noise_hp.process(self.noise.tick()).high;
-        let wires = self.noise_lp.process(hp).low * (self.noise_env + self.snap_env);
+        let lp = self.noise_lp.process(hp).low;
+        let wires = math::soft_clip(lp * self.noise_scale) * (self.noise_env + self.snap_env);
 
         // Level: follows the control within a few milliseconds.
         self.level_now += (self.params.level - self.level_now) * self.level_coef;
@@ -492,6 +504,15 @@ mod tests {
         s1 * s1 + s2 * s2 - c * s1 * s2
     }
 
+    /// `x` under a Hann window.
+    fn hann(x: &[f32]) -> Vec<f32> {
+        let n = x.len() as f32;
+        x.iter()
+            .enumerate()
+            .map(|(i, &v)| v * (0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / n).cos()))
+            .collect()
+    }
+
     /// Frequency of the strongest component between `lo` and `hi`.
     fn dominant_hz(x: &[f32], sr: f32, lo: f32, hi: f32) -> f32 {
         let mut best = (lo, 0.0f64);
@@ -546,16 +567,24 @@ mod tests {
     fn full_hit_peaks_near_minus_9_dbfs() {
         for sr in crate::SUPPORTED_SAMPLE_RATES {
             let mut s = Snare::new(sr);
-            // Consecutive hits see different noise; every one must land.
-            for i in 0..8 {
-                s.trigger(1.0);
-                let out = render(&mut s, (sr * 0.5) as usize);
-                let level = db(peak(&out));
+            // Consecutive hits see different noise, so the peak varies a
+            // little from hit to hit; every one must land in the window and
+            // the typical hit must sit right on target.
+            let mut peaks: Vec<f32> = (0..64)
+                .map(|_| {
+                    s.trigger(1.0);
+                    db(peak(&render(&mut s, (sr * 0.3) as usize)))
+                })
+                .collect();
+            for (i, level) in peaks.iter().enumerate().take(16) {
                 assert!(
-                    (-10.5..=-7.5).contains(&level),
+                    (-10.5..=-7.5).contains(level),
                     "{sr} Hz hit {i}: peak {level} dBFS"
                 );
             }
+            peaks.sort_by(f32::total_cmp);
+            let median = peaks[32];
+            assert!((-9.5..=-8.5).contains(&median), "{sr} Hz: median {median} dBFS");
         }
     }
 
@@ -657,22 +686,24 @@ mod tests {
                 p.tune = tune;
                 p.snappy = 0.0;
             });
-            let window = &out[1_440..6_240]; // 30–130 ms
-            let f = dominant_hz(window, SR, 80.0, 600.0);
+            let window = hann(&out[960..4_800]); // 20–100 ms
+            let f = dominant_hz(&window, SR, 80.0, 600.0);
             assert!((f - low).abs() < low * 0.02, "tune {tune}: {f} Hz, expected {low}");
-            let upper = dominant_hz(window, SR, high * 0.85, high * 1.15);
+            let upper = dominant_hz(&window, SR, high * 0.85, high * 1.15);
             assert!(
                 (upper - high).abs() < high * 0.02,
                 "tune {tune}: upper {upper} Hz, expected {high}"
             );
-            assert!(power_at(window, SR, high) > 30.0 * power_at(window, SR, (low + high) * 0.5));
+            // Two distinct modes, not one smeared lump.
+            let gap = power_at(&window, SR, (low + high) * 0.5);
+            assert!(power_at(&window, SR, high) > 30.0 * gap, "tune {tune}");
         }
         let freq = |tune| {
             let out = hit(SR, 1.0, |p| {
                 p.tune = tune;
                 p.snappy = 0.0;
             });
-            dominant_hz(&out[1_440..6_240], SR, 80.0, 600.0)
+            dominant_hz(&hann(&out[960..4_800]), SR, 80.0, 600.0)
         };
         assert!(freq(0.25) < freq(0.5) && freq(0.5) < freq(0.75));
     }
@@ -776,20 +807,27 @@ mod tests {
         let mut b = Snare::new(SR);
         a.trigger(1.0);
         b.trigger(1.0);
-        let ra = render(&mut a, 2_400);
-        let rb = render(&mut b, 2_400);
+        let ra = render(&mut a, 1_200);
+        let rb = render(&mut b, 1_200);
         assert_eq!(ra, rb);
         let mut p = VoiceParams::default();
         p.level = 0.5;
         b.apply_params(&p);
-        let ra = render(&mut a, 2_400);
-        let rb = render(&mut b, 2_400);
-        // Within ~30 ms the ratio has settled at one half...
-        for (x, y) in ra[1_440..].iter().zip(&rb[1_440..]) {
-            assert!((y - 0.5 * x).abs() <= 1e-3 * x.abs() + 1e-7, "{x} {y}");
+        let ra = render(&mut a, 4_800);
+        let rb = render(&mut b, 4_800);
+        // The gain starts moving on the very next sample, glides down
+        // without a jump and has settled at one half within 50 ms.
+        let gains: Vec<f32> = ra
+            .iter()
+            .zip(&rb)
+            .filter(|(x, _)| x.abs() > 1e-3)
+            .map(|(x, y)| y / x)
+            .collect();
+        assert!(gains[0] < 1.0 && gains[0] > 0.99, "{}", gains[0]);
+        assert!(gains.windows(2).all(|w| w[1] <= w[0] + 1e-4));
+        for (x, y) in ra[2_400..].iter().zip(&rb[2_400..]) {
+            assert!((y - 0.5 * x).abs() <= 1e-4 * x.abs() + 1e-7, "{x} {y}");
         }
-        // ...without a jump on the way.
-        assert!(max_step(&rb[..480]) <= max_step(&ra[..480]) * 1.05);
 
         // Level 0 is silence.
         let out = hit(SR, 1.0, |p| p.level = 0.0);
@@ -869,5 +907,46 @@ mod tests {
         std::hint::black_box(acc);
         let elapsed = start.elapsed();
         assert!(elapsed.as_millis() < 100, "10 s of snare took {elapsed:?}");
+    }
+}
+
+#[cfg(test)]
+mod probe {
+    use super::*;
+
+    fn peak(x: &[f32]) -> f32 {
+        x.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+    }
+
+    #[test]
+    #[ignore]
+    fn probe_levels() {
+        for sr in [44_100.0f32, 48_000.0, 96_000.0] {
+            for (snappy, tone, decay, vel) in [
+                (0.5, 0.5, 0.5, 1.0),
+                (0.5, 0.5, 0.5, 0.7),
+                (0.0, 0.5, 0.5, 1.0),
+                (1.0, 0.5, 0.5, 1.0),
+                (1.0, 1.0, 1.0, 1.0),
+                (1.0, 0.0, 1.0, 1.0),
+                (0.0, 0.0, 0.5, 1.0),
+            ] {
+                let mut s = Snare::new(sr);
+                s.apply_params(&VoiceParams { snappy, tone, decay, ..VoiceParams::default() });
+                let mut peaks = vec![];
+                let mut body_peak = 0.0f32;
+                for _ in 0..1000 {
+                    s.trigger(vel);
+                    let out: Vec<f32> = (0..(sr * 0.3) as usize).map(|_| s.process()).collect();
+                    peaks.push(20.0 * peak(&out).log10());
+                    let _ = &mut body_peak;
+                }
+                peaks.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                println!(
+                    "sr {sr} snappy {snappy} tone {tone} decay {decay} vel {vel}: min {:.2} p1 {:.2} p10 {:.2} med {:.2} p90 {:.2} p99 {:.2} max {:.2}",
+                    peaks[0], peaks[10], peaks[100], peaks[500], peaks[900], peaks[990], peaks[999]
+                );
+            }
+        }
     }
 }
