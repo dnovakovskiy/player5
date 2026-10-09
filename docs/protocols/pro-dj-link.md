@@ -479,9 +479,11 @@ on it; the builder copies the hardware.
 
 `fixtures/prolink/*.hex`: one packet per file, hex, with a header naming the
 capture (file, frame, addresses) or construction and the documenting PA
-section. Tests in `core/sync/src/prolink/tests.rs` parse every one and
+section. Tests in `core/sync/src/prolink/tests.rs` parse every one,
 rebuild the real beats, on-air, mixer status and mixer assignment packets
-byte for byte.
+byte for byte, and replay the captured mixer assignment into a joining
+source. Each real fixture was checked byte for byte against the frame its
+header names.
 
 | Fixture | Origin |
 |---------|--------|

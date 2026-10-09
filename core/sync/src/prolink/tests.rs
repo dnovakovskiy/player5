@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::packets::*;
-use super::source::{Received, Tracker};
+use super::source::{Output, Received, Tracker};
 use super::*;
 use crate::follower::{Phase, Precision};
 use crate::host_time;
@@ -144,6 +144,77 @@ fn real_mixer_assignment_exchange_matches_our_builders() {
     let finished = fixture("assignment-finished-cdj-2000nexus");
     assert_eq!(parse_assignment_finished(&finished), Ok(2));
     assert_eq!(build_assignment_finished("CDJ-2000nexus", 2), finished);
+}
+
+#[test]
+fn tracker_follows_the_captured_mixer_assignment() {
+    // Replays the mixer's side of the real channel-port exchange
+    // (LinkInfo.pcapng) into a joining tracker.
+    let us = Ipv4Addr::new(169, 254, 192, 112);
+    let mixer = Ipv4Addr::new(169, 254, 99, 60);
+    let settled_cdj = Ipv4Addr::new(169, 254, 244, 181);
+    let config = ProlinkConfig {
+        interface: Some(us),
+        ..ProlinkConfig::default()
+    };
+    let mut t = Tracker::new(&config, ProlinkPorts::default(), 0);
+    let mut now = 0;
+    let sends = |t: &mut Tracker| -> Vec<(Ipv4Addr, Vec<u8>)> {
+        t.take_output()
+            .into_iter()
+            .filter_map(|o| match o {
+                Output::Send { to, bytes } => Some((to, bytes)),
+                Output::Event(_) => None,
+            })
+            .collect()
+    };
+    // Run until the first stage-1 claim has gone out.
+    loop {
+        t.tick(now);
+        let sent = sends(&mut t);
+        if sent
+            .iter()
+            .any(|(_, b)| PacketKind::classify(Port::Announce, b) == Some(PacketKind::ClaimStage1))
+        {
+            break;
+        }
+        now += 10_000_000;
+    }
+    let at = |now: u64| now + 1_000_000;
+    let packet = |name: &str, from, now| Received {
+        port: Port::Announce,
+        data: fixture(name),
+        from,
+        at: now,
+    };
+    t.packet(&packet(
+        "assignment-intention-djm-2000nexus",
+        mixer,
+        at(now),
+    ));
+    let reply = sends(&mut t);
+    assert_eq!(reply.len(), 1, "one unicast answer");
+    assert_eq!(reply[0].0, mixer);
+    let r = parse_number_claim(&reply[0].1).unwrap();
+    assert!(r.assignment_request);
+    assert_eq!((r.number, r.ip), (None, Some(us)));
+
+    t.packet(&packet("assignment-djm-2000nexus", mixer, at(now)));
+    t.tick(at(now));
+    let claim = sends(&mut t);
+    let c3 = parse_number_claim(&claim[0].1).unwrap();
+    assert_eq!((c3.stage, c3.number, c3.counter), (3, Some(3), 1));
+
+    t.packet(&packet(
+        "assignment-finished-cdj-2000nexus",
+        settled_cdj,
+        at(now) + 1_000_000,
+    ));
+    t.tick(at(now) + 2_000_000);
+    let ka = sends(&mut t);
+    assert_eq!(ka.len(), 1);
+    let k = parse_keep_alive(&ka[0].1).unwrap();
+    assert_eq!((k.number, k.ip), (3, us));
 }
 
 #[test]
