@@ -76,6 +76,10 @@ pub const LOCK_TIMEOUT_S: f64 = 2.0;
 /// so two reports a few samples apart cannot kick the tempo.
 const MIN_UPDATE_BEATS: f64 = 1.0 / 96.0;
 
+/// Integral gain (fraction of critical damping) that refines the tempo of a
+/// source that reports none.
+const NO_TEMPO_GAIN: f64 = 0.25;
+
 /// Weight of the newest spacing in the running mean of observation
 /// spacings that sets the loop gains.
 const SPACING_SMOOTHING: f64 = 1.0 / 16.0;
@@ -111,10 +115,10 @@ impl Precision {
         match self {
             Self::Exact => Tuning {
                 acquire_obs: 1,
-                phase_tau: 0.25,
+                phase_tau: 0.1,
                 drift_gain: 1.0,
                 max_drift: 0.01,
-                slew_tau: 0.125,
+                slew_tau: 0.1,
                 max_slew: 0.05,
                 deadband_s: 0.0,
                 jump_s: 0.020,
@@ -123,8 +127,8 @@ impl Precision {
             },
             Self::Fine => Tuning {
                 acquire_obs: 1,
-                phase_tau: 0.75,
-                drift_gain: 0.1,
+                phase_tau: 0.5,
+                drift_gain: 0.05,
                 max_drift: 0.01,
                 slew_tau: 0.5,
                 max_slew: 0.04,
@@ -219,7 +223,7 @@ pub struct FollowerClock {
     last_observation: Option<f64>,
     last_phase_observation: Option<f64>,
     mean_spacing: Option<f64>,
-    last_phase_value: f64,
+    tempo_reported: bool,
     phase_error: f64,
 }
 
@@ -262,7 +266,7 @@ impl FollowerClock {
             last_observation: None,
             last_phase_observation: None,
             mean_spacing: None,
-            last_phase_value: 0.0,
+            tempo_reported: false,
             phase_error: 0.0,
         }
     }
@@ -360,24 +364,34 @@ impl FollowerClock {
             Phase::Beat(p) if p.is_finite() => Some((p, 1.0)),
             Phase::Bar(_) | Phase::Beat(_) | Phase::TempoOnly => None,
         };
-        let bpm = obs
+        let reported = obs
             .bpm
             .filter(|b| b.is_finite() && *b > 0.0)
-            .map(|b| b.clamp(Self::MIN_BPM, Self::MAX_BPM))
-            .or_else(|| target.and_then(|(p, m)| self.tempo_from_phase(s, p, m)));
-        if let Some((p, _)) = target {
-            self.last_phase_value = p;
-        }
+            .map(|b| b.clamp(Self::MIN_BPM, Self::MAX_BPM));
+        self.tempo_reported = reported.is_some();
+        // A source without tempo reports: right after a snap, take the
+        // tempo from the phase advance since that snap (the integral path
+        // refines it from then on).
+        let acquired_tempo = match (reported, target) {
+            (None, Some((p, m))) if self.updates == 0 => self.tempo_from_phase(s, p, m),
+            _ => None,
+        };
 
         // Carry the estimate forward to `s`. The tempo report describes the
         // tempo at `s`; across a change, average old and new (exact for a
         // linear ramp, half-way for a step at an unknown moment).
         let old_rate = self.est_rate();
-        if let Some(bpm) = bpm {
+        if let Some(bpm) = reported.or(acquired_tempo) {
             self.bpm = bpm;
         }
         let new_rate = self.est_rate();
-        self.est_beat += (s - self.est_sample) * 0.5 * (old_rate + new_rate);
+        // An acquired tempo is the average since the snap by construction.
+        let mean_rate = if acquired_tempo.is_some() {
+            new_rate
+        } else {
+            0.5 * (old_rate + new_rate)
+        };
+        self.est_beat += (s - self.est_sample) * mean_rate;
         self.est_sample = s;
         self.last_observation = Some(s);
 
@@ -427,25 +441,22 @@ impl FollowerClock {
         self.discontinuity = true;
     }
 
-    /// For a phase report without a tempo: the tempo implied by the phase
-    /// advance since the previous phase report, blended into the current
-    /// estimate (a source that never reports tempo can still be followed;
-    /// one that does is better).
+    /// The source tempo implied by the phase advance from the estimate's
+    /// anchor (the last snap) to this report, unwrapped around what the
+    /// current tempo predicts. `None` without a usable anchor.
     fn tempo_from_phase(&self, s: f64, phase: f64, modulus: f64) -> Option<f64> {
-        let last = self.last_phase_observation?;
-        let samples = s - last;
-        if samples <= 0.0 || self.lock != Lock::Track {
+        if self.lock != Lock::Track && self.acquired == 0 {
             return None;
         }
-        // Unwrap the phase advance around what the current tempo predicts.
+        let samples = s - self.est_sample;
+        if samples <= 0.0 || self.last_phase_observation.is_none() {
+            return None;
+        }
         let expected = samples * self.est_rate();
-        let beats = expected + wrap(phase - self.last_phase_value - expected, modulus);
-        let measured = beats / samples * 60.0 * self.sample_rate / (1.0 + self.drift);
-        if !(Self::MIN_BPM..=Self::MAX_BPM).contains(&measured) {
-            return None;
-        }
-        let weight = expected / (expected + 4.0 * self.tuning.phase_tau);
-        Some(self.bpm + (measured - self.bpm) * weight)
+        let anchor_phase = self.est_beat.rem_euclid(modulus);
+        let beats = expected + wrap(phase - anchor_phase - expected, modulus);
+        let bpm = beats / samples * 60.0 * self.sample_rate / (1.0 + self.drift);
+        (Self::MIN_BPM..=Self::MAX_BPM).contains(&bpm).then_some(bpm)
     }
 
     /// Estimated source tempo in beats per sample.
@@ -584,9 +595,21 @@ impl FollowerClock {
         if spacing.is_finite() && spacing > 0.0 {
             // Critically damped alpha-beta: beta = (1 - sqrt(1 - alpha))^2.
             let theta = (1.0 - fade).sqrt();
-            let beta = self.tuning.drift_gain * (1.0 - theta) * (1.0 - theta);
-            let max = self.tuning.max_drift;
-            self.drift = (self.drift + beta * err / spacing.max(MIN_UPDATE_BEATS)).clamp(-max, max);
+            let beta = (1.0 - theta) * (1.0 - theta);
+            let slope = err / spacing.max(MIN_UPDATE_BEATS);
+            if self.tempo_reported {
+                // The integral only corrects the reported tempo for clock
+                // skew and quantisation: small, slow, clamped.
+                let max = self.tuning.max_drift;
+                self.drift = (self.drift + self.tuning.drift_gain * beta * slope).clamp(-max, max);
+            } else {
+                // No tempo report: the integral path is the tempo estimate
+                // (learning `drift` too would split one error between two
+                // integrators). Overdamped: the tempo was acquired at the
+                // snap, this only refines it, and a display wants it calm.
+                let gain = NO_TEMPO_GAIN * beta * slope;
+                self.bpm = (self.bpm * (1.0 + gain)).clamp(Self::MIN_BPM, Self::MAX_BPM);
+            }
         }
     }
 
@@ -747,6 +770,8 @@ mod tests {
         shift: Option<(f64, f64)>,
         /// Initial follower beat offset from the source (beats).
         start_offset: f64,
+        /// Whether observations carry the tempo.
+        reports_bpm: bool,
         seed: u64,
     }
 
@@ -764,6 +789,7 @@ mod tests {
                 ramp: None,
                 shift: None,
                 start_offset: 0.37,
+                reports_bpm: true,
                 seed: 0x9E37_79B9_7F4A_7C15,
             }
         }
@@ -790,27 +816,39 @@ mod tests {
         max_rate_dev: f64,
     }
 
+
     impl Run {
-        fn max_abs_error_after(&self, t: f64) -> f64 {
+        fn max_abs_error_between(&self, from: f64, to: f64) -> f64 {
             self.errors
                 .iter()
-                .filter(|(s, _)| *s >= t)
+                .filter(|(t, _)| *t >= from && *t < to)
                 .map(|(_, e)| e.abs())
                 .fold(0.0, f64::max)
         }
 
-        fn rms_error_after(&self, t: f64) -> f64 {
+        fn max_abs_error_after(&self, from: f64) -> f64 {
+            self.max_abs_error_between(from, f64::INFINITY)
+        }
+
+        fn rms_error_after(&self, from: f64) -> f64 {
             let v: Vec<f64> = self
                 .errors
                 .iter()
-                .filter(|(s, _)| *s >= t)
+                .filter(|(t, _)| *t >= from)
                 .map(|(_, e)| e * e)
                 .collect();
             (v.iter().sum::<f64>() / v.len() as f64).sqrt()
         }
 
-        fn snaps_after(&self, t: f64) -> usize {
-            self.snaps.iter().filter(|s| **s > t).count()
+        /// Seconds after `from` until the error stays within `tol_ms`.
+        fn settle_time(&self, from: f64, tol_ms: f64) -> f64 {
+            let last_bad = self
+                .errors
+                .iter()
+                .filter(|(t, e)| *t >= from && e.abs() > tol_ms)
+                .map(|(t, _)| *t)
+                .fold(from, f64::max);
+            last_bad - from
         }
     }
 
@@ -850,7 +888,7 @@ mod tests {
                 let obs = Observation {
                     sample,
                     phase,
-                    bpm: Some(sc.reported_bpm(at / SR)),
+                    bpm: sc.reports_bpm.then(|| sc.reported_bpm(at / SR)),
                 };
                 pending.push((at + sc.latency_s * SR, obs));
                 next_obs += sc.every;
@@ -876,16 +914,6 @@ mod tests {
                 snaps.push(now / SR);
             }
             let ours = f.beat_at_sample(now);
-            if std::env::var_os("P5_TRACE").is_some() && (now as u64) % 6_144 == 0 && now / SR > 9.5 && now / SR < 16.0 {
-                println!(
-                    "{:.2}s est {:+.2} ms out {:+.2} ms drift {:+.6} n {}",
-                    now / SR,
-                    wrap(f.est_beat_at(now) - beat, modulus) * 60_000.0 / sc.bpm,
-                    wrap(ours - beat, modulus) * 60_000.0 / sc.bpm,
-                    f.drift,
-                    f.updates
-                );
-            }
             if f.is_locked() {
                 let err = wrap(ours - beat, modulus);
                 let bpm = sc.reported_bpm(now / SR) * (1.0 + sc.skew);
@@ -903,60 +931,6 @@ mod tests {
             snaps,
             max_rate_dev,
         }
-    }
-
-    #[test]
-    fn follows_tempo_and_bar_phase() {
-        let mut f = FollowerClock::new(SR, 120.0, Precision::Exact);
-        assert!(!f.is_locked());
-        f.observe(
-            &Observation {
-                sample: 10_000.0,
-                phase: Phase::Bar(1.0),
-                bpm: Some(124.0),
-            },
-            10_000.0,
-        );
-        assert!(f.is_locked());
-        assert!(f.take_discontinuity(), "first lock is a snap");
-        assert!((f.tempo_bpm() - 124.0).abs() < 1e-9);
-        let beat = f.beat_at_sample(10_000.0);
-        assert!(((beat.rem_euclid(4.0)) - 1.0).abs() < 1e-9, "{beat}");
-    }
-
-    #[test]
-    fn round_trip_through_a_slew() {
-        let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
-        f.observe(
-            &Observation {
-                sample: 0.0,
-                phase: Phase::Bar(0.0),
-                bpm: Some(120.0),
-            },
-            0.0,
-        );
-        // Source a little ahead: the output starts a slew.
-        f.observe(
-            &Observation {
-                sample: 24_000.0,
-                phase: Phase::Bar(1.02),
-                bpm: Some(120.0),
-            },
-            24_000.0,
-        );
-        assert!(f.slew_end > f.anchor_sample, "a slew is planned");
-        for beat in [0.5, 1.0, 1.01, 1.5, 3.0, 100.25] {
-            let back = f.beat_at_sample(f.sample_at_beat(beat));
-            assert!((back - beat).abs() < 1e-9, "{beat} -> {back}");
-        }
-    }
-
-    #[test]
-    fn wrap_is_symmetric() {
-        assert_eq!(wrap(0.25, 1.0), 0.25);
-        assert_eq!(wrap(0.75, 1.0), -0.25);
-        assert_eq!(wrap(-3.5, 4.0), 0.5);
-        assert_eq!(wrap(2.0, 4.0), -2.0);
     }
 
     /// The typical observation pattern for each precision.
@@ -984,55 +958,364 @@ mod tests {
         sc
     }
 
-    #[test]
-    #[ignore = "trace; run with P5_TRACE=1 --ignored --nocapture"]
-    fn trace() {
-        let p = match std::env::var("P5_TRACE").as_deref() {
-            Ok("exact") => Precision::Exact,
-            Ok("fine") => Precision::Fine,
-            Ok("jittery") => Precision::Jittery,
-            _ => Precision::Coarse,
-        };
-        let mut sc = typical(p);
-        if std::env::var_os("P5_NUDGE").is_some() {
-            sc.shift = Some((10.0, 0.6 * p.tuning().jump_s * sc.bpm / 60.0));
-        }
-        let r = run(&sc);
-        println!("snaps {:?}", r.snaps);
+    /// A few seeds per scenario so no assertion rests on one lucky draw.
+    fn seeds(sc: Scenario) -> impl Iterator<Item = Run> {
+        (1..=4u64).map(move |k| {
+            let mut sc = sc;
+            sc.seed = k.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            run(&sc)
+        })
     }
+
+    fn obs(sample: f64, phase: Phase, bpm: f64) -> Observation {
+        Observation {
+            sample,
+            phase,
+            bpm: Some(bpm),
+        }
+    }
+
+    /// Feeds a perfect 120 BPM bar-phase source with one report per beat
+    /// from beat `from` to `to`, ticking in between.
+    fn feed_perfect(f: &mut FollowerClock, from: u32, to: u32) {
+        for k in from..to {
+            let s = f64::from(k) * 24_000.0;
+            f.observe(&obs(s, Phase::Bar(f64::from(k % 4)), 120.0), s);
+            f.advance(s + 12_000.0);
+        }
+    }
+
+    // ---- basics ----------------------------------------------------------
+
+    #[test]
+    fn follows_tempo_and_bar_phase() {
+        let mut f = FollowerClock::new(SR, 120.0, Precision::Exact);
+        assert!(!f.is_locked());
+        f.observe(&obs(10_000.0, Phase::Bar(1.0), 124.0), 10_000.0);
+        assert!(f.is_locked());
+        assert!(f.take_discontinuity(), "first lock is a snap");
+        assert!((f.tempo_bpm() - 124.0).abs() < 1e-9);
+        let beat = f.beat_at_sample(10_000.0);
+        assert!(((beat.rem_euclid(4.0)) - 1.0).abs() < 1e-9, "{beat}");
+    }
+
+    #[test]
+    fn round_trip_through_a_slew() {
+        let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
+        f.observe(&obs(0.0, Phase::Bar(0.0), 120.0), 0.0);
+        // Source a little ahead: the output starts a slew.
+        f.observe(&obs(24_000.0, Phase::Bar(1.02), 120.0), 24_000.0);
+        assert!(f.slew_end > f.anchor_sample, "a slew is planned");
+        for beat in [0.5, 1.0, 1.01, 1.5, 3.0, 100.25] {
+            let back = f.beat_at_sample(f.sample_at_beat(beat));
+            assert!((back - beat).abs() < 1e-9, "{beat} -> {back}");
+        }
+    }
+
+    #[test]
+    fn wrap_is_symmetric() {
+        assert_eq!(wrap(0.25, 1.0), 0.25);
+        assert_eq!(wrap(0.75, 1.0), -0.25);
+        assert_eq!(wrap(-3.5, 4.0), 0.5);
+        assert_eq!(wrap(2.0, 4.0), -2.0);
+    }
+
+    #[test]
+    fn beat_phase_keeps_our_bar_count_and_bar_phase_aligns_bars() {
+        // Our timeline sits at beat 6.02 (bar position 2.02) at sample 0.
+        let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
+        f.reset(0.0, 6.02);
+        f.observe(&obs(0.0, Phase::Beat(0.0), 120.0), 0.0);
+        assert!((f.beat_at_sample(0.0) - 6.0).abs() < 1e-9);
+
+        let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
+        f.reset(0.0, 6.02);
+        f.observe(&obs(0.0, Phase::Bar(0.0), 120.0), 0.0);
+        let beat = f.beat_at_sample(0.0);
+        assert!(beat.rem_euclid(4.0).abs() < 1e-9, "{beat}");
+        assert!((beat - 6.02).abs() <= 2.0, "nearest downbeat: {beat}");
+    }
+
+    #[test]
+    fn tempo_only_moves_tempo_continuously() {
+        let mut f = FollowerClock::new(SR, 120.0, Precision::Jittery);
+        let _ = f.take_discontinuity();
+        let before = f.beat_at_sample(30_000.0);
+        f.observe(&obs(30_000.0, Phase::TempoOnly, 90.0), 30_000.0);
+        assert!(!f.take_discontinuity());
+        assert!(f.is_locked());
+        assert!((f.beat_at_sample(30_000.0) - before).abs() < 1e-12);
+        assert!((f.tempo_bpm() - 90.0).abs() < 1e-9);
+        assert!((f.samples_per_beat() - 32_000.0).abs() < 1e-6);
+    }
+
+    // ---- convergence and steady state per precision -----------------------
+
+    /// Exact (Link, CDJ-3000 precise position): sub-millisecond steady
+    /// state; after a 10 ms nudge, back under 1 ms within a beat.
+    #[test]
+    fn exact_is_sub_ms_and_relocks_within_a_beat() {
+        let mut sc = typical(Precision::Exact);
+        sc.shift = Some((10.0, 0.010 * sc.bpm / 60.0));
+        let beat_s = 60.0 / sc.bpm;
+        for r in seeds(sc) {
+            assert_eq!(r.snaps.len(), 1, "only the first lock snaps");
+            assert!(r.max_abs_error_between(0.5, 10.0) < 0.5);
+            let settle = r.settle_time(10.0, 1.0);
+            assert!(settle < beat_s, "{settle} s");
+            assert!(r.max_abs_error_after(10.0 + 2.0 * beat_s) < 0.5);
+        }
+    }
+
+    /// Fine (beat packets, ±3 ms jitter): a few ms at worst, about a
+    /// millisecond rms; a 30 ms nudge is absorbed within about two beats.
+    #[test]
+    fn fine_tracks_jitter_and_relocks_within_two_beats() {
+        let mut sc = typical(Precision::Fine);
+        sc.shift = Some((10.0, 0.030 * sc.bpm / 60.0));
+        let beat_s = 60.0 / sc.bpm;
+        for r in seeds(sc) {
+            assert_eq!(r.snaps.len(), 1, "jitter and nudges never snap");
+            assert!(r.max_abs_error_between(1.0, 10.0) < 3.0);
+            let rms = r.rms_error_after(20.0);
+            assert!(rms < 1.5, "{rms} ms");
+            let settle = r.settle_time(10.0, 5.0);
+            assert!(settle < 2.5 * beat_s, "{settle} s");
+            assert!(r.max_abs_error_after(20.0) < 3.0);
+        }
+    }
+
+    /// Coarse (Opus Quad, ±200 ms): trust the tempo, average the phase
+    /// over many beats, never jump after the first lock.
+    #[test]
+    fn coarse_phase_noise_is_averaged_without_jumps() {
+        let sc = typical(Precision::Coarse);
+        for r in seeds(sc) {
+            assert_eq!(r.snaps.len(), 1, "the timeline never jumps after lock");
+            let first = r.max_abs_error_after(0.0);
+            assert!(first < 100.0, "{first} ms");
+            let later = r.max_abs_error_after(60.0);
+            assert!(later < 50.0, "{later} ms");
+            let rms = r.rms_error_after(60.0);
+            assert!(rms < 25.0, "{rms} ms");
+            // Slewing only, within the precision's bound (plus the tempo
+            // skew between the clocks).
+            assert!(r.max_rate_dev < 0.0105, "{}", r.max_rate_dev);
+        }
+    }
+
+    /// Jittery (MIDI clock, 24 ppqn, ±1 ms): well under a millisecond.
+    #[test]
+    fn jittery_pulses_are_smoothed() {
+        for r in seeds(typical(Precision::Jittery)) {
+            assert_eq!(r.snaps.len(), 1);
+            let worst = r.max_abs_error_after(2.0);
+            assert!(worst < 1.0, "{worst} ms");
+            assert!(r.rms_error_after(2.0) < 0.5);
+        }
+    }
+
+    // ---- tempo ramps --------------------------------------------------------
+
+    /// A pitch-fader move of +6 BPM over four seconds.
+    #[test]
+    fn tempo_ramps_are_tracked() {
+        for (p, tol_ms) in [
+            (Precision::Exact, 0.5),
+            (Precision::Fine, 4.0),
+            (Precision::Jittery, 1.5),
+        ] {
+            let mut sc = typical(p);
+            sc.ramp = Some((10.0, 14.0, sc.bpm + 6.0));
+            for r in seeds(sc) {
+                assert_eq!(r.snaps.len(), 1, "{p:?}");
+                let worst = r.max_abs_error_after(2.0);
+                assert!(worst < tol_ms, "{p:?}: {worst} ms");
+                assert!((r.follower.tempo_bpm() - (sc.bpm + 6.0)).abs() < 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn tempo_is_estimated_when_the_source_reports_none() {
+        let mut sc = typical(Precision::Fine);
+        sc.reports_bpm = false;
+        sc.bpm = 131.0; // the follower starts at 120
+        for r in seeds(sc) {
+            let bpm = r.follower.tempo_bpm();
+            assert!((bpm - 131.0).abs() < 0.1, "{bpm}");
+            let worst = r.max_abs_error_after(15.0);
+            assert!(worst < 3.0, "{worst} ms");
+        }
+    }
+
+    // ---- snaps --------------------------------------------------------------
+
+    #[test]
+    fn resync_snaps_on_the_next_observation() {
+        let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
+        feed_perfect(&mut f, 0, 8);
+        assert!(f.take_discontinuity(), "first lock");
+        // The source is now 10 ms (0.02 beat) ahead: normally a slew...
+        let s = 8.0 * 24_000.0;
+        f.observe(&obs(s, Phase::Bar(0.02), 120.0), s);
+        assert!(!f.take_discontinuity());
+        assert!((f.beat_at_sample(s) - 8.0).abs() < 1e-6);
+        // ...but after a resync request the next observation snaps.
+        f.request_resync();
+        let s = 9.0 * 24_000.0;
+        f.observe(&obs(s, Phase::Bar(1.02), 120.0), s);
+        assert!(f.take_discontinuity());
+        assert!((f.beat_at_sample(s) - 9.02).abs() < 1e-9);
+        assert!(!f.take_discontinuity(), "reported once");
+    }
+
+    /// The DJ cues 1.5 beats away: ignored as an outlier at first, snapped
+    /// to once it has held for the precision's hold time.
+    #[test]
+    fn a_cue_jump_snaps_after_the_hold_time() {
+        let mut sc = typical(Precision::Fine);
+        sc.shift = Some((10.0, 1.5));
+        let beat_s = 60.0 / sc.bpm;
+        for r in seeds(sc) {
+            assert_eq!(r.snaps.len(), 2, "{:?}", r.snaps);
+            let delay = r.snaps[1] - 10.0;
+            assert!(delay >= 1.5 * beat_s && delay < 3.0 * beat_s, "{delay}");
+            assert!(r.max_abs_error_after(r.snaps[1]) < 3.0);
+        }
+        // Same for a bar-blind source that jumps by a fraction of a beat.
+        let mut sc = typical(Precision::Exact);
+        sc.kind = Kind::Beat;
+        sc.shift = Some((10.0, 0.3));
+        for r in seeds(sc) {
+            assert_eq!(r.snaps.len(), 2, "{:?}", r.snaps);
+            assert!(r.max_abs_error_after(r.snaps[1] + 0.01) < 0.5);
+        }
+    }
+
+    #[test]
+    fn a_single_outlier_is_ignored() {
+        let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
+        feed_perfect(&mut f, 0, 8);
+        let _ = f.take_discontinuity();
+        // One report 150 ms late (a network hiccup).
+        let s = 8.0 * 24_000.0 + 7_200.0;
+        f.observe(&obs(s, Phase::Bar(0.0), 120.0), s);
+        f.advance(s + 1_000.0);
+        assert!(!f.take_discontinuity());
+        feed_perfect(&mut f, 9, 12);
+        assert!(!f.take_discontinuity());
+        assert!((f.beat_at_sample(12.0 * 24_000.0) - 12.0).abs() < 1e-3);
+    }
+
+    // ---- delivery quirks ----------------------------------------------------
+
+    #[test]
+    fn late_duplicate_and_out_of_order_observations() {
+        let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
+        feed_perfect(&mut f, 0, 4);
+        let _ = f.take_discontinuity();
+        let snapshot = f.clone();
+        // A duplicate of the last report and an older one change nothing.
+        let last = 3.0 * 24_000.0;
+        f.observe(&obs(last, Phase::Bar(3.0), 120.0), last + 5_000.0);
+        f.observe(&obs(last - 24_000.0, Phase::Bar(0.5), 120.0), last + 5_000.0);
+        assert_eq!(f.beat_at_sample(1e6), snapshot.beat_at_sample(1e6));
+        // A late one (300 ms old when it arrives) is used at its own sample:
+        // a perfect report must not disturb a perfect lock.
+        let s = 4.0 * 24_000.0;
+        f.observe(&obs(s, Phase::Bar(0.0), 120.0), s + 14_400.0);
+        assert!(!f.take_discontinuity());
+        assert!((f.beat_at_sample(s + 14_400.0) - 4.6).abs() < 1e-9);
+        // Reports more than the lock timeout away from now are stale.
+        f.observe(&obs(s + 1_000.0, Phase::Bar(1.0), 140.0), s + 3.0 * SR);
+        assert!((f.tempo_bpm() - 120.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn loses_lock_when_observations_stop_and_reacquires() {
+        let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
+        f.observe(&obs(0.0, Phase::Beat(0.0), 126.0), 0.0);
+        let _ = f.take_discontinuity();
+        f.advance(SR);
+        assert!(f.is_locked());
+        f.advance(3.0 * SR);
+        assert!(!f.is_locked());
+        // Free-runs at the last tempo, continuously.
+        assert!((f.tempo_bpm() - 126.0).abs() < 1e-9);
+        let a = f.beat_at_sample(3.0 * SR);
+        let b = f.beat_at_sample(4.0 * SR);
+        assert!((b - a - 126.0 / 60.0).abs() < 1e-9);
+        assert!(!f.take_discontinuity());
+        // The source comes back on our grid (within the jump threshold):
+        // tracking resumes without a snap.
+        let s = 4.0 * SR;
+        let p = (f.beat_at_sample(s) + 0.01).rem_euclid(1.0);
+        f.observe(&obs(s, Phase::Beat(p), 126.0), s);
+        assert!(f.is_locked());
+        assert!(!f.take_discontinuity());
+        // Lost again; this time it comes back somewhere else: snap.
+        f.advance(7.0 * SR);
+        assert!(!f.is_locked());
+        let s = 7.5 * SR;
+        let p = (f.beat_at_sample(s) + 0.4).rem_euclid(1.0);
+        f.observe(&obs(s, Phase::Beat(p), 126.0), s);
+        assert!(f.take_discontinuity());
+        let got = f.beat_at_sample(s).rem_euclid(1.0);
+        assert!((got - p).abs() < 1e-9, "{got} vs {p}");
+    }
+
+    #[test]
+    fn precision_change_keeps_the_timeline() {
+        let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
+        feed_perfect(&mut f, 0, 4);
+        let _ = f.take_discontinuity();
+        let before = f.beat_at_sample(100_000.0);
+        f.set_precision(Precision::Exact);
+        assert_eq!(f.precision(), Precision::Exact);
+        assert!(f.is_locked());
+        feed_perfect(&mut f, 4, 8);
+        assert!(!f.take_discontinuity());
+        assert!((f.beat_at_sample(100_000.0) - before).abs() < 1e-9);
+    }
+
+    // ---- tuning report (not a test) -----------------------------------------
 
     #[test]
     #[ignore = "tuning report; run with --ignored --nocapture"]
     fn tuning_report() {
+        type Edit = fn(&mut Scenario);
+        let edits: [(&str, Edit); 4] = [
+            ("steady", |_| {}),
+            ("nudge", |sc| {
+                sc.shift = Some((10.0, 0.6 * sc.precision.tuning().jump_s * sc.bpm / 60.0));
+            }),
+            ("ramp", |sc| sc.ramp = Some((10.0, 14.0, sc.bpm + 6.0))),
+            ("cue", |sc| sc.shift = Some((10.0, 1.5))),
+        ];
         for p in [
             Precision::Exact,
             Precision::Fine,
             Precision::Coarse,
             Precision::Jittery,
         ] {
-            for (name, edit) in [
-                ("steady", (|_: &mut Scenario| {}) as fn(&mut Scenario)),
-                ("nudge", |sc| sc.shift = Some((10.0, 0.6 * sc.precision.tuning().jump_s * sc.bpm / 60.0))),
-                ("ramp", |sc| sc.ramp = Some((10.0, 14.0, sc.bpm + 6.0))),
-                ("cue", |sc| sc.shift = Some((10.0, 1.5))),
-            ] {
-                let mut worst: (f64, f64, f64, f64, usize, f64) = (0.0, 0.0, 0.0, 0.0, 0, 0.0);
-                for seed in 1..=6u64 {
-                    let mut sc = typical(p);
-                    sc.seed = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                    edit(&mut sc);
-                    let r = run(&sc);
-                    let after = sc.shift.map_or(5.0, |(at, _)| at);
-                    worst.0 = worst.0.max(r.max_abs_error_after(5.0));
-                    worst.1 = worst.1.max(r.max_abs_error_after(after + 4.0));
-                    worst.2 = worst.2.max(r.rms_error_after(60.0f64.min(sc.seconds / 2.0)));
-                    worst.3 = worst.3.max(r.max_rate_dev);
-                    worst.4 = worst.4.max(r.snaps.len());
-                    worst.5 = worst.5.max((r.follower.tempo_bpm() / (sc.reported_bpm(sc.seconds) * (1.0 + sc.skew)) - 1.0).abs());
+            for (name, edit) in edits {
+                let mut sc = typical(p);
+                edit(&mut sc);
+                let event = sc.shift.map_or(10.0, |(at, _)| at);
+                let mut worst = [0.0f64; 4];
+                let mut snaps = 0;
+                for r in seeds(sc) {
+                    let steady = r.max_abs_error_between(5.0, event);
+                    worst[0] = worst[0].max(steady);
+                    worst[1] = worst[1].max(r.settle_time(event, 2.0 * steady));
+                    worst[2] = worst[2].max(r.rms_error_after(sc.seconds / 2.0));
+                    worst[3] = worst[3].max(r.max_rate_dev);
+                    snaps = snaps.max(r.snaps.len());
                 }
                 println!(
-                    "{p:?} {name}: max after 5 s {:.3} ms, max 4 s after event {:.3} ms, rms late {:.3} ms, rate dev {:.4}, snaps {}, tempo err {:.6}",
-                    worst.0, worst.1, worst.2, worst.3, worst.4, worst.5
+                    "{p:?} {name}: steady max {:.3} ms, settle {:.2} s, late rms {:.3} ms, rate dev {:.4}, snaps {snaps}",
+                    worst[0], worst[1], worst[2], worst[3]
                 );
             }
         }
