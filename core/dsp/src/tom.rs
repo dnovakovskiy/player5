@@ -614,10 +614,7 @@ mod tests {
 
     #[test]
     fn decays_to_silence_and_goes_idle() {
-        for (range, sr) in RANGES
-            .into_iter()
-            .flat_map(|r| ALL_RATES.map(|sr| (r, sr)))
-        {
+        for (range, sr) in RANGES.into_iter().flat_map(|r| ALL_RATES.map(|sr| (r, sr))) {
             for (decay, limit_s) in [(0.0, 0.4), (1.0, 2.4)] {
                 let mut tom = tom_with(sr, range, |p| p.decay = decay);
                 tom.trigger(1.0);
@@ -993,9 +990,15 @@ mod tests {
                 (first_cycle_frequency(&out, at, sr) / settled, depth)
             };
             let (ghost, _) = after_retrigger(1.0, 0.42, 0.7, 100.0);
-            assert!(ghost < 1.12, "{range:?}: ghost note bends the ring {ghost}x");
+            assert!(
+                ghost < 1.12,
+                "{range:?}: ghost note bends the ring {ghost}x"
+            );
             let (flam, _) = after_retrigger(0.42, 1.0, 0.5, 14.4);
-            assert!(flam > 1.25, "{range:?}: flam main stroke glides only {flam}x");
+            assert!(
+                flam > 1.25,
+                "{range:?}: flam main stroke glides only {flam}x"
+            );
             let mut fresh = Tom::new(sr, range);
             fresh.trigger(1.0);
             let (_, late) = after_retrigger(1.0, 1.0, 0.0, 220.0);
@@ -1169,4 +1172,3 @@ mod tests {
         }
     }
 }
-
