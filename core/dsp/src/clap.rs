@@ -20,8 +20,8 @@
 //!
 //! Each filtered noise path is scaled to a fixed RMS (so `tone` changes the
 //! colour, not the level, and the clap sounds the same at 44.1, 48 and
-//! 96 kHz) and gently soft-clipped, which rounds off the tallest noise peaks
-//! and keeps the hit-to-hit peak level steady.
+//! 96 kHz) and soft-clipped, which rounds off the tallest noise peaks and
+//! keeps the hit-to-hit peak level steady (within about ±1 dB).
 //!
 //! Controls (all `0..=1`; `tune` and `snappy` are ignored):
 //!
@@ -39,11 +39,13 @@
 //! 1.0). A full-velocity hit at default controls and `level = 1.0` peaks
 //! close to −10 dBFS, leaving room for the kick in a full kit.
 //!
-//! Retriggering while the clap still sounds (flams, rolls) never clicks: the
-//! noise filters keep running, the burst schedule restarts, and both
+//! Retriggering while the clap still sounds (flams, rolls) does not click:
+//! the noise filters keep running, the burst schedule restarts, and both
 //! amplitude envelopes are slewed (about 0.1 ms for the bursts, 1 ms for the
-//! tail), so the waveform never jumps. A new tail charges up from whatever
-//! the old one has left, like an analogue envelope capacitor.
+//! tail), so the waveform never steps. A new tail charges up from whatever
+//! the old one has left, like an analogue envelope capacitor. A flammed
+//! clap therefore plays the grace note's first bursts and then the main
+//! hit's full flutter: a wider, more ensemble-like clap.
 
 use crate::blocks::{Noise, OnePole, Svf};
 use crate::math;
@@ -94,8 +96,9 @@ const HP_HZ: f32 = 160.0;
 const HP_Q: f32 = 0.707;
 
 /// The band-passed noise is scaled to this RMS before its soft clip. The
-/// clip barely touches typical samples but rounds off the tall peaks,
-/// which steadies the peak level from hit to hit.
+/// clip shaves about 1 dB off typical (1σ) samples and about 4 dB off the
+/// tall (2σ) peaks, which steadies the peak level from hit to hit and adds
+/// a little analogue grit.
 const NOISE_DRIVE_RMS: f32 = 0.7;
 /// Noise-equivalent bandwidth of a unity-peak two-pole band-pass, per hertz
 /// of −3 dB bandwidth: `π / 2`.
