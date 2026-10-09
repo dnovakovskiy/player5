@@ -519,7 +519,7 @@ impl Session {
         if self.next_announce.is_some_and(|t| now < t) {
             return;
         }
-        self.next_announce = Some(now + self.settings.announce_interval_ns);
+        self.next_announce = Some(now.saturating_add(self.settings.announce_interval_ns));
         let broadcast = self
             .settings
             .broadcast

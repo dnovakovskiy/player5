@@ -10,11 +10,14 @@ rekordbox's "PRO DJ LINK Lighting" even in standalone mode
 ([analysis README][k-intro]). player5 announces itself as rekordbox in
 lighting mode, which makes the unit send CDJ-style status packets for its
 four decks ([analysis README §3][k-3]; [beat-link `VirtualRekordbox`][bl-vr]).
-Those carry tempo, pitch, play state, the master flag, the beat counter
-and the beat within the bar, but in this mode the unit sends no beat
-packets and no precise-position packets ([beat-link `VirtualCdj.start`][bl-vc]),
-and status packets come only about every 200 ms, so beat timing can be up
-to 200 ms off ([beat-link 8.0.0 change log][bl-cl]). player5 therefore
+They follow the CDJ status layout, though not every field is filled in
+([analysis README: CDJ statuses][k-statuses]); the master flag and tempo
+are ([`pro-dj-link.js`][k-js]), and so is the beat number ([analysis
+README: absolute position packets][k-abs]). In this mode the unit sends
+no beat packets and no precise-position packets ([beat-link
+`VirtualCdj.start`][bl-vc]), and status packets arrive only about every
+200 ms, so beat timing can be up to 200 ms off ([beat-link 8.0.0 change
+log][bl-cl]). player5 therefore
 reports [`Precision::Coarse`](../../core/sync/src/follower.rs) observations
 and narrows the error itself (see [Timing precision](#timing-precision)).
 
@@ -218,6 +221,10 @@ CDJ status packets][dy-status]:
 - The analysis script finds the master deck by `packet[0x89] & 32` and
   computes its tempo from `0x92` and `0x8d` ([`scanForNeededBytesForMixerStatus`][k-js]),
   so the master flag and tempo fields are live on the Opus Quad.
+- The beat number is included in the unit's status packets ([analysis
+  README: absolute position packets][k-abs]; the sentence sits in a
+  paragraph that was struck through because its claim about position
+  packets was superseded). No source says whether _B~b~_ is filled in.
 
 ## Quirks
 
@@ -232,8 +239,10 @@ CDJ status packets][dy-status]:
 
 ## Timing precision
 
-- Status packets come about every 200 ms ([dysentery: creating a virtual
-  CDJ][dy-vcdj-create]).
+- CDJs send status packets roughly every 200 ms ([dysentery: creating a
+  virtual CDJ][dy-vcdj-create]; [CDJ status packets][dy-status]), and
+  beat-link says the Opus Quad's arrive that often too ([beat-link 8.0.0
+  change log][bl-cl]). Nobody has published a measured Opus Quad cadence.
 - A CDJ broadcasts a beat packet on every beat, so its arrival marks the
   beat ([dysentery: beat packets][dy-beat-packets]); the CDJ-3000 also sends
   absolute-position packets every 30 ms ([dysentery: absolute
@@ -250,19 +259,26 @@ What player5 does with that (design, not protocol):
    good to about ±100 ms.
 2. The brackets of up to 16 previous beats are shifted forward by whole
    beat periods at the current tempo and intersected with the newest one.
-   Packet and beat periods are not commensurate, so the intersection
-   narrows to a few tens of milliseconds within a couple of bars (the unit
-   tests see under 40 ms at 128 BPM with 200 ms packets; when the periods
-   are commensurate, e.g. 120 BPM against exactly 200 ms, it settles near
-   ±50 ms). Brackets that no longer agree, a tempo change over 0.05 %, a
-   pause, a jump in the counter or a gap over 1 s drop the history.
-3. Each estimate becomes one `SourceEvent::Observation`: `host_ns` at the
+   When packet and beat periods are not commensurate the intersection
+   narrows. In our simulation (beat counter sampled when the packet is
+   sent, constant network delay, 200 ms ± 3 ms packets) it settles under
+   40 ms within a couple of bars at 128 BPM, and near ±50 ms when the
+   periods are commensurate (120 BPM against exactly 200 ms). These are
+   properties of the estimator under those assumptions, **not
+   measurements of an Opus Quad**: how the unit samples its counter and
+   how regular its packets are is unpublished. Brackets that no longer
+   agree, a tempo change over 0.05 %, a pause, a jump in the counter or a
+   gap over 1 s drop the history.
+3. An estimate whose window is still wider than ±150 ms (for example the
+   first beat after a lost packet) is not reported; its bracket is kept
+   for the next beat.
+4. Each estimate becomes one `SourceEvent::Observation`: `host_ns` at the
    estimated beat start (so up to a packet interval in the past),
    `Phase::Bar(b − 1)` when _B~b~_ = _b_ is known, else `Phase::Beat(0.0)`,
    the effective tempo, `Precision::Coarse` and the deck number. Nothing is
    reported while the followed deck is stopped, so followers lose lock and
    free-run.
-4. A constant network or processing delay shifts every estimate equally;
+5. A constant network or processing delay shifts every estimate equally;
    the global latency offset absorbs it.
 
 ## Alternatives not taken
@@ -282,7 +298,11 @@ Choices of ours, with the reasoning:
   address of a UDP socket `connect()`ed toward the unit, which only picks a
   route and sends nothing ([udp(7)][udp7]). Until the unit is seen, nothing
   is announced; the unit's own keep-alive (or its kind-`10` packet) reveals
-  it.
+  it. A discovered address is forgotten when the unit expires and found
+  again when it returns, in case the computer's address changed meanwhile.
+- **Own echoes.** Our broadcasts come back to us. A keep-alive carrying our
+  MAC, or named `rekordbox` and sent from our interface address, is ours
+  and ignored.
 - **MAC.** When not configured: `02:50:a:b:c:d` for interface address
   `a.b.c.d`, deterministic and unique per address on the LAN. The first
   octet sets the locally administered bit and clears the multicast bit
@@ -331,9 +351,14 @@ Choices of ours, with the reasoning:
 - player5 binds UDP 50000 and 50002, so it cannot run next to rekordbox on
   the same computer, nor at the same time as player5's Pro DJ Link source.
 - One unit per network.
-- Phase is coarse by nature: with steady tempo the estimate settles to a
-  few tens of milliseconds, but after a pitch move, a nudge or a loop it
-  is back to about ±100 ms for a beat or two.
+- The device-number tie-break assumes the other `rekordbox` follows it
+  too. A real rekordbox (which also uses `0x17`, per the sources above)
+  with a higher MAC would keep the number alongside us; whether the unit
+  then confuses the two is unknown.
+- Phase is coarse by nature. Under the simulation's assumptions the
+  estimate narrows to a few tens of milliseconds at steady tempo, but after
+  a pitch move, a nudge or a loop it is back to about ±100 ms for a beat or
+  two, and real-unit accuracy is unmeasured.
 
 ## Fixtures
 

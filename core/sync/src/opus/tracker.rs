@@ -8,8 +8,9 @@
 //! The tracker narrows that by projecting the brackets of the last few
 //! beats onto the newest one with the current tempo and intersecting them.
 //! Packet times and beat times are not commensurate, so successive
-//! brackets cut different slices out of the beat and the intersection
-//! shrinks to a few tens of milliseconds within a couple of bars. When the
+//! brackets cut different slices out of the beat and, in simulation, the
+//! intersection shrinks to a few tens of milliseconds within a couple of
+//! bars (not measured on a unit; see the doc). When the
 //! brackets stop agreeing (tempo change, nudge, loop) the oldest ones are
 //! dropped. This is player5's estimator, not protocol behaviour.
 

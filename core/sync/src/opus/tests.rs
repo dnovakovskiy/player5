@@ -834,6 +834,27 @@ fn a_discovered_interface_is_found_again_after_the_unit_returns() {
 }
 
 #[test]
+fn extreme_clock_values_do_not_overflow() {
+    let mut s = Session::new(settings(Some(US)), u64::MAX - 5);
+    let mut out = Vec::new();
+    s.on_announce(
+        &unit_keep_alive(),
+        from_unit(ANNOUNCE_PORT),
+        u64::MAX - 4,
+        &mut out,
+    );
+    for now in [u64::MAX - 3, u64::MAX, 0, u64::MAX] {
+        s.on_update(
+            &status(1, true, true, 12_000, 9),
+            from_unit(UPDATE_PORT),
+            now,
+            &mut out,
+        );
+        s.tick(now, &mut out);
+    }
+}
+
+#[test]
 fn a_late_echo_from_an_old_mac_does_not_move_our_number() {
     let mut s = Session::new(settings(Some(US)), 0);
     let mut out = Vec::new();

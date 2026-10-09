@@ -94,7 +94,7 @@ pub fn run(ctx: SourceContext, announce: UdpSocket, update: UdpSocket, settings:
                 match local_ip_toward(unit, peer_update_port) {
                     Some(ip) => session.set_interface(ip, &mut out),
                     None => {
-                        next_interface_probe = now + INTERFACE_RETRY_NS;
+                        next_interface_probe = now.saturating_add(INTERFACE_RETRY_NS);
                         session.interface_failed(&mut out);
                     }
                 }
