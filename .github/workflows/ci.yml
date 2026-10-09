@@ -55,6 +55,9 @@ jobs:
       - name: Build wasm module
         working-directory: .
         run: scripts/build-wasm.sh
+      - name: Build the bridge (for the end-to-end test against the real binary)
+        working-directory: .
+        run: cargo build -p player5-bridge
       - name: Install
         run: npm ci
       - name: Typecheck
