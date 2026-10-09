@@ -69,8 +69,13 @@ pub struct Observation {
 
 /// Seconds without an observation after which the source counts as lost
 /// ([`FollowerClock::is_locked`] turns `false`; the clock free-runs).
-/// Observations further than this from `now` are ignored as stale.
+/// Observations older than this (relative to `now`) are ignored as stale.
 pub const LOCK_TIMEOUT_S: f64 = 2.0;
+
+/// Seconds an observation may lie ahead of `now`. Reports describe the
+/// recent past; one stamped further ahead is a mapping glitch, and taking
+/// it would make every genuine report until then look out of order.
+pub const MAX_AHEAD_S: f64 = 0.5;
 
 /// Smallest observation spacing (beats) used to scale the integral term,
 /// so two reports a few samples apart cannot kick the tempo.
@@ -224,6 +229,9 @@ pub struct FollowerClock {
     last_phase_observation: Option<f64>,
     mean_spacing: Option<f64>,
     tempo_reported: bool,
+    /// Whether `bpm` is the source's (reported, or measured from its
+    /// phase) rather than the initial guess.
+    tempo_known: bool,
     phase_error: f64,
 }
 
@@ -267,6 +275,7 @@ impl FollowerClock {
             last_phase_observation: None,
             mean_spacing: None,
             tempo_reported: false,
+            tempo_known: false,
             phase_error: 0.0,
         }
     }
@@ -331,16 +340,17 @@ impl FollowerClock {
     }
 
     /// Feeds one observation. `now` is the consumer's current sample
-    /// position; observations may refer to the recent past or future, but
-    /// ones more than [`LOCK_TIMEOUT_S`] away from `now`, duplicates and
-    /// ones older than the newest already seen are ignored.
+    /// position; observations may refer to the recent past (up to
+    /// [`LOCK_TIMEOUT_S`]) or the near future (up to [`MAX_AHEAD_S`]).
+    /// Others, duplicates and ones older than the newest already seen are
+    /// ignored.
     pub fn observe(&mut self, obs: &Observation, now: f64) {
         let s = obs.sample;
         if !s.is_finite() || !now.is_finite() {
             return;
         }
         let timeout = LOCK_TIMEOUT_S * self.sample_rate;
-        if (s - now).abs() > timeout {
+        if now - s > timeout || s - now > MAX_AHEAD_S * self.sample_rate {
             return;
         }
         if let Some(last) = self.last_observation {
@@ -369,13 +379,18 @@ impl FollowerClock {
             .filter(|b| b.is_finite() && *b > 0.0)
             .map(|b| b.clamp(Self::MIN_BPM, Self::MAX_BPM));
         self.tempo_reported = reported.is_some();
-        // A source without tempo reports: right after a snap, take the
-        // tempo from the phase advance since that snap (the integral path
-        // refines it from then on).
+        // A source without tempo reports: until its tempo is known, take it
+        // from the phase advance since the previous report (the integral
+        // path refines it from then on). Measured once, not after every
+        // snap: a re-sync must not swap a refined tempo for a one-interval
+        // measurement.
         let acquired_tempo = match (reported, target) {
-            (None, Some((p, m))) if self.updates == 0 => self.tempo_from_phase(s, p, m),
+            (None, Some((p, m))) if !self.tempo_known => self.tempo_from_phase(s, p, m),
             _ => None,
         };
+        if reported.is_some() || acquired_tempo.is_some() {
+            self.tempo_known = true;
+        }
 
         // Carry the estimate forward to `s`. The tempo report describes the
         // tempo at `s`; across a change, average old and new (exact for a
@@ -445,7 +460,7 @@ impl FollowerClock {
     /// anchor (the last snap) to this report, unwrapped around what the
     /// current tempo predicts. `None` without a usable anchor.
     fn tempo_from_phase(&self, s: f64, phase: f64, modulus: f64) -> Option<f64> {
-        if self.lock != Lock::Track && self.acquired == 0 {
+        if self.lock == Lock::Acquire && self.acquired == 0 {
             return None;
         }
         let samples = s - self.est_sample;
@@ -504,28 +519,29 @@ impl FollowerClock {
         self.phase_error = out_err;
 
         if core::mem::take(&mut self.resync_requested) {
-            self.restart_estimate(s, ours + out_err);
-            self.snap_output();
+            // Quantized re-sync: snap to this report (or, for a source whose
+            // tempo is still unknown, as soon as it is measured).
+            self.begin_acquire(s, ours + out_err, 1);
             return;
         }
         match self.lock {
             Lock::Acquire => {
                 if self.acquired == 0 {
-                    self.restart_estimate(s, ours + out_err);
+                    self.begin_acquire(s, ours + out_err, self.tuning.acquire_obs);
                 } else {
                     self.update(est_err, spacing);
-                }
-                self.acquired += 1;
-                if self.acquired >= self.tuning.acquire_obs {
-                    self.snap_output();
+                    self.acquired += 1;
+                    self.finish_acquire(self.tuning.acquire_obs);
                 }
             }
             Lock::Reacquire => {
-                self.locked = true;
                 if out_err.abs() > threshold {
-                    self.restart_estimate(s, ours + out_err);
-                    self.snap_output();
+                    // Back somewhere else: acquire afresh, averaging as
+                    // many reports as a first lock would.
+                    self.locked = false;
+                    self.begin_acquire(s, ours + out_err, self.tuning.acquire_obs);
                 } else {
+                    self.locked = true;
                     self.lock = Lock::Track;
                     self.update(est_err, spacing);
                 }
@@ -615,6 +631,23 @@ impl FollowerClock {
         }
     }
 
+    /// Starts acquiring at this report: the estimate restarts on it, and
+    /// the output snaps once `needed` reports are in and the tempo is
+    /// known (at once, if both already hold).
+    fn begin_acquire(&mut self, s: f64, beat: f64, needed: u32) {
+        self.restart_estimate(s, beat);
+        self.lock = Lock::Acquire;
+        self.acquired = 1;
+        self.finish_acquire(needed);
+    }
+
+    /// Snaps the output to the estimate if acquisition is complete.
+    fn finish_acquire(&mut self, needed: u32) {
+        if self.acquired >= needed && self.tempo_known {
+            self.snap_output();
+        }
+    }
+
     fn restart_estimate(&mut self, sample: f64, beat: f64) {
         self.est_sample = sample;
         self.est_beat = beat;
@@ -642,9 +675,12 @@ impl FollowerClock {
     }
 
     /// Re-anchors the output at `now` (continuously) and plans the slew
-    /// that closes the gap to the estimate.
+    /// that closes the gap to the estimate. Always at `now`, even when the
+    /// anchor lies ahead of it (a snap to a report stamped slightly in the
+    /// future): the line before an anchor runs at the slew rate, so
+    /// re-planning from a later anchor would move the beat at `now`.
     fn steer(&mut self, now: f64) {
-        let t = now.max(self.anchor_sample);
+        let t = now;
         let ours = self.beat_at_sample(t);
         let base = self.est_rate();
         let mut slew_rate = base;
@@ -780,6 +816,9 @@ mod tests {
         /// start of every `period_s` (a congested network); what was due
         /// arrives in one burst when the stall ends.
         stall: Option<(f64, f64)>,
+        /// `(from_s, to_s)`: the source sends nothing (lost, or the DJ
+        /// stopped the deck); combine with `shift` to come back elsewhere.
+        outage: Option<(f64, f64)>,
         seed: u64,
     }
 
@@ -800,6 +839,7 @@ mod tests {
                 reports_bpm: true,
                 source_start: 0.0,
                 stall: None,
+                outage: None,
                 seed: 0x9E37_79B9_7F4A_7C15,
             }
         }
@@ -906,7 +946,12 @@ mod tests {
                         due += (length - phase) * SR;
                     }
                 }
-                pending.push((due, obs));
+                let silent = sc
+                    .outage
+                    .is_some_and(|(a, b)| at / SR >= a && at / SR < b);
+                if !silent {
+                    pending.push((due, obs));
+                }
                 next_obs += sc.every;
             }
             beat = beat1;
@@ -1384,6 +1429,58 @@ mod tests {
                 f.lock,
                 f.updates
             );
+        }
+    }
+
+    #[test]
+    #[ignore = "exploration"]
+    fn explore_future_anchor() {
+        // First lock from a report stamped 0.3 s ahead of `now`.
+        let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
+        let now = 100_000.0;
+        f.observe(&obs(now + 14_400.0, Phase::Bar(0.0), 120.0), now);
+        let _ = f.take_discontinuity();
+        let before = f.beat_at_sample(now + 128.0);
+        // A later report 10 ms off: a slew is planned.
+        f.observe(&obs(now + 24_000.0 + 14_400.0, Phase::Bar(1.02), 120.0), now + 128.0);
+        let after = f.beat_at_sample(now + 128.0);
+        println!("future anchor: beat at now before {before:.6} after {after:.6} jump {:.3} ms", (after - before) * 500.0);
+        // And a report 1.5 s in the future blocks normal ones.
+        let mut f = FollowerClock::new(SR, 120.0, Precision::Fine);
+        feed_perfect(&mut f, 0, 8);
+        let s = 8.0 * 24_000.0;
+        f.observe(&obs(s + 72_000.0, Phase::Bar(1.0), 120.0), s);
+        let age = f.observation_age(s + 24_000.0);
+        f.observe(&obs(s + 24_000.0, Phase::Bar(1.0), 120.0), s + 24_000.0);
+        println!("after a future glitch: age {age:?}, newer report used: {}", f.observation_age(s + 24_000.0) == Some(0.0));
+    }
+
+    #[test]
+    #[ignore = "exploration"]
+    fn explore_outage() {
+        for p in [
+            Precision::Exact,
+            Precision::Fine,
+            Precision::Coarse,
+            Precision::Jittery,
+        ] {
+            for by in [0.0, 0.03, 1.0] {
+                let mut sc = typical(p);
+                sc.outage = Some((20.0, 24.0));
+                sc.shift = Some((22.0, by));
+                let mut worst = [0.0f64; 3];
+                let mut snaps = 0;
+                for r in seeds(sc) {
+                    worst[0] = worst[0].max(r.max_abs_error_between(25.0, 35.0));
+                    worst[1] = worst[1].max(r.max_abs_error_between(35.0, 60.0));
+                    worst[2] = worst[2].max(r.max_abs_error_after(60.0));
+                    snaps = snaps.max(r.snaps.len());
+                }
+                println!(
+                    "{p:?} outage, back shifted {by}: 25-35 s {:.1} ms, 35-60 s {:.1} ms, after 60 s {:.1} ms, snaps {snaps}",
+                    worst[0], worst[1], worst[2]
+                );
+            }
         }
     }
 

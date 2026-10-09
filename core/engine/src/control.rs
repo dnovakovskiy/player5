@@ -18,6 +18,64 @@ pub const DEFAULT_LOOKAHEAD_SAMPLES: u64 = 4_800;
 /// skipped, e.g. the downbeat right after a MIDI Start. ADR-0006.
 const SNAP_GRACE_S: f64 = 0.02;
 
+/// Steps remembered with the sample each was queued at. A 100 ms lookahead
+/// holds at most three steps even at the top tempo; the rest is margin for
+/// longer lookaheads.
+const QUEUED_MEMORY: usize = 32;
+
+/// One scheduled step and the sample it was queued at.
+#[derive(Clone, Copy, Debug, Default)]
+struct Queued {
+    step: u64,
+    sample: u64,
+}
+
+/// The most recently scheduled steps in a fixed ring, oldest first, with
+/// the samples they were actually queued at. A following timeline is
+/// re-planned at every report, so after a snap only this record (not the
+/// timeline) can tell which queued steps were already heard.
+#[derive(Clone, Debug)]
+struct QueuedLog {
+    entries: [Queued; QUEUED_MEMORY],
+    /// Next slot to write.
+    head: usize,
+    len: usize,
+}
+
+impl QueuedLog {
+    const fn new() -> Self {
+        Self {
+            entries: [Queued { step: 0, sample: 0 }; QUEUED_MEMORY],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    fn push(&mut self, queued: Queued) {
+        self.entries[self.head] = queued;
+        self.head = (self.head + 1) % QUEUED_MEMORY;
+        self.len = (self.len + 1).min(QUEUED_MEMORY);
+    }
+
+    /// The `i`-th newest entry (`0` = newest); `i < len`.
+    fn newest(&self, i: usize) -> Queued {
+        self.entries[(self.head + 2 * QUEUED_MEMORY - 1 - i) % QUEUED_MEMORY]
+    }
+
+    /// Forgets the steps queued at or after `sample` (a flush dropped
+    /// them). Queued samples only grow, so they are the newest entries.
+    fn flush_from(&mut self, sample: u64) {
+        while self.len > 0 && self.newest(0).sample >= sample {
+            self.head = (self.head + QUEUED_MEMORY - 1) % QUEUED_MEMORY;
+            self.len -= 1;
+        }
+    }
+}
+
 /// Which clock drives the sequencer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClockMode {
@@ -83,6 +141,7 @@ pub struct Control {
     sent_gain: f32,
     sent_limiter: bool,
     last_now: u64,
+    queued: QueuedLog,
 }
 
 impl Control {
@@ -110,6 +169,7 @@ impl Control {
             sent_gain: 1.0,
             sent_limiter: false,
             last_now: 0,
+            queued: QueuedLog::new(),
         }
     }
 
@@ -258,6 +318,7 @@ impl Control {
     /// `now`. Following: joins the external timeline in phase at the next
     /// step, so the pattern position matches the source's bar position.
     pub fn start(&mut self, now: u64) {
+        self.queued.clear();
         match self.mode {
             ClockMode::Internal => {
                 self.internal.reset(now as f64);
@@ -356,34 +417,54 @@ impl Control {
             return;
         }
         let _ = self.producer.push(Event::flush(now));
+        self.queued.flush_from(now);
         let active = self.active();
         let clock = AdjustedClock::new(&active, self.controls);
         let step = self.scheduler.first_step_at_or_after(&clock, now);
         self.scheduler.start_at(step);
     }
 
-    /// [`Control::realign`] after a follower snap, where both timelines are
-    /// known. Nothing is heard twice: no step the old timeline already
-    /// played (stamped before `now`) is scheduled again, and nothing lands
-    /// within half a step after the last step already heard (a forward jump
-    /// of a whole number of steps renumbers that same musical step). Within
-    /// those limits a step the jump left just behind `now` (by up to
-    /// [`SNAP_GRACE_S`]) is played late instead of skipped.
+    /// [`Control::realign`] after a follower snap. Nothing is heard twice:
+    /// no step already heard (queued before `now`) is scheduled again, and
+    /// nothing lands within half a step after the last step heard (a
+    /// forward jump of a whole number of steps renumbers that same musical
+    /// step). Within those limits a step the jump left just behind `now`
+    /// (by up to [`SNAP_GRACE_S`]) is played late instead of skipped.
+    ///
+    /// What was heard comes from [`QueuedLog`], the samples steps were
+    /// actually queued at: the follower re-plans its timeline at every
+    /// report, so by now even the pre-snap timeline (`before`) can put a
+    /// queued step on the other side of `now`. `before` is only the
+    /// fallback when the log does not reach back to `now`.
     fn realign_after_snap(&mut self, now: u64, before: &FollowerClock) {
         if !self.scheduler.is_playing() {
             return;
         }
         let _ = self.producer.push(Event::flush(now));
-        let old = AdjustedClock::new(before, self.controls);
-        let unplayed = self
-            .scheduler
-            .first_step_at_or_after(&old, now)
-            .min(self.scheduler.next_step());
+        // Walk back from the newest queued step: those at or after `now`
+        // were just flushed; the first one before `now` was the last heard.
+        let mut unplayed = self.scheduler.next_step();
+        let mut heard = None;
+        for i in 0..self.queued.len {
+            let q = self.queued.newest(i);
+            if q.sample < now {
+                heard = Some(q.sample as f64);
+                break;
+            }
+            unplayed = q.step;
+        }
+        if heard.is_none() && self.queued.len == QUEUED_MEMORY {
+            // Everything remembered is still ahead: estimate the boundary.
+            let old = AdjustedClock::new(before, self.controls);
+            unplayed = unplayed.min(self.scheduler.first_step_at_or_after(&old, now));
+            if let Some(last) = unplayed.checked_sub(1) {
+                heard = Some(old.sample_at_beat(self.scheduler.pattern().step_beat(last)));
+            }
+        }
+        self.queued.flush_from(now);
         let grace = (SNAP_GRACE_S * f64::from(self.sample_rate)).round() as u64;
         let mut from = now.saturating_sub(grace);
-        if let Some(last) = unplayed.checked_sub(1) {
-            let beat = self.scheduler.pattern().step_beat(last);
-            let heard = old.sample_at_beat(beat);
+        if let Some(heard) = heard {
             let half_step = 0.5 * sequencer::BEATS_PER_STEP * self.follower.samples_per_beat();
             from = from.max((heard + half_step).ceil().max(0.0) as u64);
         }
@@ -516,8 +597,19 @@ impl Control {
         }
         let active = active_of(self.mode, &self.internal, &self.follower);
         let clock = AdjustedClock::new(&active, self.controls);
-        self.scheduler
-            .schedule(&clock, now + self.lookahead, &mut self.producer)
+        let first = self.scheduler.next_step();
+        let pushed = self
+            .scheduler
+            .schedule(&clock, now + self.lookahead, &mut self.producer);
+        // Remember where the new steps went (the scheduler's own rounding),
+        // for realigning after a snap.
+        let end = self.scheduler.next_step();
+        for step in first.max(end.saturating_sub(QUEUED_MEMORY as u64))..end {
+            let beat = self.scheduler.pattern().step_beat(step);
+            let sample = clock.sample_at_beat(beat).round().max(0.0) as u64;
+            self.queued.push(Queued { step, sample });
+        }
+        pushed
     }
 
     /// [`Control::tick`] at the renderer's published position, for shells
