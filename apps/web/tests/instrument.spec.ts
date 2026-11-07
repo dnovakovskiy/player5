@@ -376,3 +376,36 @@ test("RMX-1000 Station mode: X-Pad overdub, Scene FX, Isolator, Release lever an
   await expect(step(page, "clap", 1)).toHaveAttribute("data-state", "accent");
   expect(errors).toEqual([]);
 });
+
+test("Nu-Disco, House, and Techno presets and analog drum kit selector retune voices without erasing steps", async ({ page }) => {
+  const errors = guard(page);
+  await page.goto("/");
+  const presetSelect = page.getByRole("combobox", { name: "Load a preset pattern" });
+  const kitSelect = page.getByRole("combobox", { name: "Load a drum kit voicing" });
+
+  // Verify Nu-Disco, House, and Techno presets load with their kits
+  await presetSelect.selectOption({ label: "Parisian Filter" });
+  await expect(page.locator("#bpm")).toHaveValue("120");
+  await expect(app(page)).toHaveAttribute("data-kit", "studio-disco");
+  await expect(step(page, "clap", 5)).toHaveAttribute("data-state", "accent-flam");
+
+  await presetSelect.selectOption({ label: "Warehouse Jack" });
+  await expect(page.locator("#bpm")).toHaveValue("126");
+  await expect(app(page)).toHaveAttribute("data-kit", "sub-boom");
+  await expect(page.locator("#vc-tune-out")).toHaveText("22%");
+  await expect(page.locator("#vc-decay-out")).toHaveText("86%");
+
+  // Switch drum kit voicing to Club Punch Machine while keeping Warehouse Jack steps
+  await kitSelect.selectOption({ label: "Club Punch Machine" });
+  await expect(app(page)).toHaveAttribute("data-kit", "club-punch");
+  await expect(page.locator("#vc-tune-out")).toHaveText("64%");
+  await expect(page.locator("#vc-decay-out")).toHaveText("46%");
+  await expect(step(page, "kick", 15)).toHaveAttribute("data-state", "on");
+
+  // Load Peak-Time Techno preset
+  await presetSelect.selectOption({ label: "Sub Basement Rumble" });
+  await expect(page.locator("#bpm")).toHaveValue("134");
+  await expect(app(page)).toHaveAttribute("data-kit", "warehouse-raw");
+  await expect(step(page, "low_tom", 2)).toHaveAttribute("data-state", "on");
+  expect(errors).toEqual([]);
+});

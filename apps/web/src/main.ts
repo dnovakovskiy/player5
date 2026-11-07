@@ -1,7 +1,7 @@
 import "./style.css";
 import { midiSupported } from "./clock/midi";
 import { AudioEngine, type AudioState, type EngineMode, type EngineStatus } from "./engine/audio-engine";
-import { DEFAULT_PRESET, PRESETS } from "./presets";
+import { applyKitToSpec, DEFAULT_PRESET, KITS, PRESETS } from "./presets";
 import { setupPwa } from "./pwa";
 import {
   BPM_MAX,
@@ -77,6 +77,7 @@ const accent = $<HTMLInputElement>("accent");
 const flam = $<HTMLInputElement>("flam");
 const flamModeBtn = $<HTMLButtonElement>("flam-mode");
 const presetSelect = $<HTMLSelectElement>("preset");
+const kitSelect = $<HTMLSelectElement>("kit");
 const undoBtn = $<HTMLButtonElement>("undo");
 const gain = $<HTMLInputElement>("gain");
 const limiter = $<HTMLInputElement>("limiter");
@@ -508,6 +509,17 @@ presetSelect.addEventListener("change", () => {
   next.render = { ...spec.render }; // the booth's master settings stay
   spec = next;
   app.dataset.preset = preset.id;
+  if (preset.kitId) app.dataset.kit = preset.kitId;
+  commit();
+});
+
+kitSelect.addEventListener("change", () => {
+  const kit = KITS.find((k) => k.id === kitSelect.value);
+  kitSelect.value = "";
+  if (!kit) return;
+  checkpoint();
+  spec = applyKitToSpec(spec, kit);
+  app.dataset.kit = kit.id;
   commit();
 });
 

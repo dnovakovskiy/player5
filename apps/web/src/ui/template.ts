@@ -1,7 +1,7 @@
 // Static markup of the instrument. Dynamic parts (grid rows, voice
 // controls, device lists) are filled in by the modules that own them.
 
-import { PRESETS } from "../presets";
+import { KITS, PRESETS, type PresetCategory } from "../presets";
 
 export interface TemplateOptions {
   single: boolean;
@@ -18,8 +18,17 @@ const knob = (id: string, label: string, min = 0, max = 1, step = 0.01) => `
   </label>`;
 
 export function template(o: TemplateOptions): string {
-  const presetOptions = PRESETS.map(
-    (p) => `<option value="${p.id}" title="${p.blurb}">${p.name}</option>`,
+  const categories: PresetCategory[] = ["Core Booth", "Nu-Disco", "House", "Techno"];
+  const presetOptions = categories
+    .map((cat) => {
+      const items = PRESETS.filter((p) => p.category === cat)
+        .map((p) => `<option value="${p.id}" title="${p.blurb}">${p.name}</option>`)
+        .join("");
+      return `<optgroup label="${cat}">${items}</optgroup>`;
+    })
+    .join("");
+  const kitOptions = KITS.map(
+    (k) => `<option value="${k.id}" title="${k.blurb}">${k.name}</option>`,
   ).join("");
   const unavailable = o.single
     ? "Bridge and MIDI clock need the full app; they are switched off in this embedded copy."
@@ -65,6 +74,9 @@ export function template(o: TemplateOptions): string {
       <button id="flam-mode" type="button" class="toggle" aria-pressed="false" title="While on, tapping a step toggles its flam">Flam edit</button>
       <select id="preset" aria-label="Load a preset pattern">
         <option value="">Presets…</option>${presetOptions}
+      </select>
+      <select id="kit" aria-label="Load a drum kit voicing" title="Switch analog drum machine voicing without changing the step pattern">
+        <option value="">Drum kit…</option>${kitOptions}
       </select>
       <button id="undo" type="button" aria-keyshortcuts="Control+Z Meta+Z" title="Undo (Ctrl/Cmd+Z)">Undo</button>
       <button id="clear" type="button" title="Clear every step (undo restores)">Clear</button>

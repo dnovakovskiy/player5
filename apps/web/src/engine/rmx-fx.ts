@@ -157,6 +157,7 @@ export class RmxFxRack {
   private lfoPhase = 0;
   private bpm = 124;
   private state: RmxState = defaultRmxState();
+  private activeOpenHatGain: GainNode | null = null;
 
   constructor(private readonly ctx: AudioContext) {
     this.input = ctx.createGain();
@@ -503,118 +504,228 @@ export class RmxFxRack {
 
   /**
    * Synthesizes an immediate X-Pad drum hit (with pitch shift -1..+1) into
-   * the RMX-1000 bus so X-Pad pads and roll ribbons sound immediately even
-   * when the step sequencer is stopped.
+   * the RMX-1000 bus using the authentic TR-inspired analog circuit topologies
+   * from core/dsp (bridged-T kick, dual-shell snare, 4-burst flutter clap,
+   * 6-oscillator inharmonic square-wave hats with choke, dual-square cowbell,
+   * dual-ping rimshot, and damped swept toms).
    */
   triggerPad(voice: VoiceId, pitchShift = 0, velocity = 0.9): void {
     const now = this.ctx.currentTime;
     const ratio = 2 ** (pitchShift * 0.75);
+    const vel = Math.max(0.1, Math.min(1, velocity));
     const out = this.ctx.createGain();
-    out.gain.value = Math.max(0.1, Math.min(1, velocity));
+    out.gain.value = vel;
     out.connect(this.xpadBus);
 
     switch (voice) {
       case "kick": {
+        // Bridged-T sine body with fast initial punch + exponential tail glide
         const osc = this.ctx.createOscillator();
+        const shaper = this.ctx.createWaveShaper();
+        shaper.curve = makeDriveCurve(0.28);
         const g = this.ctx.createGain();
         osc.type = "sine";
-        osc.frequency.setValueAtTime(145 * ratio, now);
-        osc.frequency.exponentialRampToValueAtTime(46 * ratio, now + 0.09);
+        osc.frequency.setValueAtTime(215 * ratio, now);
+        osc.frequency.exponentialRampToValueAtTime(82 * ratio, now + 0.008);
+        osc.frequency.exponentialRampToValueAtTime(48 * ratio, now + 0.085);
         g.gain.setValueAtTime(0.95, now);
-        g.gain.exponentialRampToValueAtTime(0.001, now + 0.26);
-        osc.connect(g);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.34);
+        osc.connect(shaper);
+        shaper.connect(g);
         g.connect(out);
         osc.start(now);
-        osc.stop(now + 0.27);
+        osc.stop(now + 0.35);
+
+        // Pulse click transient through 2.8 kHz low-pass
+        const click = this.ctx.createBufferSource();
+        click.buffer = this.noiseBuf;
+        const lp = this.ctx.createBiquadFilter();
+        lp.type = "lowpass";
+        lp.frequency.value = 2800 * ratio;
+        const cg = this.ctx.createGain();
+        cg.gain.setValueAtTime(0.55 * vel, now);
+        cg.gain.exponentialRampToValueAtTime(0.001, now + 0.004);
+        click.connect(lp);
+        lp.connect(cg);
+        cg.connect(out);
+        click.start(now);
+        click.stop(now + 0.006);
         break;
       }
       case "snare": {
-        const osc = this.ctx.createOscillator();
-        const og = this.ctx.createGain();
-        osc.type = "triangle";
-        osc.frequency.setValueAtTime(210 * ratio, now);
-        osc.frequency.exponentialRampToValueAtTime(115 * ratio, now + 0.07);
-        og.gain.setValueAtTime(0.55, now);
-        og.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
-        osc.connect(og);
-        og.connect(out);
-        osc.start(now);
-        osc.stop(now + 0.15);
+        // Dual bridged-T shell resonators (180 Hz & 330 Hz) with 6 ms pitch blip
+        for (const [hz, amp, dur] of [
+          [180, 0.48, 0.11],
+          [330, 0.36, 0.085],
+        ] as const) {
+          const osc = this.ctx.createOscillator();
+          const og = this.ctx.createGain();
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(hz * 1.45 * ratio, now);
+          osc.frequency.exponentialRampToValueAtTime(hz * ratio, now + 0.009);
+          og.gain.setValueAtTime(amp, now);
+          og.gain.exponentialRampToValueAtTime(0.001, now + dur);
+          osc.connect(og);
+          og.connect(out);
+          osc.start(now);
+          osc.stop(now + dur + 0.01);
+        }
 
+        // High-passed + low-passed snare wires
         const n = this.ctx.createBufferSource();
         n.buffer = this.noiseBuf;
         const hp = this.ctx.createBiquadFilter();
         hp.type = "highpass";
-        hp.frequency.value = 950 * ratio;
+        hp.frequency.value = 1650 * ratio;
+        const lp = this.ctx.createBiquadFilter();
+        lp.type = "lowpass";
+        lp.frequency.value = 8200;
         const ng = this.ctx.createGain();
-        ng.gain.setValueAtTime(0.55, now);
-        ng.gain.exponentialRampToValueAtTime(0.001, now + 0.19);
+        ng.gain.setValueAtTime(0.62, now);
+        ng.gain.exponentialRampToValueAtTime(0.001, now + 0.21);
         n.connect(hp);
-        hp.connect(ng);
+        hp.connect(lp);
+        lp.connect(ng);
         ng.connect(out);
         n.start(now);
-        n.stop(now + 0.2);
+        n.stop(now + 0.22);
         break;
       }
       case "clap": {
+        // 4 sawtooth-scheduled noise bursts at 0, 10, 21, 31 ms + blooming room tail
         const n = this.ctx.createBufferSource();
         n.buffer = this.noiseBuf;
         const bp = this.ctx.createBiquadFilter();
         bp.type = "bandpass";
-        bp.frequency.value = 1350 * ratio;
-        bp.Q.value = 1.8;
+        bp.frequency.value = 1270 * ratio;
+        bp.Q.value = 1.95;
+        const hp = this.ctx.createBiquadFilter();
+        hp.type = "highpass";
+        hp.frequency.value = 420;
         const ng = this.ctx.createGain();
-        ng.gain.setValueAtTime(0.65, now);
-        ng.gain.setValueAtTime(0.15, now + 0.011);
-        ng.gain.setValueAtTime(0.6, now + 0.014);
-        ng.gain.setValueAtTime(0.15, now + 0.025);
-        ng.gain.setValueAtTime(0.55, now + 0.028);
-        ng.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+        const strikes = [0, 0.01, 0.021, 0.031];
+        for (let i = 0; i < strikes.length; i++) {
+          const t = now + strikes[i]!;
+          ng.gain.setValueAtTime(0.75, t);
+          if (i < strikes.length - 1) {
+            ng.gain.exponentialRampToValueAtTime(0.12, now + strikes[i + 1]! - 0.0005);
+          }
+        }
+        ng.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
         n.connect(bp);
-        bp.connect(ng);
+        bp.connect(hp);
+        hp.connect(ng);
         ng.connect(out);
         n.start(now);
-        n.stop(now + 0.23);
+        n.stop(now + 0.26);
         break;
       }
       case "closed_hat":
       case "open_hat": {
-        const dur = voice === "open_hat" ? 0.32 : 0.065;
-        const n = this.ctx.createBufferSource();
-        n.buffer = this.noiseBuf;
+        // Choke any ringing open hat when closed hat triggers
+        if (voice === "closed_hat" && this.activeOpenHatGain) {
+          try {
+            this.activeOpenHatGain.gain.cancelScheduledValues(now);
+            this.activeOpenHatGain.gain.setTargetAtTime(0.0001, now, 0.004);
+          } catch {
+            /* ignore */
+          }
+          this.activeOpenHatGain = null;
+        }
+        const dur = voice === "open_hat" ? 0.38 : 0.062;
+        const bp = this.ctx.createBiquadFilter();
+        bp.type = "bandpass";
+        bp.frequency.value = 8200 * Math.min(1.3, Math.max(0.75, ratio));
+        bp.Q.value = 1.8;
         const hp = this.ctx.createBiquadFilter();
         hp.type = "highpass";
-        hp.frequency.value = 5600 * ratio;
-        const ng = this.ctx.createGain();
-        ng.gain.setValueAtTime(0.48, now);
-        ng.gain.exponentialRampToValueAtTime(0.001, now + dur);
-        n.connect(hp);
-        hp.connect(ng);
-        ng.connect(out);
-        n.start(now);
-        n.stop(now + dur + 0.01);
+        hp.frequency.value = 6400;
+        const hg = this.ctx.createGain();
+        hg.gain.setValueAtTime(0.32, now);
+        hg.gain.exponentialRampToValueAtTime(0.0008, now + dur);
+        if (voice === "open_hat") {
+          this.activeOpenHatGain = hg;
+        }
+
+        // Six inharmonic square-wave oscillators matching core/dsp/src/hats.rs
+        const hatFreqs = [205.3, 304.4, 369.6, 522.7, 540.0, 800.0];
+        for (const f of hatFreqs) {
+          const sq = this.ctx.createOscillator();
+          sq.type = "square";
+          sq.frequency.value = f * ratio;
+          sq.connect(bp);
+          sq.start(now);
+          sq.stop(now + dur + 0.01);
+        }
+        bp.connect(hp);
+        hp.connect(hg);
+        hg.connect(out);
+        break;
+      }
+      case "cowbell": {
+        // Classic two-oscillator square pair (540 Hz + 800 Hz) + 2.53 kHz bandpass + 2-stage VCA
+        const bp = this.ctx.createBiquadFilter();
+        bp.type = "bandpass";
+        bp.frequency.value = 2530 * ratio;
+        bp.Q.value = 1.4;
+        const cg = this.ctx.createGain();
+        cg.gain.setValueAtTime(0.55, now);
+        cg.gain.exponentialRampToValueAtTime(0.16, now + 0.028);
+        cg.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+        for (const f of [540, 800]) {
+          const sq = this.ctx.createOscillator();
+          sq.type = "square";
+          sq.frequency.value = f * ratio;
+          sq.connect(bp);
+          sq.start(now);
+          sq.stop(now + 0.25);
+        }
+        bp.connect(cg);
+        cg.connect(out);
+        break;
+      }
+      case "rim": {
+        // Dual bridged-T ping resonators (470 Hz & 1660 Hz) + 250 Hz highpass
+        const hp = this.ctx.createBiquadFilter();
+        hp.type = "highpass";
+        hp.frequency.value = 250;
+        hp.connect(out);
+        for (const [hz, amp, dur] of [
+          [470, 0.55, 0.036],
+          [1660, 0.45, 0.022],
+        ] as const) {
+          const osc = this.ctx.createOscillator();
+          const rg = this.ctx.createGain();
+          osc.type = "sine";
+          osc.frequency.value = hz * ratio;
+          rg.gain.setValueAtTime(amp, now);
+          rg.gain.exponentialRampToValueAtTime(0.001, now + dur);
+          osc.connect(rg);
+          rg.connect(hp);
+          osc.start(now);
+          osc.stop(now + dur + 0.005);
+        }
         break;
       }
       default: {
+        // Tuned analog toms (Low 92 Hz, Mid 141 Hz, High 218 Hz) with 1.45x pitch glide
         const baseFreq: Record<string, number> = {
-          low_tom: 110,
-          mid_tom: 155,
-          high_tom: 215,
-          rim: 480,
-          cowbell: 540,
+          low_tom: 92,
+          mid_tom: 141,
+          high_tom: 218,
         };
-        const f0 = (baseFreq[voice] ?? 180) * ratio;
+        const f0 = (baseFreq[voice] ?? 140) * ratio;
         const osc = this.ctx.createOscillator();
         const g = this.ctx.createGain();
-        osc.type = voice === "cowbell" || voice === "rim" ? "square" : "sine";
-        osc.frequency.setValueAtTime(f0, now);
-        osc.frequency.exponentialRampToValueAtTime(f0 * 0.68, now + 0.14);
-        g.gain.setValueAtTime(0.55, now);
-        g.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(f0 * 1.45, now);
+        osc.frequency.exponentialRampToValueAtTime(f0, now + 0.045);
+        g.gain.setValueAtTime(0.72, now);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
         osc.connect(g);
         g.connect(out);
         osc.start(now);
-        osc.stop(now + 0.17);
+        osc.stop(now + 0.29);
         break;
       }
     }
