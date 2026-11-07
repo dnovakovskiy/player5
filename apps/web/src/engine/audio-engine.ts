@@ -17,7 +17,9 @@
 import hostSource from "./host.js?raw";
 import workletSource from "./worklet.js?raw";
 import { EngineHost, type CoreApi, type HostEvent, type HostMessage } from "./host.js";
+import { defaultRmxState, RmxFxRack, type RmxState } from "./rmx-fx";
 import { TimeMap } from "./timemap";
+import type { VoiceId } from "../voices";
 import wasmBase64 from "virtual:player5/wasm";
 import wasmUrl from "virtual:player5/wasm-url";
 
@@ -92,6 +94,9 @@ export class AudioEngine {
   private worklet: AudioWorkletNode | null = null;
   private script: ScriptProcessorNode | null = null;
   private host: EngineHost | null = null;
+  private rmx: RmxFxRack | null = null;
+  private rmxState: RmxState = defaultRmxState();
+  private rmxPeak = 0;
   private startPromise: Promise<void> | null = null;
   private wasm: Promise<WebAssembly.Module> | null = null;
   private timeMap: TimeMap | null = null;
@@ -251,7 +256,9 @@ export class AudioEngine {
     });
     node.port.onmessage = (e: MessageEvent<HostEvent>) => this.onHostEvent(e.data);
     node.onprocessorerror = () => this.teardown("audio worklet crashed; press Play to restart");
-    node.connect(ctx.destination);
+    const rmx = new RmxFxRack(ctx);
+    node.connect(rmx.input);
+    this.rmx = rmx;
     this.worklet = node;
     this.node = node;
   }
@@ -272,7 +279,9 @@ export class AudioEngine {
       }
       for (let c = 0; c < out.numberOfChannels; c++) out.getChannelData(c).set(mono);
     };
-    node.connect(ctx.destination);
+    const rmx = new RmxFxRack(ctx);
+    node.connect(rmx.input);
+    this.rmx = rmx;
     this.host = host;
     this.script = node;
     this.node = node;
@@ -291,6 +300,9 @@ export class AudioEngine {
     } catch {
       /* already disconnected */
     }
+    this.rmx?.dispose();
+    this.rmx = null;
+    this.rmxPeak = 0;
     this.worklet = null;
     this.script = null;
     this.host = null;
@@ -313,6 +325,7 @@ export class AudioEngine {
     this.send({ type: "latency", ms: this.latencyMs });
     this.send({ type: "nudge", ms: this.nudgeMs });
     this.send({ type: "clock-mode", mode: this.clockMode });
+    this.rmx?.apply(this.rmxState);
     this.runtimePlaying = false;
     this.syncTransport();
   }
@@ -344,6 +357,21 @@ export class AudioEngine {
         break;
       case "status": {
         const { type: _t, offset, ...status } = msg;
+        if (this.rmx) {
+          this.rmx.setBpm(status.tempo);
+          const rmxActive =
+            this.rmxState.sceneAmount > 0.005 ||
+            this.rmxState.releaseHeld ||
+            this.rmxState.xpadRolling ||
+            this.rmxPeak > 0.001;
+          if (rmxActive) {
+            const live = this.rmx.readPeak();
+            this.rmxPeak = Math.max(live, this.rmxPeak * 0.89);
+            if (this.rmxPeak > status.peak) status.peak = this.rmxPeak;
+          } else {
+            this.rmxPeak = 0;
+          }
+        }
         this.lastStatus = status;
         // Also in every status: a lost "offset" message must not leave
         // the clock sources without a time mapping.
@@ -452,6 +480,19 @@ export class AudioEngine {
     if (sample === null) return false;
     this.send({ type: "tap", sample });
     return true;
+  }
+
+  /** Applies Pioneer RMX-1000 Scene FX, Isolator FX and Release FX parameters. */
+  setRmxState(state: RmxState): void {
+    this.rmxState = { ...state };
+    this.rmx?.apply(this.rmxState);
+  }
+
+  /** Triggers an immediate synthesized X-Pad hit (starts audio if idle). */
+  async triggerRmxPad(voice: VoiceId, pitchShift = 0, velocity = 0.9): Promise<void> {
+    await this.ensureStarted();
+    this.rmxPeak = Math.max(this.rmxPeak, velocity * 0.5);
+    this.rmx?.triggerPad(voice, pitchShift, velocity);
   }
 
   private setState(state: AudioState, detail?: string): void {

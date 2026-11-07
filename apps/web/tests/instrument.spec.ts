@@ -337,3 +337,42 @@ test("the skip link focuses the grid and keeps the pattern in the URL", async ({
   await expect(step(page, "kick", 1)).toBeFocused();
   expect(page.url()).toBe(url);
 });
+
+test("RMX-1000 Station mode: X-Pad overdub, Scene FX, Isolator, Release lever and phone layout", async ({ page }) => {
+  const errors = guard(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Clear" }).click();
+  await page.locator("#mode-rmx").click();
+  await expect(app(page)).toHaveAttribute("data-surface", "rmx");
+  await expect(page.locator("#rmx-panel")).toBeVisible();
+  await expect(page.locator("#grid-panel")).toBeHidden();
+
+  // Enable Overdub and trigger Clap on the X-Pad
+  await page.locator("#rmx-overdub").click();
+  await expect(page.locator("#rmx-overdub")).toHaveAttribute("aria-pressed", "true");
+  await page.locator('[data-xpad-slot="2"]').click();
+  await expect(page.locator("#rmx-readout")).toContainText("X-PAD CLAP");
+
+  // Select Scene FX (SPIRAL UP) and set level
+  await page.locator('[data-scene-fx="spiral_up"]').click();
+  await page.locator("#rmx-scene-amount").fill("0.65");
+  await expect(page.locator("#rmx-scene-amount-out")).toHaveText("65%");
+  await expect(page.locator("#rmx-readout")).toContainText("SPIRAL UP 65%");
+
+  // Pull and release the Release FX lever: resets Scene FX to 0%
+  const lever = page.locator("#rmx-release-lever");
+  await lever.dispatchEvent("pointerdown");
+  await expect(lever).toHaveAttribute("aria-pressed", "true");
+  await page.evaluate(() => window.dispatchEvent(new PointerEvent("pointerup")));
+  await expect(lever).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator("#rmx-scene-amount-out")).toHaveText("0%");
+
+  // Check phone layout in RMX mode
+  await expectPhoneLayout(page);
+
+  // Switch back to Step Sequencer and verify Overdub recorded the Clap hit
+  await page.locator("#mode-seq").click();
+  await expect(app(page)).toHaveAttribute("data-surface", "sequencer");
+  await expect(step(page, "clap", 1)).toHaveAttribute("data-state", "accent");
+  expect(errors).toEqual([]);
+});

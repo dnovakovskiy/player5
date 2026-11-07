@@ -34,6 +34,10 @@ export function template(o: TemplateOptions): string {
   <a class="skip" href="#grid">Skip to the pattern</a>
   <header class="top">
     <h1 class="logo">player<span>5</span></h1>
+    <div class="mode-tabs" role="group" aria-label="Surface mode">
+      <button id="mode-seq" type="button" class="mode-tab" aria-pressed="true">Step Sequencer</button>
+      <button id="mode-rmx" type="button" class="mode-tab" aria-pressed="false">RMX-1000 Station</button>
+    </div>
     <div class="top-status">
       <span id="engine-mode" class="engine-mode" title="Audio engine runtime"></span>
       <span id="status" class="status" role="status" aria-live="polite">audio off</span>
@@ -68,7 +72,138 @@ export function template(o: TemplateOptions): string {
     </div>
   </section>
 
-  <section class="panel grid-panel" aria-labelledby="grid-title">
+  <section class="panel rmx-panel" id="rmx-panel" aria-labelledby="rmx-title" hidden>
+    <div class="panel-head rmx-head">
+      <div class="rmx-brand">
+        <h2 id="rmx-title">RMX-1000 · Remix Station</h2>
+        <output id="rmx-readout" class="rmx-readout" aria-live="polite">BPF ECHO 0% · X-PAD SNARE 1/8</output>
+      </div>
+      <button id="rmx-reset" type="button" class="small" title="Reset all RMX-1000 FX parameters">Reset FX</button>
+    </div>
+
+    <div class="rmx-grid">
+      <div class="rmx-box rmx-iso" role="group" aria-labelledby="rmx-iso-heading">
+        <div class="rmx-box-head">
+          <h3 id="rmx-iso-heading">ISOLATOR FX</h3>
+          <span class="hint">3-band EQ &amp; rhythmic gate</span>
+        </div>
+        <div class="rmx-modes" role="group" aria-label="Isolator FX mode">
+          <button type="button" data-iso-mode="isolator" aria-pressed="true">ISOLATOR</button>
+          <button type="button" data-iso-mode="cut_add" aria-pressed="false">CUT/ADD</button>
+          <button type="button" data-iso-mode="trans_roll" aria-pressed="false">TRANS/ROLL</button>
+          <button type="button" data-iso-mode="gate_drive" aria-pressed="false">GATE/DRIVE</button>
+        </div>
+        <div class="rmx-iso-bands">
+          <div class="rmx-band">
+            <label class="knob" for="rmx-iso-low">
+              <span class="knob-label">LOW <output id="rmx-iso-low-out" for="rmx-iso-low">0 dB</output></span>
+              <input id="rmx-iso-low" type="range" min="-48" max="6" step="1" value="0" />
+            </label>
+            <button id="rmx-kill-low" type="button" class="toggle small" aria-pressed="false">KILL LOW</button>
+          </div>
+          <div class="rmx-band">
+            <label class="knob" for="rmx-iso-mid">
+              <span class="knob-label">MID <output id="rmx-iso-mid-out" for="rmx-iso-mid">0 dB</output></span>
+              <input id="rmx-iso-mid" type="range" min="-48" max="6" step="1" value="0" />
+            </label>
+            <button id="rmx-kill-mid" type="button" class="toggle small" aria-pressed="false">KILL MID</button>
+          </div>
+          <div class="rmx-band">
+            <label class="knob" for="rmx-iso-high">
+              <span class="knob-label">HIGH <output id="rmx-iso-high-out" for="rmx-iso-high">0 dB</output></span>
+              <input id="rmx-iso-high" type="range" min="-48" max="6" step="1" value="0" />
+            </label>
+            <button id="rmx-kill-high" type="button" class="toggle small" aria-pressed="false">KILL HIGH</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="rmx-box rmx-xpad" role="group" aria-labelledby="rmx-xpad-heading">
+        <div class="rmx-box-head">
+          <h3 id="rmx-xpad-heading">X-PAD FX</h3>
+          <button id="rmx-bank" type="button" class="toggle small" aria-pressed="false">Bank A (BD/SD/CP/CH)</button>
+        </div>
+        <div class="rmx-pads" role="group" aria-label="X-Pad drum voices">
+          <button type="button" class="rmx-pad-btn" data-xpad-slot="0" aria-pressed="false">BD · KICK</button>
+          <button type="button" class="rmx-pad-btn" data-xpad-slot="1" aria-pressed="true">SD · SNARE</button>
+          <button type="button" class="rmx-pad-btn" data-xpad-slot="2" aria-pressed="false">CP · CLAP</button>
+          <button type="button" class="rmx-pad-btn" data-xpad-slot="3" aria-pressed="false">CH · HI-HAT</button>
+        </div>
+        <div class="rmx-strip-wrap">
+          <span class="label">TOUCH ROLL RIBBON (HOLD OR SLIDE)</span>
+          <div id="rmx-xpad-strip" class="rmx-strip" role="group" aria-label="X-Pad beat roll division">
+            <button type="button" data-roll-div="1" aria-pressed="false">1/1</button>
+            <button type="button" data-roll-div="2" aria-pressed="false">1/2</button>
+            <button type="button" data-roll-div="4" aria-pressed="false">1/4</button>
+            <button type="button" data-roll-div="8" aria-pressed="true">1/8</button>
+            <button type="button" data-roll-div="16" aria-pressed="false">1/16</button>
+            <button type="button" data-roll-div="32" aria-pressed="false">1/32</button>
+          </div>
+        </div>
+        <div class="rmx-xpad-controls">
+          <label class="knob" for="rmx-pitch">
+            <span class="knob-label">PITCH <output id="rmx-pitch-out" for="rmx-pitch">0 st</output></span>
+            <input id="rmx-pitch" type="range" min="-1" max="1" step="0.05" value="0" />
+          </label>
+          <div class="rmx-xpad-actions">
+            <button id="rmx-roll-latch" type="button" class="toggle small" aria-pressed="false" title="Hold roll continuously">LATCH ROLL</button>
+            <button id="rmx-overdub" type="button" class="toggle small" aria-pressed="false" title="Record X-Pad hits into the 16-step pattern">OVERDUB</button>
+            <button id="rmx-voice-mute" type="button" class="toggle small" aria-pressed="false" title="Silence selected X-Pad voice in pattern">PAD MUTE</button>
+            <button id="rmx-voice-clear" type="button" class="small" title="Erase selected X-Pad voice steps">ERASE PAD</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="rmx-box rmx-scene" role="group" aria-labelledby="rmx-scene-heading">
+        <div class="rmx-box-head">
+          <h3 id="rmx-scene-heading">SCENE FX</h3>
+          <span class="hint">Build Up &amp; Break Down</span>
+        </div>
+        <div class="rmx-scene-banks">
+          <div class="rmx-scene-col">
+            <span class="label rmx-build-label">BUILD UP</span>
+            <button type="button" class="rmx-fx-btn build" data-scene-fx="bpf_echo" aria-pressed="true">BPF ECHO</button>
+            <button type="button" class="rmx-fx-btn build" data-scene-fx="echo" aria-pressed="false">ECHO</button>
+            <button type="button" class="rmx-fx-btn build" data-scene-fx="noise" aria-pressed="false">NOISE</button>
+            <button type="button" class="rmx-fx-btn build" data-scene-fx="spiral_up" aria-pressed="false">SPIRAL UP</button>
+            <button type="button" class="rmx-fx-btn build" data-scene-fx="reverb_up" aria-pressed="false">REVERB UP</button>
+          </div>
+          <div class="rmx-scene-col">
+            <span class="label rmx-break-label">BREAK DOWN</span>
+            <button type="button" class="rmx-fx-btn break" data-scene-fx="hpf_echo" aria-pressed="false">HPF ECHO</button>
+            <button type="button" class="rmx-fx-btn break" data-scene-fx="lpf_echo" aria-pressed="false">LPF ECHO</button>
+            <button type="button" class="rmx-fx-btn break" data-scene-fx="crush_echo" aria-pressed="false">CRUSH ECHO</button>
+            <button type="button" class="rmx-fx-btn break" data-scene-fx="spiral_down" aria-pressed="false">SPIRAL DOWN</button>
+            <button type="button" class="rmx-fx-btn break" data-scene-fx="reverb_down" aria-pressed="false">REVERB DOWN</button>
+          </div>
+        </div>
+        <div class="rmx-scene-knobs">
+          <label class="knob" for="rmx-scene-amount">
+            <span class="knob-label">SCENE LEVEL / TIME <output id="rmx-scene-amount-out" for="rmx-scene-amount">0%</output></span>
+            <input id="rmx-scene-amount" type="range" min="0" max="1" step="0.01" value="0" />
+          </label>
+          <label class="knob" for="rmx-scene-sub">
+            <span class="knob-label">SUB PARAM (RESO / FB) <output id="rmx-scene-sub-out" for="rmx-scene-sub">50%</output></span>
+            <input id="rmx-scene-sub" type="range" min="0" max="1" step="0.01" value="0.5" />
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div class="rmx-release" role="group" aria-labelledby="rmx-release-heading">
+      <div class="rmx-release-modes">
+        <span class="label" id="rmx-release-heading">RELEASE FX</span>
+        <button type="button" data-release-mode="vinyl_brake" aria-pressed="true">VINYL BRAKE</button>
+        <button type="button" data-release-mode="echo" aria-pressed="false">ECHO</button>
+        <button type="button" data-release-mode="back_spin" aria-pressed="false">BACK SPIN</button>
+      </div>
+      <button id="rmx-release-lever" type="button" class="rmx-lever" aria-pressed="false" title="Hold to engage Release FX and clear Scene FX on release">
+        PULL RELEASE LEVER (HOLD)
+      </button>
+    </div>
+  </section>
+
+  <section class="panel grid-panel" id="grid-panel" aria-labelledby="grid-title">
     <div class="panel-head">
       <h2 id="grid-title">Pattern</h2>
       <span class="hint" id="grid-hint"></span>
@@ -77,7 +212,7 @@ export function template(o: TemplateOptions): string {
   </section>
 
   <div class="split">
-    <section class="panel voice-panel" aria-labelledby="voice-title">
+    <section class="panel voice-panel" id="voice-panel" aria-labelledby="voice-title">
       <div class="panel-head">
         <h2 id="voice-title">Voice</h2>
         <span class="hint">select a row label</span>

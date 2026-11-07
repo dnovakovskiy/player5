@@ -22,6 +22,7 @@ import { loadString, saveString } from "./storage";
 import { ClockPanel, type SourceKind } from "./ui/clock-panel";
 import { Grid } from "./ui/grid";
 import { formatDb, Meter } from "./ui/meter";
+import { RmxPanel } from "./ui/rmx-panel";
 import { template } from "./ui/template";
 import { CONTROL_LABELS, VOICES, voiceInfo, type ControlId, type VoiceId } from "./voices";
 
@@ -127,6 +128,55 @@ const clock = new ClockPanel(
   { bridge: bridgeOk, midi: midiOk },
 );
 
+const rmx = new RmxPanel($("rmx-panel"), {
+  audio,
+  getBpm: () => (clock.following && audio.lastStatus ? audio.lastStatus.tempo : spec.bpm),
+  getStep: () => playingStep,
+  onOverdubHit(voice, stepIdx, isAccent, tuneOffset) {
+    checkpoint(`rmx-overdub-${voice}`);
+    const v = spec.voices[voice];
+    const chars = [...v.steps];
+    const index = Math.max(0, Math.min(STEP_COUNT - 1, stepIdx));
+    chars[index] = isAccent ? "X" : "x";
+    v.steps = chars.join("");
+    if (Math.abs(tuneOffset) > 0.01) {
+      v.tune = Math.max(0, Math.min(1, Math.round((0.5 + tuneOffset * 0.45) * 100) / 100));
+    }
+    commit();
+  },
+  onToggleVoiceMute(voice) {
+    checkpoint();
+    spec.voices[voice].mute = !spec.voices[voice].mute;
+    commit();
+  },
+  onClearVoice(voice) {
+    checkpoint();
+    spec.voices[voice].steps = EMPTY_STEPS;
+    commit();
+  },
+  isVoiceMuted: (voice) => spec.voices[voice].mute,
+});
+
+// ---- surface mode (Step Sequencer vs RMX-1000 Station) ----
+
+type SurfaceMode = "sequencer" | "rmx";
+let surfaceMode: SurfaceMode = "sequencer";
+app.dataset.surface = surfaceMode;
+
+function setSurfaceMode(mode: SurfaceMode): void {
+  surfaceMode = mode;
+  app.dataset.surface = mode;
+  const isRmx = mode === "rmx";
+  $("mode-seq").setAttribute("aria-pressed", String(!isRmx));
+  $("mode-rmx").setAttribute("aria-pressed", String(isRmx));
+  $("rmx-panel").hidden = !isRmx;
+  $("grid-panel").hidden = isRmx;
+  $("voice-panel").hidden = isRmx;
+}
+
+$("mode-seq").addEventListener("click", () => setSurfaceMode("sequencer"));
+$("mode-rmx").addEventListener("click", () => setSurfaceMode("rmx"));
+
 // ---- rendering ----
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
@@ -197,6 +247,7 @@ function renderVoicePanel(): void {
 function renderControls(): void {
   renderGrid();
   renderVoicePanel();
+  rmx.render();
   if (!clock.following && !bpmEditing) bpmInput.value = String(spec.bpm);
   shuffle.value = String(spec.shuffle);
   accent.value = String(spec.accent);
