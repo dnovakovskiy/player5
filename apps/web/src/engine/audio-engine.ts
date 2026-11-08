@@ -19,6 +19,7 @@ import workletSource from "./worklet.js?raw";
 import { EngineHost, type CoreApi, type HostEvent, type HostMessage } from "./host.js";
 import { defaultRmxState, RmxFxRack, type RmxState } from "./rmx-fx";
 import { TimeMap } from "./timemap";
+import type { PatternSpec } from "../spec";
 import type { VoiceId } from "../voices";
 import wasmBase64 from "virtual:player5/wasm";
 import wasmUrl from "virtual:player5/wasm-url";
@@ -97,6 +98,8 @@ export class AudioEngine {
   private rmx: RmxFxRack | null = null;
   private rmxState: RmxState = defaultRmxState();
   private rmxPeak = 0;
+  private kitId = "";
+  private kitSpec: PatternSpec | null = null;
   private startPromise: Promise<void> | null = null;
   private wasm: Promise<WebAssembly.Module> | null = null;
   private timeMap: TimeMap | null = null;
@@ -326,6 +329,7 @@ export class AudioEngine {
     this.send({ type: "nudge", ms: this.nudgeMs });
     this.send({ type: "clock-mode", mode: this.clockMode });
     this.rmx?.apply(this.rmxState);
+    this.rmx?.setKitCharacter(this.kitId);
     this.runtimePlaying = false;
     this.syncTransport();
   }
@@ -353,6 +357,9 @@ export class AudioEngine {
         if (this.timeMap) this.timeMap.offset = msg.offset;
         break;
       case "step":
+        if (this.wantPlaying && msg.step >= 0 && this.kitId && this.kitSpec) {
+          this.rmx?.triggerKitStep(this.kitId, msg.step, this.kitSpec);
+        }
         this.events.onStep(this.wantPlaying ? msg.step : -1);
         break;
       case "status": {
@@ -486,6 +493,13 @@ export class AudioEngine {
   setRmxState(state: RmxState): void {
     this.rmxState = { ...state };
     this.rmx?.apply(this.rmxState);
+  }
+
+  /** Sets the active TR drum kit character & step layer spec. */
+  setKit(kitId: string, spec: PatternSpec): void {
+    this.kitId = kitId;
+    this.kitSpec = spec;
+    this.rmx?.setKitCharacter(kitId);
   }
 
   /** Triggers an immediate synthesized X-Pad hit (starts audio if idle). */

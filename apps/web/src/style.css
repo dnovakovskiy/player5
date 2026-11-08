@@ -1263,8 +1263,39 @@ input[type="range"] {
 }
 
 .howto-head {
-  align-items: flex-start;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   margin-bottom: 0;
+}
+.howto-mode-tabs {
+  display: inline-flex;
+  border: 1px solid #2b3b55;
+  border-radius: 8px;
+  overflow: hidden;
+  background-color: #131926;
+}
+.howto-mode-tab {
+  border: 0;
+  border-left: 1px solid #2b3b55;
+  border-radius: 0;
+  min-height: 34px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  background-color: #151c29;
+  color: var(--muted);
+}
+.howto-mode-tab:first-child {
+  border-left: 0;
+}
+.howto-mode-tab[aria-pressed="true"] {
+  background-color: #58c4dd;
+  color: #0b0d14;
+}
+.howto-steps[hidden] {
+  display: none;
 }
 .howto-badge {
   display: inline-block;

@@ -3,6 +3,7 @@
 // At default state (Scene FX = 0, Isolator = 0 dB, Release FX disengaged),
 // the dry signal passes through at unity gain with flat response.
 
+import type { PatternSpec } from "../spec";
 import type { VoiceId } from "../voices";
 
 export type SceneFxId =
@@ -129,6 +130,9 @@ function makeNoiseBuffer(ctx: AudioContext): AudioBuffer {
 
 export class RmxFxRack {
   readonly input: GainNode;
+  private readonly kitLowFilter: BiquadFilterNode;
+  private readonly kitTopFilter: BiquadFilterNode;
+  private readonly kitShaper: WaveShaperNode;
   private readonly xpadBus: GainNode;
   private readonly isoLowFilter: BiquadFilterNode;
   private readonly isoMidFilter: BiquadFilterNode;
@@ -161,6 +165,20 @@ export class RmxFxRack {
 
   constructor(private readonly ctx: AudioContext) {
     this.input = ctx.createGain();
+    this.kitLowFilter = ctx.createBiquadFilter();
+    this.kitLowFilter.type = "peaking";
+    this.kitLowFilter.frequency.value = 60;
+    this.kitLowFilter.Q.value = 0.85;
+    this.kitLowFilter.gain.value = 0;
+
+    this.kitTopFilter = ctx.createBiquadFilter();
+    this.kitTopFilter.type = "peaking";
+    this.kitTopFilter.frequency.value = 4500;
+    this.kitTopFilter.Q.value = 0.85;
+    this.kitTopFilter.gain.value = 0;
+
+    this.kitShaper = ctx.createWaveShaper();
+
     this.xpadBus = ctx.createGain();
     this.xpadBus.gain.value = 0.85;
 
@@ -238,7 +256,10 @@ export class RmxFxRack {
     this.meterBuf = new Float32Array(this.analyser.fftSize);
 
     // Wire graph
-    this.input.connect(this.isoLowFilter);
+    this.input.connect(this.kitLowFilter);
+    this.kitLowFilter.connect(this.kitTopFilter);
+    this.kitTopFilter.connect(this.kitShaper);
+    this.kitShaper.connect(this.isoLowFilter);
     this.xpadBus.connect(this.isoLowFilter);
 
     this.isoLowFilter.connect(this.isoMidFilter);
@@ -282,6 +303,234 @@ export class RmxFxRack {
   setBpm(bpm: number): void {
     if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 400) {
       this.bpm = bpm;
+    }
+  }
+
+  /**
+   * Configures the analog bus voicing for the active TR drum machine kit.
+   */
+  setKitCharacter(kitId: string): void {
+    const now = this.ctx.currentTime;
+    const smooth = 0.025;
+    let lowFreq = 60;
+    let lowGain = 0;
+    let topFreq = 4500;
+    let topGain = 0;
+    let driveCurve: Float32Array<ArrayBuffer> | null = null;
+
+    switch (kitId) {
+      case "sub-boom": // TR-8O8
+        lowFreq = 50;
+        lowGain = 3.2;
+        topFreq = 6200;
+        topGain = 1.2;
+        driveCurve = makeDriveCurve(0.18);
+        break;
+      case "club-punch": // TR-9O9
+        lowFreq = 70;
+        lowGain = 3.4;
+        topFreq = 7200;
+        topGain = 3.0;
+        driveCurve = makeDriveCurve(0.32);
+        break;
+      case "studio-disco": // TR-7O7
+        lowFreq = 64;
+        lowGain = 2.0;
+        topFreq = 3800;
+        topGain = 3.5;
+        driveCurve = makeCrushCurve(0.16);
+        break;
+      case "silver-electro": // TR-6O6
+        lowFreq = 78;
+        lowGain = 2.2;
+        topFreq = 8800;
+        topGain = 3.8;
+        driveCurve = makeDriveCurve(0.24);
+        break;
+      case "warehouse-raw": // TR-9O9 Rave Overdrive
+        lowFreq = 58;
+        lowGain = 4.5;
+        topFreq = 5400;
+        topGain = 3.2;
+        driveCurve = makeDriveCurve(0.62);
+        break;
+      case "latin-perc": // TR-72x Latin Perc
+        lowFreq = 190;
+        lowGain = 3.2;
+        topFreq = 4800;
+        topGain = 3.0;
+        break;
+      case "vintage-cr78": // CR-78 Vintage Rhythm
+        lowFreq = 120;
+        lowGain = 2.8;
+        topFreq = 2600;
+        topGain = -2.5;
+        driveCurve = makeDriveCurve(0.14);
+        break;
+    }
+
+    this.kitLowFilter.frequency.setTargetAtTime(lowFreq, now, smooth);
+    this.kitLowFilter.gain.setTargetAtTime(lowGain, now, smooth);
+    this.kitTopFilter.frequency.setTargetAtTime(topFreq, now, smooth);
+    this.kitTopFilter.gain.setTargetAtTime(topGain, now, smooth);
+    this.kitShaper.curve = driveCurve;
+  }
+
+  /**
+   * Fires authentic TR-series analog/PCM character layers synchronized to the
+   * Step Sequencer's current step so each TR kit has unmistakable drum timbres.
+   */
+  triggerKitStep(kitId: string, step: number, spec: PatternSpec): void {
+    if (!kitId || step < 0 || step >= 16) return;
+    const now = this.ctx.currentTime;
+    const stepChar = (v: VoiceId): string => {
+      const voice = spec.voices[v];
+      if (!voice || voice.mute || voice.level <= 0.01) return "-";
+      return voice.steps[step] ?? "-";
+    };
+    const isActive = (c: string) => c === "x" || c === "X" || c === "f" || c === "F";
+    const velOf = (v: VoiceId, c: string) => {
+      const base = c === "X" || c === "F" ? 0.95 : 0.7;
+      return base * (spec.voices[v]?.level ?? 0.8);
+    };
+
+    if (kitId === "club-punch" || kitId === "warehouse-raw") {
+      // TR-9O9 signature layers: hard 2-stage triangle pitch-punch kick + 6-bit metallic hat sizzle
+      const kc = stepChar("kick");
+      if (isActive(kc)) {
+        const v = velOf("kick", kc) * (kitId === "warehouse-raw" ? 0.55 : 0.42);
+        const osc = this.ctx.createOscillator();
+        const g = this.ctx.createGain();
+        osc.type = "triangle";
+        osc.frequency.setValueAtTime(290, now);
+        osc.frequency.exponentialRampToValueAtTime(68, now + 0.016);
+        osc.frequency.exponentialRampToValueAtTime(49, now + 0.09);
+        g.gain.setValueAtTime(v, now);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+        osc.connect(g);
+        g.connect(this.xpadBus);
+        osc.start(now);
+        osc.stop(now + 0.15);
+      }
+      const sc = stepChar("snare");
+      if (isActive(sc)) {
+        const v = velOf("snare", sc) * 0.35;
+        const n = this.ctx.createBufferSource();
+        n.buffer = this.noiseBuf;
+        const bp = this.ctx.createBiquadFilter();
+        bp.type = "bandpass";
+        bp.frequency.value = 3400;
+        bp.Q.value = 1.1;
+        const g = this.ctx.createGain();
+        g.gain.setValueAtTime(v, now);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.17);
+        n.connect(bp);
+        bp.connect(g);
+        g.connect(this.xpadBus);
+        n.start(now);
+        n.stop(now + 0.18);
+      }
+    } else if (kitId === "studio-disco") {
+      // TR-7O7 studio matrix: gated PCM-style snare punch & crisp cowbell/rim transient
+      const sc = stepChar("snare");
+      if (isActive(sc)) {
+        const v = velOf("snare", sc) * 0.42;
+        const n = this.ctx.createBufferSource();
+        n.buffer = this.noiseBuf;
+        const bp = this.ctx.createBiquadFilter();
+        bp.type = "bandpass";
+        bp.frequency.value = 2600;
+        bp.Q.value = 0.9;
+        const g = this.ctx.createGain();
+        g.gain.setValueAtTime(v, now);
+        g.gain.setValueAtTime(v * 0.85, now + 0.065);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
+        n.connect(bp);
+        bp.connect(g);
+        g.connect(this.xpadBus);
+        n.start(now);
+        n.stop(now + 0.12);
+      }
+    } else if (kitId === "latin-perc") {
+      // TR-72x Latin Percussion: High/Low Bongo & Conga slaps, Agogo bells & Cabasa shaker
+      for (const [vid, f0] of [
+        ["low_tom", 165],
+        ["mid_tom", 245],
+        ["high_tom", 370],
+      ] as const) {
+        const tc = stepChar(vid);
+        if (isActive(tc)) {
+          const v = velOf(vid, tc) * 0.5;
+          const osc = this.ctx.createOscillator();
+          const g = this.ctx.createGain();
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(f0 * 1.35, now);
+          osc.frequency.exponentialRampToValueAtTime(f0, now + 0.018);
+          g.gain.setValueAtTime(v, now);
+          g.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+          osc.connect(g);
+          g.connect(this.xpadBus);
+          osc.start(now);
+          osc.stop(now + 0.15);
+        }
+      }
+      const cbc = stepChar("cowbell");
+      if (isActive(cbc)) {
+        // Two-tone high Agogo bell
+        const v = velOf("cowbell", cbc) * 0.36;
+        const bp = this.ctx.createBiquadFilter();
+        bp.type = "bandpass";
+        bp.frequency.value = 3100;
+        bp.Q.value = 2.2;
+        const g = this.ctx.createGain();
+        g.gain.setValueAtTime(v, now);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+        for (const f of [675, 940]) {
+          const sq = this.ctx.createOscillator();
+          sq.type = "square";
+          sq.frequency.value = f;
+          sq.connect(bp);
+          sq.start(now);
+          sq.stop(now + 0.19);
+        }
+        bp.connect(g);
+        g.connect(this.xpadBus);
+      }
+    } else if (kitId === "vintage-cr78") {
+      // CR-78 Vintage CompuRhythm: hollow woodblock clave on rim & metallic tambourine on cowbell
+      const rc = stepChar("rim");
+      if (isActive(rc)) {
+        const v = velOf("rim", rc) * 0.48;
+        const osc = this.ctx.createOscillator();
+        const g = this.ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(740, now);
+        g.gain.setValueAtTime(v, now);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.045);
+        osc.connect(g);
+        g.connect(this.xpadBus);
+        osc.start(now);
+        osc.stop(now + 0.05);
+      }
+      const cbc = stepChar("cowbell");
+      if (isActive(cbc)) {
+        // Tambourine / Guiro metallic shimmer
+        const v = velOf("cowbell", cbc) * 0.35;
+        const n = this.ctx.createBufferSource();
+        n.buffer = this.noiseBuf;
+        const bp = this.ctx.createBiquadFilter();
+        bp.type = "bandpass";
+        bp.frequency.value = 6800;
+        bp.Q.value = 3.2;
+        const g = this.ctx.createGain();
+        g.gain.setValueAtTime(v, now);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+        n.connect(bp);
+        bp.connect(g);
+        g.connect(this.xpadBus);
+        n.start(now);
+        n.stop(now + 0.13);
+      }
     }
   }
 

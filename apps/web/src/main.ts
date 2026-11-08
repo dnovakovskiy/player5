@@ -189,6 +189,7 @@ function setSurfaceMode(mode: SurfaceMode): void {
   $("rmx-panel").hidden = !isRmx;
   $("grid-panel").hidden = isRmx;
   $("voice-panel").hidden = isRmx;
+  howTo.setGuideMode(mode);
 }
 
 $("mode-seq").addEventListener("click", () => setSurfaceMode("sequencer"));
@@ -362,6 +363,7 @@ function commit(): void {
   spec = sanitize(spec);
   renderControls();
   audio.setPattern(specBytes(spec));
+  audio.setKit(activeKitId, spec);
   shareCode.value = encodeCode(spec);
   scheduleUrlWrite();
 }
@@ -729,7 +731,7 @@ window.addEventListener("keydown", (e) => {
 
   if (e.code === "Slash" && !mod && !e.altKey) {
     e.preventDefault();
-    if (!e.repeat) howTo.toggle();
+    if (!e.repeat) howTo.toggle(surfaceMode);
     return;
   }
   if (e.code === "Space" && !mod && !e.altKey) {

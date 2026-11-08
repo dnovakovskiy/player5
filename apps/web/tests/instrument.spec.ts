@@ -394,16 +394,16 @@ test("Nu-Disco, House, and Techno presets and analog drum kit selector retune vo
   await expect(kitSelect).toHaveValue("sub-boom");
   await expect(page.locator("#bpm")).toHaveValue("126");
   await expect(app(page)).toHaveAttribute("data-kit", "sub-boom");
-  await expect(page.locator("#vc-tune-out")).toHaveText("22%");
-  await expect(page.locator("#vc-decay-out")).toHaveText("86%");
+  await expect(page.locator("#vc-tune-out")).toHaveText("12%");
+  await expect(page.locator("#vc-decay-out")).toHaveText("94%");
 
-  // Switch drum kit voicing to Club Punch Machine while keeping Warehouse Jack steps
-  await kitSelect.selectOption({ label: "Club Punch Machine" });
+  // Switch drum kit voicing to TR-9O9 · Club Punch while keeping Warehouse Jack steps
+  await kitSelect.selectOption({ label: "TR-9O9 · Club Punch" });
   await expect(presetSelect).toHaveValue("warehouse-jack");
   await expect(kitSelect).toHaveValue("club-punch");
   await expect(app(page)).toHaveAttribute("data-kit", "club-punch");
-  await expect(page.locator("#vc-tune-out")).toHaveText("64%");
-  await expect(page.locator("#vc-decay-out")).toHaveText("46%");
+  await expect(page.locator("#vc-tune-out")).toHaveText("68%");
+  await expect(page.locator("#vc-decay-out")).toHaveText("44%");
   await expect(step(page, "kick", 15)).toHaveAttribute("data-state", "on");
 
   // Load Peak-Time Techno preset
@@ -414,7 +414,7 @@ test("Nu-Disco, House, and Techno presets and analog drum kit selector retune vo
   expect(errors).toEqual([]);
 });
 
-test("MacBook Air keyboard bindings and 3Blue1Brown How-To video explainer", async ({ page }) => {
+test("MacBook Air keyboard bindings and 3Blue1Brown How-To video explainer (Step Sequencer vs RMX-1000 guides)", async ({ page }) => {
   const errors = guard(page);
   await page.goto("/");
   await page.getByRole("button", { name: "Clear" }).click();
@@ -427,20 +427,30 @@ test("MacBook Air keyboard bindings and 3Blue1Brown How-To video explainer", asy
   await page.keyboard.press("Shift+KeyB");
   await expect(step(page, "snare", 13)).toHaveAttribute("data-state", "flam");
 
-  // Switch drum kit via KeyU (Club Punch Machine) and adjust BPM via BracketRight
+  // Switch drum kit via KeyU (TR-9O9 · Club Punch) and adjust BPM via BracketRight
   await page.keyboard.press("KeyU");
   await expect(app(page)).toHaveAttribute("data-kit", "club-punch");
   await page.keyboard.press("BracketRight");
   await expect(page.locator("#bpm")).toHaveValue("125");
 
-  // Open the 3Blue1Brown How-To video explainer with '?' (Slash)
+  // Open the 3Blue1Brown How-To video explainer with '?' (Slash) in Step Sequencer mode
   await page.keyboard.press("Slash");
   const modal = page.locator("#how-to-modal");
   await expect(modal).toBeVisible();
-  await expect(page.locator("#howto-quickstart")).toBeVisible();
+  await expect(modal).toHaveAttribute("data-guide-mode", "sequencer");
+  await expect(page.locator("#howto-qs-seq")).toBeVisible();
+  await expect(page.locator("#howto-qs-rmx")).toBeHidden();
   await expect(page.locator("#manim-canvas")).toBeVisible();
   await page.locator('[data-howto-chapter="2"]').click();
-  await expect(page.locator("#howto-caption")).toContainText("synthesized in real time");
+  await expect(page.locator("#howto-caption")).toContainText("TR-8O8");
+
+  // Switch to the RMX-1000 Station Guide inside the How-To modal
+  await page.locator("#howto-mode-rmx").click();
+  await expect(modal).toHaveAttribute("data-guide-mode", "rmx");
+  await expect(page.locator("#howto-qs-rmx")).toBeVisible();
+  await expect(page.locator("#howto-qs-seq")).toBeHidden();
+  await expect(page.locator("#howto-caption")).toContainText("RMX-1000 Station");
+
   await page.keyboard.press("Escape");
   await expect(modal).toBeHidden();
   expect(errors).toEqual([]);
