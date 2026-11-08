@@ -2,6 +2,7 @@
 // controls, device lists) are filled in by the modules that own them.
 
 import { KITS, PRESETS, type PresetCategory } from "../presets";
+import { howToModalMarkup } from "./how-to";
 
 export interface TemplateOptions {
   single: boolean;
@@ -47,6 +48,7 @@ export function template(o: TemplateOptions): string {
       <button id="mode-seq" type="button" class="mode-tab" aria-pressed="true">Step Sequencer</button>
       <button id="mode-rmx" type="button" class="mode-tab" aria-pressed="false">RMX-1000 Station</button>
     </div>
+    <button id="how-to-btn" type="button" class="howto-btn" aria-keyshortcuts="?" title="Open 3Blue1Brown-style video explainer &amp; MacBook Air keyboard guide (?)">How to · ?</button>
     <div class="top-status">
       <span id="engine-mode" class="engine-mode" title="Audio engine runtime"></span>
       <span id="status" class="status" role="status" aria-live="polite">audio off</span>
@@ -327,8 +329,10 @@ export function template(o: TemplateOptions): string {
     <p id="share-msg" class="hint" role="status" aria-live="polite"></p>
   </section>
 
+  ${howToModalMarkup()}
+
   <footer class="foot">
-    <span>Space play/stop · Enter toggles a step · arrows move · T tap · Ctrl/Cmd+Z undo</span>
+    <span>Space play · 1–0 voices · A–K / Z–, steps 1–16 · Y–P kits · R release FX · T tap · ? how to</span>
     <span>TR-inspired drum machine for the DJ booth</span>
   </footer>`;
 }

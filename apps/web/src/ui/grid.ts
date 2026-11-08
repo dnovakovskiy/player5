@@ -19,6 +19,9 @@ const STATE: Record<StepChar, string> = {
   F: "accent-flam",
 };
 
+const VOICE_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"] as const;
+const STEP_KEYS = ["A", "S", "D", "F", "G", "H", "J", "K", "Z", "X", "C", "V", "B", "N", "M", ","] as const;
+
 export class Grid {
   private readonly steps: HTMLButtonElement[][] = [];
   private readonly rows: HTMLElement[] = [];
@@ -41,12 +44,14 @@ export class Grid {
 
       const head = document.createElement("div");
       head.className = "row-head";
+      const vKey = VOICE_KEYS[r] ?? "";
       const sel = document.createElement("button");
       sel.type = "button";
       sel.className = "voice-btn";
       sel.textContent = voice.short;
       sel.dataset.select = voice.id;
-      sel.title = `${voice.name}: show its controls`;
+      sel.dataset.key = vKey;
+      sel.title = `${voice.name} (Key ${vKey} select · Shift+${vKey} play · ⌥+${vKey} mute)`;
       sel.setAttribute("aria-label", `${voice.name} controls`);
       sel.addEventListener("click", () => handlers.onSelect(voice.id));
       const mute = document.createElement("button");
@@ -69,6 +74,7 @@ export class Grid {
         b.className = `step q${i >> 2}${i % 4 === 0 ? " beat" : ""}`;
         b.dataset.voice = voice.id;
         b.dataset.step = String(i + 1);
+        b.dataset.key = STEP_KEYS[i] ?? "";
         b.tabIndex = r === 0 && i === 0 ? 0 : -1;
         b.setAttribute("aria-label", `${voice.name} step ${i + 1}`);
         b.addEventListener("click", () => {
@@ -100,7 +106,7 @@ export class Grid {
         if (b.dataset.state !== state) {
           b.dataset.state = state;
           b.setAttribute("aria-pressed", String(c !== "-"));
-          b.title = `${voice.name} step ${i + 1}: ${describeStep(c)}`;
+          b.title = `${voice.name} step ${i + 1} [${STEP_KEYS[i]}]: ${describeStep(c)}`;
         }
       });
     });
@@ -114,7 +120,8 @@ export class Grid {
     if (step >= 0) for (const row of this.steps) row[step]?.classList.add("head");
   }
 
-  private setFocus(r: number, c: number, focus: boolean): void {
+  /** Updates roving tabindex to `(r, c)` and optionally focuses the step button. */
+  setFocus(r: number, c: number, focus: boolean): void {
     this.steps[this.focusRow]![this.focusCol]!.tabIndex = -1;
     this.focusRow = r;
     this.focusCol = c;

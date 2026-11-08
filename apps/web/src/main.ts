@@ -21,6 +21,7 @@ import {
 import { loadString, saveString } from "./storage";
 import { ClockPanel, type SourceKind } from "./ui/clock-panel";
 import { Grid } from "./ui/grid";
+import { HowToExplainer } from "./ui/how-to";
 import { formatDb, Meter } from "./ui/meter";
 import { RmxPanel } from "./ui/rmx-panel";
 import { template } from "./ui/template";
@@ -157,6 +158,8 @@ const rmx = new RmxPanel($("rmx-panel"), {
   },
   isVoiceMuted: (voice) => spec.voices[voice].mute,
 });
+
+const howTo = new HowToExplainer(app);
 
 // ---- surface mode (Step Sequencer vs RMX-1000 Station) ----
 
@@ -624,28 +627,294 @@ function isTextEntry(t: EventTarget | null): boolean {
   return false;
 }
 
+const VOICE_DIGIT_CODES = [
+  "Digit1",
+  "Digit2",
+  "Digit3",
+  "Digit4",
+  "Digit5",
+  "Digit6",
+  "Digit7",
+  "Digit8",
+  "Digit9",
+  "Digit0",
+] as const;
+
+const STEP_KEY_CODES = [
+  "KeyA",
+  "KeyS",
+  "KeyD",
+  "KeyF",
+  "KeyG",
+  "KeyH",
+  "KeyJ",
+  "KeyK",
+  "KeyZ",
+  "KeyX",
+  "KeyC",
+  "KeyV",
+  "KeyB",
+  "KeyN",
+  "KeyM",
+  "Comma",
+] as const;
+
+const KIT_KEY_CODES = ["KeyY", "KeyU", "KeyI", "KeyO", "KeyP"] as const;
+const RMX_ROLL_DIVS = [1, 2, 4, 8, 16, 32] as const;
+
+function applyPresetByIndex(idx: number): void {
+  const wrapped = ((idx % PRESETS.length) + PRESETS.length) % PRESETS.length;
+  const preset = PRESETS[wrapped];
+  if (!preset) return;
+  checkpoint();
+  const next = preset.spec();
+  next.render = { ...spec.render };
+  spec = next;
+  app.dataset.preset = preset.id;
+  if (preset.kitId) app.dataset.kit = preset.kitId;
+  commit();
+}
+
 window.addEventListener("keydown", (e) => {
   const mod = e.ctrlKey || e.metaKey;
-  if (e.code === "Space" && !mod && !isTextEntry(e.target)) {
+  if (e.key === "Escape") {
+    if (howTo.isOpen) {
+      e.preventDefault();
+      howTo.close();
+      return;
+    }
+    rmx.setReleaseLever(false);
+    return;
+  }
+  if (isTextEntry(e.target)) return;
+
+  if (e.code === "Slash" && !mod && !e.altKey) {
+    e.preventDefault();
+    if (!e.repeat) howTo.toggle();
+    return;
+  }
+  if (e.code === "Space" && !mod && !e.altKey) {
     // Space is play/stop everywhere, also on a focused button (Enter
     // activates buttons).
     e.preventDefault();
-    if (!e.repeat) void togglePlay();
+    if (!e.repeat) {
+      howTo.notifyKeyDown("Space", "Space → Play / Stop Transport");
+      void togglePlay();
+    }
     return;
   }
-  if (mod && !e.altKey && e.key.toLowerCase() === "z" && !isTextEntry(e.target)) {
+  if (mod && !e.altKey && e.key.toLowerCase() === "z") {
     e.preventDefault();
     if (e.shiftKey) redo();
     else undo();
     return;
   }
-  if (mod && !e.altKey && e.key.toLowerCase() === "y" && !isTextEntry(e.target)) {
+  if (mod && !e.altKey && e.key.toLowerCase() === "y") {
     e.preventDefault();
     redo();
     return;
   }
-  if (!mod && !e.altKey && (e.key === "t" || e.key === "T") && !isTextEntry(e.target)) {
-    if (!e.repeat) tap(e.timeStamp);
+  if (mod) return;
+
+  // 1. Number Row 1..0: Select Voice, Shift+1..0 Live Drum Trigger, Option+1..0 Mute
+  const vIdx = VOICE_DIGIT_CODES.indexOf(e.code as (typeof VOICE_DIGIT_CODES)[number]);
+  if (vIdx >= 0 && !e.repeat) {
+    const vInfo = VOICES[vIdx]!;
+    e.preventDefault();
+    if (e.altKey) {
+      checkpoint();
+      spec.voices[vInfo.id].mute = !spec.voices[vInfo.id].mute;
+      commit();
+      howTo.notifyKeyDown(e.code, `⌥+${vIdx === 9 ? 0 : vIdx + 1} → Mute ${vInfo.short}`);
+      return;
+    }
+    if (e.shiftKey) {
+      selected = vInfo.id;
+      rmx.triggerVoicePad(vInfo.id, true);
+      renderVoicePanel();
+      renderGrid();
+      howTo.notifyKeyDown(e.code, `Shift+${vIdx === 9 ? 0 : vIdx + 1} → Trigger ${vInfo.short}`);
+      return;
+    }
+    selected = vInfo.id;
+    grid.setFocus(vIdx, 0, false);
+    renderVoicePanel();
+    renderGrid();
+    if (surfaceMode === "rmx") {
+      if (vIdx < 4) {
+        rmx.triggerPadSlot(vIdx);
+      } else {
+        const div = RMX_ROLL_DIVS[vIdx - 4] ?? 8;
+        rmx.holdRoll(div);
+      }
+    }
+    howTo.notifyKeyDown(e.code, `${vIdx === 9 ? 0 : vIdx + 1} → Select ${vInfo.short} (${vInfo.name})`);
+    return;
+  }
+
+  if (e.altKey) return;
+
+  // 2. Home Row (A..K) + Bottom Row (Z..,) -> Steps 1..16
+  const stepIdx = STEP_KEY_CODES.indexOf(e.code as (typeof STEP_KEY_CODES)[number]);
+  if (stepIdx >= 0 && !e.repeat) {
+    e.preventDefault();
+    checkpoint();
+    const v = spec.voices[selected];
+    v.steps = e.shiftKey || flamMode ? toggleFlam(v.steps, stepIdx) : cycleStep(v.steps, stepIdx);
+    const rIdx = Math.max(
+      0,
+      VOICES.findIndex((item) => item.id === selected),
+    );
+    grid.setFocus(rIdx, stepIdx, false);
+    commit();
+    howTo.notifyKeyDown(
+      e.code,
+      `${e.shiftKey ? "Shift+" : ""}Step ${stepIdx + 1} (${selected.toUpperCase()})`,
+    );
+    return;
+  }
+
+  // 3. Kit Voicing Keys Y U I O P -> 5 Analog Drum Machine Kits
+  const kitIdx = KIT_KEY_CODES.indexOf(e.code as (typeof KIT_KEY_CODES)[number]);
+  if (kitIdx >= 0 && !e.repeat) {
+    const kit = KITS[kitIdx];
+    if (kit) {
+      e.preventDefault();
+      checkpoint();
+      spec = applyKitToSpec(spec, kit);
+      app.dataset.kit = kit.id;
+      commit();
+      howTo.notifyKeyDown(e.code, `Kit → ${kit.name}`);
+    }
+    return;
+  }
+
+  // 4. Surface Mode, Presets, Flam, RMX Release FX, Tempo, Nudge & Clear
+  switch (e.code) {
+    case "Backquote":
+      if (!e.repeat) {
+        e.preventDefault();
+        setSurfaceMode(surfaceMode === "rmx" ? "sequencer" : "rmx");
+        howTo.notifyKeyDown(e.code, `Surface → ${surfaceMode === "rmx" ? "RMX-1000" : "Step Sequencer"}`);
+      }
+      break;
+    case "KeyQ":
+      if (!e.repeat) {
+        e.preventDefault();
+        if (surfaceMode === "rmx") {
+          rmx.triggerPadSlot(0);
+          howTo.notifyKeyDown(e.code, "Q → X-Pad Slot 1");
+        } else {
+          const cur = PRESETS.findIndex((p) => p.id === app.dataset.preset);
+          applyPresetByIndex(cur <= 0 ? PRESETS.length - 1 : cur - 1);
+          howTo.notifyKeyDown(e.code, `Q → Preset: ${app.dataset.preset}`);
+        }
+      }
+      break;
+    case "KeyW":
+      if (!e.repeat) {
+        e.preventDefault();
+        if (surfaceMode === "rmx") {
+          rmx.triggerPadSlot(1);
+          howTo.notifyKeyDown(e.code, "W → X-Pad Slot 2");
+        } else {
+          const cur = PRESETS.findIndex((p) => p.id === app.dataset.preset);
+          applyPresetByIndex(cur < 0 ? 1 : cur + 1);
+          howTo.notifyKeyDown(e.code, `W → Preset: ${app.dataset.preset}`);
+        }
+      }
+      break;
+    case "KeyE":
+      if (!e.repeat) {
+        e.preventDefault();
+        if (surfaceMode === "rmx") {
+          rmx.triggerPadSlot(2);
+          howTo.notifyKeyDown(e.code, "E → X-Pad Slot 3");
+        } else {
+          flamMode = !flamMode;
+          renderControls();
+          howTo.notifyKeyDown(e.code, `E → Flam Edit ${flamMode ? "ON" : "OFF"}`);
+        }
+      }
+      break;
+    case "KeyR":
+      if (!e.repeat) {
+        e.preventDefault();
+        if (surfaceMode === "rmx" && e.shiftKey) {
+          rmx.triggerPadSlot(3);
+          howTo.notifyKeyDown(e.code, "Shift+R → X-Pad Slot 4");
+        } else {
+          rmx.setReleaseLever(true);
+          howTo.notifyKeyDown(e.code, "Hold R → RMX-1000 Release FX Engaged");
+        }
+      }
+      break;
+    case "KeyT":
+      if (!e.repeat) {
+        tap(e.timeStamp);
+        howTo.notifyKeyDown(e.code, "T → Tap Tempo");
+      }
+      break;
+    case "BracketLeft":
+    case "Minus":
+      if (!clock.following) {
+        e.preventDefault();
+        setBpm(e.shiftKey ? spec.bpm - 0.1 : Math.round(spec.bpm) - 1, "bpm");
+        howTo.notifyKeyDown(e.code, `[ → BPM ${spec.bpm}`);
+      }
+      break;
+    case "BracketRight":
+    case "Equal":
+      if (!clock.following) {
+        e.preventDefault();
+        setBpm(e.shiftKey ? spec.bpm + 0.1 : Math.round(spec.bpm) + 1, "bpm");
+        howTo.notifyKeyDown(e.code, `] → BPM ${spec.bpm}`);
+      }
+      break;
+    case "Semicolon":
+      e.preventDefault();
+      $<HTMLButtonElement>("nudge-down").dispatchEvent(
+        new MouseEvent("click", { shiftKey: e.shiftKey }),
+      );
+      howTo.notifyKeyDown(e.code, "; → Phase Nudge Earlier");
+      break;
+    case "Quote":
+      e.preventDefault();
+      $<HTMLButtonElement>("nudge-up").dispatchEvent(
+        new MouseEvent("click", { shiftKey: e.shiftKey }),
+      );
+      howTo.notifyKeyDown(e.code, "' → Phase Nudge Later");
+      break;
+    case "KeyL":
+      if (!e.repeat) {
+        e.preventDefault();
+        $<HTMLButtonElement>("resync").click();
+        howTo.notifyKeyDown(e.code, "L → Re-sync Bar Phase");
+      }
+      break;
+    case "Period":
+      if (!e.repeat) {
+        e.preventDefault();
+        checkpoint();
+        spec.voices[selected].mute = !spec.voices[selected].mute;
+        commit();
+        howTo.notifyKeyDown(e.code, `. → Mute ${selected.toUpperCase()}`);
+      }
+      break;
+    case "Backspace":
+      if (!e.repeat) {
+        e.preventDefault();
+        checkpoint();
+        if (e.shiftKey) {
+          for (const v of VOICES) spec.voices[v.id].steps = EMPTY_STEPS;
+          howTo.notifyKeyDown(e.code, "Shift+Delete → Clear All Voices");
+        } else {
+          spec.voices[selected].steps = EMPTY_STEPS;
+          howTo.notifyKeyDown(e.code, `Delete → Clear ${selected.toUpperCase()}`);
+        }
+        commit();
+      }
+      break;
   }
 });
 window.addEventListener("pagehide", () => {
@@ -653,6 +922,14 @@ window.addEventListener("pagehide", () => {
 });
 window.addEventListener("keyup", (e) => {
   if (e.code === "Space" && e.target instanceof HTMLButtonElement) e.preventDefault();
+  if (e.code === "KeyR") rmx.setReleaseLever(false);
+  if (
+    ["Digit5", "Digit6", "Digit7", "Digit8", "Digit9", "Digit0"].includes(e.code) &&
+    surfaceMode === "rmx"
+  ) {
+    rmx.releaseRoll();
+  }
+  howTo.notifyKeyUp(e.code);
 });
 
 // ---- boot ----

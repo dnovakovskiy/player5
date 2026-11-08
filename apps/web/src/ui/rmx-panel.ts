@@ -86,6 +86,52 @@ export class RmxPanel {
     return this.state;
   }
 
+  /** Triggers one of the 4 X-Pad slots (0..3) in the active bank. */
+  triggerPadSlot(slot: number): void {
+    const bank = this.state.xpadBankB ? BANK_B : BANK_A;
+    const pad = bank[slot];
+    if (!pad) return;
+    this.state.xpadVoice = pad.id;
+    this.firePadHit(true);
+    this.pushState();
+  }
+
+  /** Triggers any of the 10 voices directly through the RMX X-Pad synth & overdub. */
+  triggerVoicePad(voice: VoiceId, accent = true): void {
+    this.state.xpadVoice = voice;
+    this.firePadHit(accent);
+    this.pushState();
+  }
+
+  /** Engages or releases the spring-loaded Release FX lever from keyboard shortcuts. */
+  setReleaseLever(held: boolean): void {
+    if (held) {
+      if (this.state.releaseHeld) return;
+      void this.cb.audio.ensureStarted().catch(() => {});
+      this.state.releaseHeld = true;
+      this.pushState();
+    } else {
+      if (!this.state.releaseHeld) return;
+      this.state.releaseHeld = false;
+      this.state.sceneAmount = 0;
+      if (!this.rollLatched) this.stopRoll();
+      this.pushState();
+    }
+  }
+
+  /** Starts a beat-roll division from a held keyboard key. */
+  holdRoll(div: RollDivision): void {
+    this.startRoll(div);
+  }
+
+  /** Ends a keyboard-held beat roll unless Latch Roll is active. */
+  releaseRoll(): void {
+    if (!this.rollLatched && !this.rollPointerDown) {
+      this.stopRoll();
+      this.pushState();
+    }
+  }
+
   private bind(): void {
     const $ = <T extends HTMLElement>(id: string) => this.root.querySelector<T>(`#${id}`)!;
 

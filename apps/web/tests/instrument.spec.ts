@@ -409,3 +409,34 @@ test("Nu-Disco, House, and Techno presets and analog drum kit selector retune vo
   await expect(step(page, "low_tom", 2)).toHaveAttribute("data-state", "on");
   expect(errors).toEqual([]);
 });
+
+test("MacBook Air keyboard bindings and 3Blue1Brown How-To video explainer", async ({ page }) => {
+  const errors = guard(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Clear" }).click();
+
+  // Select Snare (Digit2), toggle Step 5 (KeyG) to hit, and Shift+Step 13 (KeyB) to flam
+  await page.keyboard.press("Digit2");
+  await expect(page.locator("#voice-title")).toHaveText("SD · Snare drum");
+  await page.keyboard.press("KeyG");
+  await expect(step(page, "snare", 5)).toHaveAttribute("data-state", "on");
+  await page.keyboard.press("Shift+KeyB");
+  await expect(step(page, "snare", 13)).toHaveAttribute("data-state", "flam");
+
+  // Switch drum kit via KeyU (Club Punch Machine) and adjust BPM via BracketRight
+  await page.keyboard.press("KeyU");
+  await expect(app(page)).toHaveAttribute("data-kit", "club-punch");
+  await page.keyboard.press("BracketRight");
+  await expect(page.locator("#bpm")).toHaveValue("125");
+
+  // Open the 3Blue1Brown How-To video explainer with '?' (Slash)
+  await page.keyboard.press("Slash");
+  const modal = page.locator("#how-to-modal");
+  await expect(modal).toBeVisible();
+  await expect(page.locator("#manim-canvas")).toBeVisible();
+  await page.locator('[data-howto-chapter="2"]').click();
+  await expect(page.locator("#howto-formula")).toContainText("sin(2π");
+  await page.keyboard.press("Escape");
+  await expect(modal).toBeHidden();
+  expect(errors).toEqual([]);
+});
