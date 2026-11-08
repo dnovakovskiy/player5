@@ -390,6 +390,8 @@ test("Nu-Disco, House, and Techno presets and analog drum kit selector retune vo
   await expect(step(page, "clap", 5)).toHaveAttribute("data-state", "accent-flam");
 
   await presetSelect.selectOption({ label: "Warehouse Jack" });
+  await expect(presetSelect).toHaveValue("warehouse-jack");
+  await expect(kitSelect).toHaveValue("sub-boom");
   await expect(page.locator("#bpm")).toHaveValue("126");
   await expect(app(page)).toHaveAttribute("data-kit", "sub-boom");
   await expect(page.locator("#vc-tune-out")).toHaveText("22%");
@@ -397,6 +399,8 @@ test("Nu-Disco, House, and Techno presets and analog drum kit selector retune vo
 
   // Switch drum kit voicing to Club Punch Machine while keeping Warehouse Jack steps
   await kitSelect.selectOption({ label: "Club Punch Machine" });
+  await expect(presetSelect).toHaveValue("warehouse-jack");
+  await expect(kitSelect).toHaveValue("club-punch");
   await expect(app(page)).toHaveAttribute("data-kit", "club-punch");
   await expect(page.locator("#vc-tune-out")).toHaveText("64%");
   await expect(page.locator("#vc-decay-out")).toHaveText("46%");
@@ -433,9 +437,10 @@ test("MacBook Air keyboard bindings and 3Blue1Brown How-To video explainer", asy
   await page.keyboard.press("Slash");
   const modal = page.locator("#how-to-modal");
   await expect(modal).toBeVisible();
+  await expect(page.locator("#howto-quickstart")).toBeVisible();
   await expect(page.locator("#manim-canvas")).toBeVisible();
   await page.locator('[data-howto-chapter="2"]').click();
-  await expect(page.locator("#howto-formula")).toContainText("sin(2π");
+  await expect(page.locator("#howto-caption")).toContainText("synthesized in real time");
   await page.keyboard.press("Escape");
   await expect(modal).toBeHidden();
   expect(errors).toEqual([]);

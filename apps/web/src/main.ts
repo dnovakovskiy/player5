@@ -47,7 +47,20 @@ function initialSpec(): PatternSpec {
   return (saved && decodeCode(saved)) || DEFAULT_PRESET.spec();
 }
 
+interface HistoryEntry {
+  spec: PatternSpec;
+  presetId: string;
+  kitId: string;
+}
+
+function findMatchingPresetId(s: PatternSpec): string {
+  const code = encodeCode(s);
+  return PRESETS.find((p) => encodeCode(p.spec()) === code)?.id ?? "";
+}
+
 let spec: PatternSpec = initialSpec();
+let activePresetId = findMatchingPresetId(spec);
+let activeKitId = PRESETS.find((p) => p.id === activePresetId)?.kitId ?? "";
 let selected: VoiceId = "kick";
 let flamMode = false;
 /** Step being heard (the playhead). */
@@ -265,6 +278,12 @@ function renderControls(): void {
   limiter.checked = spec.render.limiter;
   flamModeBtn.setAttribute("aria-pressed", String(flamMode));
   app.dataset.flamMode = String(flamMode);
+  presetSelect.value = activePresetId;
+  kitSelect.value = activeKitId;
+  if (activePresetId) app.dataset.preset = activePresetId;
+  else delete app.dataset.preset;
+  if (activeKitId) app.dataset.kit = activeKitId;
+  else delete app.dataset.kit;
   $("grid-hint").textContent = flamMode
     ? "flam edit: tap toggles a flam"
     : "tap a step: off → hit → accent";
@@ -378,6 +397,22 @@ function writeUrl(): void {
 
 // ---- undo ----
 
+function snapshotState(): string {
+  const entry: HistoryEntry = { spec, presetId: activePresetId, kitId: activeKitId };
+  return JSON.stringify(entry);
+}
+
+function restoreSnapshot(raw: string): void {
+  const parsed = JSON.parse(raw) as HistoryEntry | PatternSpec;
+  if (parsed && typeof parsed === "object" && "spec" in parsed) {
+    spec = sanitize(parsed.spec);
+    activePresetId = parsed.presetId ?? "";
+    activeKitId = parsed.kitId ?? "";
+  } else {
+    spec = sanitize(parsed);
+  }
+}
+
 /** Saves the current pattern for undo. Same-key changes within 1.5 s (a slider drag) coalesce. */
 function checkpoint(key = ""): void {
   const now = performance.now();
@@ -386,7 +421,7 @@ function checkpoint(key = ""): void {
     return;
   }
   lastCheckpoint = { key, at: now };
-  undoStack.push(JSON.stringify(spec));
+  undoStack.push(snapshotState());
   if (undoStack.length > 200) undoStack.shift();
   redoStack.length = 0;
 }
@@ -394,8 +429,8 @@ function checkpoint(key = ""): void {
 function undo(): void {
   const prev = undoStack.pop();
   if (prev === undefined) return;
-  redoStack.push(JSON.stringify(spec));
-  spec = sanitize(JSON.parse(prev));
+  redoStack.push(snapshotState());
+  restoreSnapshot(prev);
   lastCheckpoint = { key: "", at: 0 };
   commit();
 }
@@ -403,8 +438,8 @@ function undo(): void {
 function redo(): void {
   const next = redoStack.pop();
   if (next === undefined) return;
-  undoStack.push(JSON.stringify(spec));
-  spec = sanitize(JSON.parse(next));
+  undoStack.push(snapshotState());
+  restoreSnapshot(next);
   lastCheckpoint = { key: "", at: 0 };
   commit();
 }
@@ -505,24 +540,28 @@ flamModeBtn.addEventListener("click", () => {
 
 presetSelect.addEventListener("change", () => {
   const preset = PRESETS.find((p) => p.id === presetSelect.value);
-  presetSelect.value = "";
-  if (!preset) return;
+  if (!preset) {
+    presetSelect.value = activePresetId;
+    return;
+  }
   checkpoint();
   const next = preset.spec();
   next.render = { ...spec.render }; // the booth's master settings stay
   spec = next;
-  app.dataset.preset = preset.id;
-  if (preset.kitId) app.dataset.kit = preset.kitId;
+  activePresetId = preset.id;
+  if (preset.kitId) activeKitId = preset.kitId;
   commit();
 });
 
 kitSelect.addEventListener("change", () => {
   const kit = KITS.find((k) => k.id === kitSelect.value);
-  kitSelect.value = "";
-  if (!kit) return;
+  if (!kit) {
+    kitSelect.value = activeKitId;
+    return;
+  }
   checkpoint();
   spec = applyKitToSpec(spec, kit);
-  app.dataset.kit = kit.id;
+  activeKitId = kit.id;
   commit();
 });
 
@@ -670,8 +709,8 @@ function applyPresetByIndex(idx: number): void {
   const next = preset.spec();
   next.render = { ...spec.render };
   spec = next;
-  app.dataset.preset = preset.id;
-  if (preset.kitId) app.dataset.kit = preset.kitId;
+  activePresetId = preset.id;
+  if (preset.kitId) activeKitId = preset.kitId;
   commit();
 }
 
@@ -782,7 +821,7 @@ window.addEventListener("keydown", (e) => {
       e.preventDefault();
       checkpoint();
       spec = applyKitToSpec(spec, kit);
-      app.dataset.kit = kit.id;
+      activeKitId = kit.id;
       commit();
       howTo.notifyKeyDown(e.code, `Kit → ${kit.name}`);
     }

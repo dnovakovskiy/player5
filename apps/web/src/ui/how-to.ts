@@ -1,47 +1,39 @@
-// 3Blue1Brown / Manim-style interactive video explainer and MacBook Air
-// keyboard controller for player5. Renders a 60 FPS procedural vector-math
-// animation on an HTML5 <canvas> with synchronized captions, chapter markers,
-// timeline scrubbing, optional procedural Manim-style chimes, and live
-// MacBook Air key-highlight feedback.
+// 3Blue1Brown-style interactive visual explainer, step-by-step quick-start
+// guide, and MacBook Air keyboard map for player5.
 
 export interface Chapter {
   id: number;
   title: string;
-  formula: string;
   startSec: number;
   endSec: number;
 }
 
-export const EXPLAINER_DURATION_SEC = 60;
+export const EXPLAINER_DURATION_SEC = 120;
 
 export const CHAPTERS: readonly Chapter[] = [
   {
     id: 0,
-    title: "1 · Phase Circle & 16-Step Home Row",
-    formula: "θ(t) = 2π · (BPM / 60) · t   →   Steps 1–8: [A..K] · Steps 9–16: [Z..,]",
+    title: "1 · The 16-Step Circle & Home Row",
     startSec: 0,
-    endSec: 15,
-  },
-  {
-    id: 1,
-    title: "2 · 10 Voices, Kits & Mute Matrix",
-    formula: "Voices V₁..V₁₀: [1..0] · Live Trigger: Shift+[1..0] · Kits: [Y U I O P]",
-    startSec: 15,
     endSec: 30,
   },
   {
-    id: 2,
-    title: "3 · Analog Drum Circuit Math",
-    formula: "y(t) = e^(−t/τ) · sin(2π ∫ f(τ) dτ)  +  ∑ sgn(sin 2π fₖ t)",
+    id: 1,
+    title: "2 · 10 Drum Voices & Sound Kits",
     startSec: 30,
-    endSec: 45,
+    endSec: 60,
+  },
+  {
+    id: 2,
+    title: "3 · Shaping Analog Drum Sounds",
+    startSec: 60,
+    endSec: 90,
   },
   {
     id: 3,
-    title: "4 · RMX-1000 & Pioneer Booth Sync",
-    formula: "Surface: [`] · X-Pad: [Q W E R] · Release Lever: Hold [R] · Nudge: [; ']",
-    startSec: 45,
-    endSec: 60,
+    title: "4 · RMX-1000 FX & DJ Booth Sync",
+    startSec: 90,
+    endSec: 120,
   },
 ];
 
@@ -54,67 +46,67 @@ interface Caption {
 const CAPTIONS: readonly Caption[] = [
   {
     from: 0,
-    to: 5,
-    text: "Think of a 4/4 bar not as a static row of boxes, but as a phase vector rotating around a unit circle at angular velocity ω = 2π · BPM / 240.",
-  },
-  {
-    from: 5,
     to: 10,
-    text: "Unrolling those 16 sixteenth-note phase angles onto your MacBook Air keyboard places Steps 1–8 on the home row (A S D F G H J K) and Steps 9–16 directly below (Z X C V B N M ,).",
+    text: "A 16-step pattern is one musical bar of 4 beats, divided into 16 sixteenth-note steps that repeat in a continuous loop.",
   },
   {
     from: 10,
-    to: 15,
-    text: "Tapping any step key cycles Off → Hit (x) → Accent (X). Holding Shift while pressing a step key adds a pre-beat Flam grace note (−Δt) in a single stroke.",
-  },
-  {
-    from: 15,
     to: 20,
-    text: "The number row 1 through 0 maps directly to the 10 analog drum voices: Kick, Snare, Low/Mid/High Toms, Rimshot, Clap, Closed/Open Hats, and Cowbell.",
+    text: "Unrolling that circle onto your MacBook Air keyboard puts Steps 1–8 on the Home Row (A S D F G H J K) and Steps 9–16 on the row below (Z X C V B N M ,).",
   },
   {
     from: 20,
-    to: 25,
-    text: "Hold Shift + 1..0 to finger-drum any voice live, or hold Option (⌥) + 1..0 to toggle its mute state Mₖ ∈ {0, 1} in the mix without moving your hands.",
-  },
-  {
-    from: 25,
     to: 30,
-    text: "Keys Y, U, I, O, P hot-swap the 5 analog drum machine circuit voicings—from deep booming sub-bass to crisp studio disco and raw warehouse techno—while preserving your pattern.",
+    text: "Tap any step key once for a normal hit, twice for a louder Accent, and a third time to clear it. Hold Shift + a step key to add a double-hit Flam.",
   },
   {
     from: 30,
-    to: 35,
-    text: "Every drum sound is synthesized from first principles: the kick is a bridged-T resonator whose instantaneous frequency f(t) sweeps exponentially downward on each trigger.",
-  },
-  {
-    from: 35,
     to: 40,
-    text: "Hi-hats sum 6 inharmonic square-wave oscillators through a high-Q bandpass filter, while the hand-clap fires 4 sawtooth-scheduled noise bursts at 0, 10, 21, and 31 ms.",
+    text: "The number keys 1 through 0 select which of the 10 drum voices you are editing: Kick, Snare, Low/Mid/High Toms, Rimshot, Clap, Closed/Open Hats, and Cowbell.",
   },
   {
     from: 40,
-    to: 45,
-    text: "Increasing Shuffle warps odd-numbered sixteenth steps later in phase by Δθ, creating the signature swung pocket of classic house and boogie.",
-  },
-  {
-    from: 45,
     to: 50,
-    text: "Press Backquote (`) to flip into the Pioneer RMX-1000 Remix Station. Keys Q, W, E, R trigger the 4 X-Pad drum pads, while 5–0 engage 1/1 to 1/32 beat-roll ribbons.",
+    text: "Hold Shift + 1..0 to play any drum sound live with your fingers, or hold Option (⌥) + 1..0 to mute and unmute that drum in the mix.",
   },
   {
     from: 50,
-    to: 55,
-    text: "Hold R at any time to pull the spring-loaded Release FX lever (Vinyl Brake, Echo Out, or Back Spin). Releasing R snaps cleanly back into the dry 16-step groove.",
+    to: 60,
+    text: "Press Y, U, I, O, or P (or use the Drum kit menu) to swap the entire analog drum machine sound character without losing your step pattern.",
   },
   {
-    from: 55,
-    to: 60,
-    text: "In the booth, use [ and ] to trim BPM, ; and ' to nudge phase by ±1 ms, T to tap tempo, and Space to start or stop playback.",
+    from: 60,
+    to: 70,
+    text: "Every drum voice is synthesized in real time. Adjusting Tune and Decay on the Kick controls how deep the bass pitch drops and how long the sub-bass rings.",
+  },
+  {
+    from: 70,
+    to: 80,
+    text: "Closed and Open Hi-Hats blend 6 metallic oscillators—and just like a real hi-hat pedal, playing a Closed Hat automatically chokes a ringing Open Hat.",
+  },
+  {
+    from: 80,
+    to: 90,
+    text: "The Snare and Hand-Clap let you dial in wire snap and room decay, while the Shuffle slider delays every second 16th-note step for house and disco swing.",
+  },
+  {
+    from: 90,
+    to: 100,
+    text: "Press the Backquote (`) key (or click RMX-1000 Station) to switch into live performance FX mode. Keys Q, W, E, R trigger the 4 X-Pad drum pads.",
+  },
+  {
+    from: 100,
+    to: 110,
+    text: "Hold R at any time to pull the spring-loaded Release FX lever (Vinyl Brake, Echo Out, or Back Spin). Let go of R to drop cleanly back into the beat.",
+  },
+  {
+    from: 110,
+    to: 120,
+    text: "To lock in with a DJ set, press Space to Play/Stop, T to tap tempo, [ and ] to nudge BPM, and ; or ' to align the beat phase by ±1 ms.",
   },
 ];
 
-// Manim signature color palette
+// 3Blue1Brown visual palette
 const C_BG = "#0b0d14";
 const C_GRID = "#162032";
 const C_AXIS = "#2b3b55";
@@ -204,7 +196,6 @@ export class HowToExplainer {
   private readonly scrub: HTMLInputElement;
   private readonly timeOut: HTMLElement;
   private readonly captionEl: HTMLElement;
-  private readonly formulaEl: HTMLElement;
   private readonly soundBtn: HTMLButtonElement;
   private readonly speedBtn: HTMLButtonElement;
   private readonly keyFeedbackEl: HTMLElement;
@@ -229,7 +220,6 @@ export class HowToExplainer {
     this.scrub = root.querySelector<HTMLInputElement>("#howto-scrub")!;
     this.timeOut = root.querySelector<HTMLElement>("#howto-time")!;
     this.captionEl = root.querySelector<HTMLElement>("#howto-caption")!;
-    this.formulaEl = root.querySelector<HTMLElement>("#howto-formula")!;
     this.soundBtn = root.querySelector<HTMLButtonElement>("#howto-sound")!;
     this.speedBtn = root.querySelector<HTMLButtonElement>("#howto-speed")!;
     this.keyFeedbackEl = root.querySelector<HTMLElement>("#howto-live-key")!;
@@ -322,7 +312,8 @@ export class HowToExplainer {
     }
 
     this.speedBtn.addEventListener("click", () => {
-      this.speed = this.speed === 1 ? 1.5 : this.speed === 1.5 ? 0.75 : 1;
+      this.speed =
+        this.speed === 1 ? 0.75 : this.speed === 0.75 ? 0.5 : this.speed === 0.5 ? 1.25 : 1;
       this.speedBtn.textContent = `${this.speed}×`;
     });
 
@@ -344,7 +335,7 @@ export class HowToExplainer {
         setTimeout(() => {
           this.activeCodes.delete(code);
           if (this.openState) this.drawFrame();
-        }, 350);
+        }, 450);
       });
     }
   }
@@ -365,13 +356,12 @@ export class HowToExplainer {
       if (this.currentSec >= EXPLAINER_DURATION_SEC) {
         this.currentSec = 0;
       }
-      // Optional soft harmonic chime on quarter-bar transitions
-      const chimeIdx = Math.floor(this.currentSec * 2);
+      const chimeIdx = Math.floor(this.currentSec * 0.5);
       if (this.soundOn && chimeIdx !== this.lastChimeStep) {
         this.lastChimeStep = chimeIdx;
         const scale = [261.6, 329.6, 392.0, 523.25, 659.25];
         const freq = scale[chimeIdx % scale.length]!;
-        if (chimeIdx % 4 === 0) this.playChime(freq, 0.06);
+        if (chimeIdx % 2 === 0) this.playChime(freq, 0.05);
       }
       this.renderUi();
     }
@@ -419,7 +409,6 @@ export class HowToExplainer {
 
     const ch =
       CHAPTERS.find((c) => this.currentSec >= c.startSec && this.currentSec < c.endSec) ?? CHAPTERS[0]!;
-    this.formulaEl.textContent = ch.formula;
     for (const [idx, btn] of this.chapterBtns.entries()) {
       btn.setAttribute("aria-pressed", String(idx === ch.id));
     }
@@ -435,7 +424,7 @@ export class HowToExplainer {
   private drawFrame(): void {
     const ctx = this.ctx2d;
     const W = 720;
-    const H = 360;
+    const H = 340;
     if (this.canvas.width !== W || this.canvas.height !== H) {
       this.canvas.width = W;
       this.canvas.height = H;
@@ -463,57 +452,55 @@ export class HowToExplainer {
       ctx.stroke();
     }
 
-    // 2. Dispatch by Chapter
-    if (t < 15) {
+    // 2. Dispatch by Chapter (30 seconds per chapter)
+    if (t < 30) {
       this.drawChapter1PhaseCircle(ctx, W, H, t);
-    } else if (t < 30) {
-      this.drawChapter2VoiceMatrix(ctx, W, H, t - 15);
-    } else if (t < 45) {
-      this.drawChapter3AnalogDsp(ctx, W, H, t - 30);
+    } else if (t < 60) {
+      this.drawChapter2VoiceMatrix(ctx, W, H, t - 30);
+    } else if (t < 90) {
+      this.drawChapter3AnalogDsp(ctx, W, H, t - 60);
     } else {
-      this.drawChapter4RmxAndSync(ctx, W, H, t - 45);
+      this.drawChapter4RmxAndSync(ctx, W, H, t - 90);
     }
   }
 
   /**
-   * Chapter 1 (0..15s): The 16-Step Phase Circle θ(t) morphing onto the
+   * Chapter 1 (0..30s): The 16-Step Bar Circle gently unrolling onto the
    * MacBook Air Home Row (A..K) & Bottom Row (Z..,).
    */
   private drawChapter1PhaseCircle(
     ctx: CanvasRenderingContext2D,
-    W: number,
-    H: number,
+    _W: number,
+    _H: number,
     localT: number,
   ): void {
     const cx = 165;
-    const cy = 175;
-    const R = 96;
-    const morph = smoothstep(4.2, 8.5, localT);
+    const cy = 170;
+    const R = 94;
+    // Slow, unhurried 9-second morph starting at 8s
+    const morph = smoothstep(8, 17, localT);
 
-    // Title in Manim serif style
     ctx.fillStyle = C_TEXT;
     ctx.font = 'italic 18px Georgia, "Times New Roman", serif';
-    ctx.fillText("Phase Circle  S¹  →  MacBook Air 16-Step Matrix", 24, 32);
+    ctx.fillText("16 Steps in One Bar  →  MacBook Air Home & Bottom Rows", 24, 32);
 
-    // Coordinate axes through circle center
     ctx.strokeStyle = C_AXIS;
     ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.moveTo(cx - R - 22, cy);
-    ctx.lineTo(cx + R + 22, cy);
-    ctx.moveTo(cx, cy - R - 22);
-    ctx.lineTo(cx, cy + R + 22);
+    ctx.moveTo(cx - R - 20, cy);
+    ctx.lineTo(cx + R + 20, cy);
+    ctx.moveTo(cx, cy - R - 20);
+    ctx.lineTo(cx, cy + R + 20);
     ctx.stroke();
 
-    // Unit circle
     ctx.strokeStyle = C_BLUE;
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.arc(cx, cy, R, 0, Math.PI * 2);
     ctx.stroke();
 
-    // Rotating phase vector θ(t)
-    const phase = (localT * 0.85) % 1;
+    // Gentle playhead sweep (1 bar every ~6.2 seconds so the eye can follow every step)
+    const phase = (localT * 0.16) % 1;
     const activeStep = Math.floor(phase * 16);
     const angle = phase * Math.PI * 2 - Math.PI / 2;
     const vx = cx + Math.cos(angle) * R;
@@ -531,7 +518,6 @@ export class HowToExplainer {
     ctx.arc(vx, vy, 5, 0, Math.PI * 2);
     ctx.fill();
 
-    // 16 step nodes morphing from circle to the two 8-key rows on the right
     const stepKeys = ["A", "S", "D", "F", "G", "H", "J", "K", "Z", "X", "C", "V", "B", "N", "M", ","];
     const hitSteps = new Set([0, 4, 8, 12, 2, 6, 10, 14]);
     const accentSteps = new Set([0, 8]);
@@ -541,11 +527,10 @@ export class HowToExplainer {
       const sx = cx + Math.cos(a) * R;
       const sy = cy + Math.sin(a) * R;
 
-      // Target keyboard position on right half of canvas
       const row = i < 8 ? 0 : 1;
       const col = i % 8;
       const tx = 345 + col * 44 + row * 12;
-      const ty = 135 + row * 68;
+      const ty = 130 + row * 68;
 
       const x = sx + (tx - sx) * morph;
       const y = sy + (ty - sy) * morph;
@@ -553,8 +538,7 @@ export class HowToExplainer {
       const isAccent = accentSteps.has(i);
       const isHit = hitSteps.has(i);
 
-      // Connecting trajectory line during morph
-      if (morph > 0.05 && morph < 0.98) {
+      if (morph > 0.03 && morph < 0.98) {
         ctx.strokeStyle = "rgba(88, 196, 221, 0.22)";
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -563,7 +547,6 @@ export class HowToExplainer {
         ctx.stroke();
       }
 
-      // Draw key box when morphed, or circle node
       const boxW = 36;
       const boxH = 38;
       ctx.fillStyle = isCurrent
@@ -592,84 +575,89 @@ export class HowToExplainer {
     }
     ctx.textAlign = "left";
 
-    // Row labels on right
-    if (morph > 0.4) {
+    if (morph > 0.35) {
       ctx.fillStyle = C_GREEN;
       ctx.font = 'italic 14px Georgia, "Times New Roman", serif';
-      ctx.fillText("Home Row (Steps 1–8):  A  S  D  F  G  H  J  K", 345, 98);
-      ctx.fillText("Bottom Row (Steps 9–16):  Z  X  C  V  B  N  M  ,", 355, 250);
+      ctx.fillText("Home Row (Steps 1–8):  A  S  D  F  G  H  J  K", 345, 92);
+      ctx.fillText("Bottom Row (Steps 9–16):  Z  X  C  V  B  N  M  ,", 355, 244);
     }
 
-    // Bottom mathematical callout
-    if (localT > 9.5) {
+    if (localT > 18) {
       ctx.fillStyle = C_YELLOW;
-      ctx.font = 'italic 15px Georgia, "Times New Roman", serif';
+      ctx.font = 'italic 14.5px Georgia, "Times New Roman", serif';
       ctx.fillText(
-        "Tap key:  Off (-) → Hit (x) → Accent (X)     |     Hold Shift + key:  Toggle Flam (f / F)",
-        64,
-        328,
+        "Tap key:  Off → Hit → Accent     |     Hold Shift + key:  Add Flam (double hit)",
+        82,
+        312,
       );
     }
   }
 
   /**
-   * Chapter 2 (15..30s): Number Row 1..0 → 10 Voices, Shift Audition,
-   * Option Mute Matrix, and Y U I O P Analog Kits.
+   * Chapter 2 (30..60s): Number Row 1..0 → 10 Voices, Shift Audition,
+   * Option Mute, and Y U I O P Analog Kits.
    */
   private drawChapter2VoiceMatrix(
     ctx: CanvasRenderingContext2D,
-    W: number,
-    H: number,
+    _W: number,
+    _H: number,
     localT: number,
   ): void {
     ctx.fillStyle = C_TEXT;
     ctx.font = 'italic 18px Georgia, "Times New Roman", serif';
-    ctx.fillText("Voice Selection Vector  Vₖ  &  Kit Parameter Basis  [Y U I O P]", 24, 32);
+    ctx.fillText("Number Row [1 – 0] Selects Drum Voices  ·  [Y U I O P] Swaps Kits", 24, 32);
 
     const voices = ["BD", "SD", "LT", "MT", "HT", "RS", "CP", "CH", "OH", "CB"];
+    const names = ["Kick", "Snare", "LoTom", "MidTom", "HiTom", "Rim", "Clap", "ClHat", "OpHat", "Bell"];
     const keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
-    const scanIdx = Math.floor((localT * 1.8) % 10);
+    // Calm scan: ~2.2 seconds per drum voice
+    const scanIdx = Math.floor((localT * 0.45) % 10);
 
-    // Draw top number row keys 1..0
     for (let i = 0; i < 10; i++) {
-      const x = 52 + i * 64;
-      const y = 86;
+      const x = 44 + i * 64;
+      const y = 68;
       const active = i === scanIdx || this.activeCodes.has(`Digit${keys[i]}`);
 
       ctx.fillStyle = active ? "rgba(88, 196, 221, 0.26)" : "rgba(22, 32, 50, 0.88)";
       ctx.strokeStyle = active ? C_YELLOW : C_BLUE;
       ctx.lineWidth = active ? 2.4 : 1.4;
       ctx.beginPath();
-      ctx.roundRect(x, y, 52, 54, 7);
+      ctx.roundRect(x, y, 54, 62, 7);
       ctx.fill();
       ctx.stroke();
 
       ctx.fillStyle = C_TEXT;
       ctx.font = "bold 15px ui-monospace, SFMono-Regular, Menlo, monospace";
       ctx.textAlign = "center";
-      ctx.fillText(keys[i]!, x + 26, y + 22);
+      ctx.fillText(keys[i]!, x + 27, y + 20);
 
       ctx.fillStyle = active ? C_YELLOW : C_BLUE;
-      ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
-      ctx.fillText(voices[i]!, x + 26, y + 42);
+      ctx.font = "bold 11px ui-monospace, SFMono-Regular, Menlo, monospace";
+      ctx.fillText(voices[i]!, x + 27, y + 38);
+
+      ctx.fillStyle = C_MUTED;
+      ctx.font = "9.5px system-ui, sans-serif";
+      ctx.fillText(names[i]!, x + 27, y + 53);
     }
 
-    // Draw modifier branches (Plain vs Shift vs Option)
-    const modY = 178;
+    const modY = 156;
     const boxes = [
       {
         title: "Press  [1 .. 0]",
-        desc: "Selects voice row Vₖ for step editing & knob shaping",
+        line1: "Selects that drum row",
+        line2: "for step editing & knobs",
         color: C_BLUE,
       },
       {
         title: "Hold Shift + [1 .. 0]",
-        desc: "Triggers live analog drum hit (finger-drumming / overdub)",
+        line1: "Plays the drum sound live",
+        line2: "(finger-drumming / preview)",
         color: C_YELLOW,
       },
       {
         title: "Hold ⌥ Option + [1 .. 0]",
-        desc: "Toggles Mute Mₖ ∈ {0, 1} on that voice instantly",
+        line1: "Mutes or unmutes that",
+        line2: "drum voice in the mix",
         color: C_RED,
       },
     ];
@@ -688,16 +676,15 @@ export class HowToExplainer {
       ctx.fillStyle = item.color;
       ctx.font = "bold 13px ui-monospace, SFMono-Regular, Menlo, monospace";
       ctx.textAlign = "left";
-      ctx.fillText(item.title, bx + 12, modY + 24);
+      ctx.fillText(item.title, bx + 12, modY + 23);
 
       ctx.fillStyle = C_TEXT;
-      ctx.font = "11.5px system-ui, -apple-system, sans-serif";
-      ctx.fillText(item.desc.slice(0, 32), bx + 12, modY + 43);
-      ctx.fillText(item.desc.slice(32), bx + 12, modY + 58);
+      ctx.font = "12px system-ui, -apple-system, sans-serif";
+      ctx.fillText(item.line1, bx + 12, modY + 42);
+      ctx.fillText(item.line2, bx + 12, modY + 57);
     }
 
-    // Draw Y U I O P Kit Voicing Basis at bottom
-    if (localT > 6) {
+    if (localT > 12) {
       const kits = [
         { k: "Y", name: "Sub Boom" },
         { k: "U", name: "Club Punch" },
@@ -705,16 +692,17 @@ export class HowToExplainer {
         { k: "O", name: "Silver Matrix" },
         { k: "P", name: "Raw Warehouse" },
       ];
-      const activeKit = Math.floor(((localT - 6) * 0.9) % 5);
+      // Slow kit highlight: 3.5 seconds per kit
+      const activeKit = Math.floor(((localT - 12) * 0.28) % 5);
       for (let k = 0; k < kits.length; k++) {
         const kx = 68 + k * 122;
-        const ky = 272;
+        const ky = 252;
         const on = k === activeKit;
         ctx.fillStyle = on ? "rgba(92, 208, 179, 0.25)" : "rgba(22, 32, 50, 0.85)";
         ctx.strokeStyle = on ? C_YELLOW : C_TEAL;
         ctx.lineWidth = on ? 2.2 : 1.4;
         ctx.beginPath();
-        ctx.roundRect(kx, ky, 108, 52, 7);
+        ctx.roundRect(kx, ky, 108, 54, 7);
         ctx.fill();
         ctx.stroke();
 
@@ -723,63 +711,61 @@ export class HowToExplainer {
         ctx.textAlign = "center";
         ctx.fillText(`Key ${kits[k]!.k}`, kx + 54, ky + 22);
         ctx.fillStyle = on ? C_YELLOW : C_TEAL;
-        ctx.font = "11px system-ui, sans-serif";
-        ctx.fillText(kits[k]!.name, kx + 54, ky + 41);
+        ctx.font = "11.5px system-ui, sans-serif";
+        ctx.fillText(kits[k]!.name, kx + 54, ky + 42);
       }
     }
     ctx.textAlign = "left";
   }
 
   /**
-   * Chapter 3 (30..45s): Real-time oscilloscope plots of the 3 analog circuits:
-   * Bridged-T Kick, 6-Oscillator Metallic Hats, and 4-Burst Flutter Clap.
+   * Chapter 3 (60..90s): Calm oscilloscope view of the synthesized analog drums.
    */
   private drawChapter3AnalogDsp(
     ctx: CanvasRenderingContext2D,
-    W: number,
-    H: number,
+    _W: number,
+    _H: number,
     localT: number,
   ): void {
     ctx.fillStyle = C_TEXT;
     ctx.font = 'italic 18px Georgia, "Times New Roman", serif';
-    ctx.fillText("Synthesized Analog Drum Circuits  (Zero Samples · Pure Math)", 24, 32);
+    ctx.fillText("How the Synthesized Drum Voices Shape Your Sound", 24, 32);
 
     const panels = [
       {
-        title: "Bridged-T Sub Kick",
-        eq: "y(t) = e^(−t/τ) · sin(2π ∫ f(τ) dτ)",
+        title: "Bass Drum (Kick)",
+        subtitle: "Tune sets sub pitch · Decay sets boom length",
         color: C_BLUE,
-        y0: 95,
+        y0: 92,
       },
       {
-        title: "6-Oscillator Metallic Hat Cluster",
-        eq: "Σₖ sgn(sin 2π fₖ t)  →  BPF 8.2 kHz",
+        title: "Hi-Hats (Closed & Open)",
+        subtitle: "6 metallic oscillators · Closed Hat chokes Open Hat",
         color: C_YELLOW,
-        y0: 195,
+        y0: 188,
       },
       {
-        title: "4-Burst Sawtooth Hand-Clap",
-        eq: "E(t) = Σᵢ₌₀³ e^(−(t − tᵢ)/τ)  (0, 10, 21, 31 ms)",
+        title: "Snare & Hand-Clap",
+        subtitle: "Snappy adds wire rattle · 4 rapid clap bursts + room tail",
         color: C_RED,
-        y0: 295,
+        y0: 284,
       },
     ];
 
-    const pulsePhase = (localT * 0.9) % 1;
+    const pulsePhase = (localT * 0.22) % 1;
 
     for (let p = 0; p < panels.length; p++) {
       const pan = panels[p]!;
       ctx.fillStyle = pan.color;
-      ctx.font = 'bold 13px Georgia, "Times New Roman", serif';
-      ctx.fillText(pan.title, 28, pan.y0 - 22);
+      ctx.font = 'bold 14px Georgia, "Times New Roman", serif';
+      ctx.fillText(pan.title, 26, pan.y0 - 18);
 
       ctx.fillStyle = C_MUTED;
-      ctx.font = 'italic 12px Georgia, "Times New Roman", serif';
-      ctx.fillText(pan.eq, 28, pan.y0 - 4);
+      ctx.font = "12px system-ui, -apple-system, sans-serif";
+      ctx.fillText(pan.subtitle, 26, pan.y0 + 2);
 
-      // Waveform axis
-      const xStart = 285;
-      const xWidth = 405;
+      const xStart = 305;
+      const xWidth = 385;
       ctx.strokeStyle = C_AXIS;
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -787,7 +773,6 @@ export class HowToExplainer {
       ctx.lineTo(xStart + xWidth, pan.y0);
       ctx.stroke();
 
-      // Plot waveform
       ctx.strokeStyle = pan.color;
       ctx.lineWidth = 2;
       ctx.beginPath();
@@ -795,31 +780,27 @@ export class HowToExplainer {
         const u = ix / xWidth;
         let sample = 0;
         if (p === 0) {
-          // Swept bridged-T sine wave
           const env = Math.exp(-u * 4.2);
-          const instPhase = 2 * Math.PI * (14 * u - 3.2 * Math.exp(-u * 12));
+          const instPhase = 2 * Math.PI * (12 * u - 2.8 * Math.exp(-u * 10));
           sample = env * Math.sin(instPhase - pulsePhase * Math.PI * 2);
         } else if (p === 1) {
-          // 6-oscillator metallic cluster
           const env = Math.exp(-u * 7.5);
           const s =
-            Math.sin(u * 95 + localT * 8) +
-            Math.sin(u * 141 - localT * 6) +
-            Math.sin(u * 173 + localT * 11) +
-            Math.sin(u * 244);
-          sample = (s / 4) * env;
+            Math.sin(u * 85 + localT * 1.8) +
+            Math.sin(u * 127 - localT * 1.4) +
+            Math.sin(u * 159 + localT * 2.1);
+          sample = (s / 3) * env;
         } else {
-          // 4-burst sawtooth flutter clap envelope
           const strikes = [0, 0.09, 0.19, 0.28];
           let env = 0;
           for (const st of strikes) {
             if (u >= st) env = Math.max(env, Math.exp(-(u - st) * 18));
           }
           if (u >= 0.28) env = Math.max(env, 0.45 * Math.exp(-(u - 0.28) * 3.8));
-          const carrier = Math.sin(u * 210 + localT * 15) * Math.cos(u * 137);
+          const carrier = Math.sin(u * 160 + localT * 2.5) * Math.cos(u * 112);
           sample = env * carrier;
         }
-        const py = pan.y0 - sample * 30;
+        const py = pan.y0 - sample * 28;
         if (ix === 0) ctx.moveTo(xStart + ix, py);
         else ctx.lineTo(xStart + ix, py);
       }
@@ -828,21 +809,20 @@ export class HowToExplainer {
   }
 
   /**
-   * Chapter 4 (45..60s): RMX-1000 Performance Keys & Pioneer Pro DJ Link Sync.
+   * Chapter 4 (90..120s): RMX-1000 Performance Keys & Pioneer Booth Sync.
    */
   private drawChapter4RmxAndSync(
     ctx: CanvasRenderingContext2D,
-    W: number,
-    H: number,
+    _W: number,
+    _H: number,
     localT: number,
   ): void {
     ctx.fillStyle = C_TEXT;
     ctx.font = 'italic 18px Georgia, "Times New Roman", serif';
-    ctx.fillText("RMX-1000 Performance Surface  &  Pioneer Pro DJ Link Phase Lock", 24, 32);
+    ctx.fillText("RMX-1000 Performance Keys  &  DJ Booth Tempo Sync", 24, 32);
 
-    // Draw interactive MacBook Air keyboard map
-    const startY = 58;
-    const rowH = 56;
+    const startY = 52;
+    const rowH = 54;
     for (let r = 0; r < MACBOOK_ROWS.length; r++) {
       const row = MACBOOK_ROWS[r]!;
       const offsetX = 28 + r * 14;
@@ -851,45 +831,45 @@ export class HowToExplainer {
         const x = offsetX + c * 54;
         const y = startY + r * rowH;
         const highlightRmx =
-          (localT < 5 && ["Backquote", "KeyQ", "KeyW", "KeyE", "KeyR"].includes(cap.code)) ||
-          (localT >= 5 && localT < 10 && cap.code === "KeyR") ||
-          (localT >= 10 && ["KeyT", "BracketLeft", "BracketRight", "Semicolon", "Quote", "KeyL"].includes(cap.code)) ||
+          (localT < 10 && ["Backquote", "KeyQ", "KeyW", "KeyE", "KeyR"].includes(cap.code)) ||
+          (localT >= 10 && localT < 20 && cap.code === "KeyR") ||
+          (localT >= 20 &&
+            ["KeyT", "BracketLeft", "BracketRight", "Semicolon", "Quote", "KeyL"].includes(cap.code)) ||
           this.activeCodes.has(cap.code);
 
         ctx.fillStyle = highlightRmx ? "rgba(247, 209, 84, 0.28)" : "rgba(20, 29, 46, 0.9)";
         ctx.strokeStyle = highlightRmx ? C_YELLOW : cap.color;
         ctx.lineWidth = highlightRmx ? 2.4 : 1.3;
         ctx.beginPath();
-        ctx.roundRect(x, y, 48, 46, 6);
+        ctx.roundRect(x, y, 48, 44, 6);
         ctx.fill();
         ctx.stroke();
 
         ctx.fillStyle = C_TEXT;
         ctx.font = "bold 12px ui-monospace, SFMono-Regular, Menlo, monospace";
         ctx.textAlign = "center";
-        ctx.fillText(cap.label, x + 24, y + 18);
+        ctx.fillText(cap.label, x + 24, y + 17);
 
         ctx.fillStyle = highlightRmx ? C_YELLOW : cap.color;
         ctx.font = "9.5px system-ui, sans-serif";
-        ctx.fillText(cap.sub, x + 24, y + 36);
+        ctx.fillText(cap.sub, x + 24, y + 34);
       }
     }
     ctx.textAlign = "left";
 
-    // Spacebar at bottom
     const spaceActive = this.activeCodes.has("Space");
     ctx.fillStyle = spaceActive ? "rgba(247, 209, 84, 0.28)" : "rgba(20, 29, 46, 0.9)";
     ctx.strokeStyle = spaceActive ? C_YELLOW : C_BLUE;
     ctx.lineWidth = 1.6;
     ctx.beginPath();
-    ctx.roundRect(210, 290, 300, 42, 7);
+    ctx.roundRect(210, 276, 300, 40, 7);
     ctx.fill();
     ctx.stroke();
 
     ctx.fillStyle = C_TEXT;
     ctx.font = "bold 13px ui-monospace, SFMono-Regular, Menlo, monospace";
     ctx.textAlign = "center";
-    ctx.fillText("SPACE  ·  Play / Stop Transport", 360, 316);
+    ctx.fillText("SPACE  ·  Play / Stop Transport", 360, 301);
     ctx.textAlign = "left";
   }
 }
@@ -915,29 +895,54 @@ export function howToModalMarkup(): string {
     <div class="panel howto-modal">
       <div class="panel-head howto-head">
         <div>
-          <span class="howto-badge">3Blue1Brown Visual Guide · MacBook Air</span>
-          <h2 id="howto-title">Geometry of the 16-Step Sequencer &amp; Keyboard Shortcuts</h2>
+          <span class="howto-badge">Visual Guide &amp; Quick Start · MacBook Air</span>
+          <h2 id="howto-title">How to Use player5 &amp; Keyboard Shortcuts</h2>
         </div>
         <button id="howto-close" type="button" class="small" aria-label="Close How To guide">Close (Esc)</button>
       </div>
+
+      <section class="howto-quickstart" id="howto-quickstart" aria-labelledby="howto-qs-title">
+        <div class="panel-head">
+          <h3 id="howto-qs-title">How to Get Started Quickly (Step by Step)</h3>
+          <output id="howto-live-key" class="howto-live-key" aria-live="polite">Press any MacBook key to test it live</output>
+        </div>
+        <ol class="howto-steps">
+          <li>
+            <strong>1. Start the beat &amp; pick a groove:</strong>
+            Press <kbd>Space</kbd> (or click <strong>Play</strong>) to start audio. Choose a style from <strong>Presets</strong> (<em>Nu-Disco</em>, <em>House</em>, or <em>Techno</em>) and swap the drum machine sound character anytime using <strong>Drum kit</strong> (or keys <kbd>Y</kbd> <kbd>U</kbd> <kbd>I</kbd> <kbd>O</kbd> <kbd>P</kbd>).
+          </li>
+          <li>
+            <strong>2. Select or play a drum sound (<kbd>1</kbd>–<kbd>0</kbd>):</strong>
+            Press number keys <kbd>1</kbd>–<kbd>0</kbd> (or click <strong>BD</strong>, <strong>SD</strong>, <strong>CP</strong>, <strong>CH</strong> on the left) to select a drum row. Hold <kbd>Shift</kbd> + <kbd>1</kbd>–<kbd>0</kbd> to play that drum live, or <kbd>⌥ Option</kbd> + <kbd>1</kbd>–<kbd>0</kbd> to mute/unmute it.
+          </li>
+          <li>
+            <strong>3. Program the 16 steps (<kbd>A</kbd>–<kbd>K</kbd> &amp; <kbd>Z</kbd>–<kbd>,</kbd>):</strong>
+            Your MacBook Home Row <kbd>A</kbd>–<kbd>K</kbd> controls <strong>Steps 1–8</strong>, and the Bottom Row <kbd>Z</kbd>–<kbd>,</kbd> controls <strong>Steps 9–16</strong>. Tap once for a <em>Hit</em>, twice for a louder <em>Accent</em>, and a third time to turn it <em>Off</em> (hold <kbd>Shift</kbd> + step key for a double-hit <em>Flam</em>).
+          </li>
+          <li>
+            <strong>4. Shape the analog circuit &amp; swing:</strong>
+            Use the <strong>Voice</strong> sliders (<em>Tune</em>, <em>Decay</em>, <em>Tone</em>, <em>Snappy</em>) below the grid to sculpt the selected drum, and raise <strong>Shuffle</strong> in the top bar for house/disco swing.
+          </li>
+          <li>
+            <strong>5. Perform with RMX-1000 FX &amp; sync to DJ gear:</strong>
+            Press <kbd>\`</kbd> to flip to the <strong>RMX-1000 Station</strong> for beat rolls, Isolator kills, and Scene FX build-ups—and hold <kbd>R</kbd> to pull the <strong>Release FX lever</strong> (Vinyl Brake / Echo Out). Use the <strong>Clock</strong> panel (<kbd>T</kbd> Tap, <strong>Bridge</strong>, or <strong>MIDI</strong>) plus <kbd>[</kbd> <kbd>]</kbd> and <kbd>;</kbd> <kbd>'</kbd> to lock phase with Pioneer CDJs.
+          </li>
+        </ol>
+      </section>
 
       <div class="howto-chapters" role="group" aria-label="Video chapters">
         ${chapterButtons}
       </div>
 
       <div class="howto-stage">
-        <canvas id="manim-canvas" width="720" height="360" aria-label="3Blue1Brown style mathematical animation"></canvas>
-        <div class="howto-formula-bar">
-          <output id="howto-formula" class="howto-formula">θ(t) = 2π · (BPM / 60) · t</output>
-          <output id="howto-live-key" class="howto-live-key" aria-live="polite">Press any MacBook key to test it live</output>
-        </div>
+        <canvas id="manim-canvas" width="720" height="340" aria-label="3Blue1Brown style visual explainer animation"></canvas>
         <p id="howto-caption" class="howto-caption" aria-live="polite"></p>
       </div>
 
       <div class="howto-transport">
         <button id="howto-play" type="button" class="toggle" aria-pressed="true">Pause</button>
-        <input id="howto-scrub" type="range" min="0" max="60" step="0.1" value="0" aria-label="Video timeline" />
-        <output id="howto-time" class="mono-out">0:00 / 1:00</output>
+        <input id="howto-scrub" type="range" min="0" max="120" step="0.1" value="0" aria-label="Video timeline" />
+        <output id="howto-time" class="mono-out">0:00 / 2:00</output>
         <button id="howto-speed" type="button" class="small" title="Playback speed">1×</button>
         <button id="howto-sound" type="button" class="toggle small" aria-pressed="false" title="Toggle harmonic chapter chimes">Chimes: OFF</button>
       </div>
@@ -945,7 +950,7 @@ export function howToModalMarkup(): string {
       <div class="howto-kb-section">
         <div class="panel-head">
           <h3>MacBook Air Interactive Key Map</h3>
-          <span class="hint">Hold <strong>Shift + 1..0</strong> to finger-drum · <strong>⌥ Option + 1..0</strong> to mute · <strong>Shift + Step</strong> for Flam</span>
+          <span class="hint">Click any key below or press it on your keyboard</span>
         </div>
         <div class="kb-diagram" role="group" aria-label="MacBook Air keyboard shortcuts">
           ${keyboardLegend}

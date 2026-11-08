@@ -1315,26 +1315,54 @@ input[type="range"] {
 #manim-canvas {
   width: 100%;
   height: auto;
-  aspect-ratio: 2 / 1;
+  aspect-ratio: 36 / 17;
   display: block;
   background-color: #0b0d14;
 }
-.howto-formula-bar {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: center;
+.howto-quickstart {
+  background-color: #121824;
+  border: 1px solid #24334a;
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: grid;
   gap: 8px;
-  padding: 7px 12px;
-  background-color: #111724;
-  border-top: 1px solid #1e2a3d;
-  border-bottom: 1px solid #1e2a3d;
 }
-.howto-formula {
-  font-family: Georgia, "Times New Roman", serif;
-  font-style: italic;
-  font-size: 13.5px;
+.howto-quickstart h3 {
+  margin: 0;
+  font-size: 12.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #f7d154;
+}
+.howto-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.howto-steps li {
+  background-color: #0e131d;
+  border: 1px solid #1d283b;
+  border-radius: 7px;
+  padding: 7px 10px;
+}
+.howto-steps strong {
   color: #58c4dd;
+}
+.howto-steps kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: #f7d154;
+  background-color: #1a2436;
+  border: 1px solid #314463;
+  border-radius: 4px;
 }
 .howto-live-key {
   font-family: var(--mono);
@@ -1348,7 +1376,9 @@ input[type="range"] {
   font-size: 14px;
   line-height: 1.45;
   color: var(--text);
-  min-height: 3.6em;
+  border-top: 1px solid #1e2a3d;
+  background-color: #101521;
+  min-height: 3.4em;
 }
 
 .howto-transport {
