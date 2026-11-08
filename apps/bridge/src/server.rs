@@ -66,6 +66,7 @@ impl Default for Config {
 
 enum HubCommand {
     Follow(FollowTarget),
+    SetSource(SourceKind),
 }
 
 #[derive(Default)]
@@ -74,13 +75,13 @@ struct HubState {
     devices: Option<Arc<str>>,
     status: Option<Arc<str>>,
     timeline: Option<Arc<str>>,
+    source_name: &'static str,
 }
 
 struct Hub {
     state: Mutex<HubState>,
     commands: Mutex<Sender<HubCommand>>,
     next_id: AtomicU64,
-    source_name: &'static str,
 }
 
 impl Hub {
@@ -173,10 +174,12 @@ pub fn start(config: Config) -> io::Result<Server> {
     let stop = Arc::new(AtomicBool::new(false));
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let hub = Arc::new(Hub {
-        state: Mutex::new(HubState::default()),
+        state: Mutex::new(HubState {
+            source_name: config.source.name(),
+            ..HubState::default()
+        }),
         commands: Mutex::new(cmd_tx),
         next_id: AtomicU64::new(1),
-        source_name: config.source.name(),
     });
 
     let hub_thread = {
@@ -210,13 +213,13 @@ pub fn start(config: Config) -> io::Result<Server> {
 fn run_hub(
     hub: &Hub,
     stop: &AtomicBool,
-    kind: SourceKind,
+    mut kind: SourceKind,
     options: &SourceOptions,
     commands: &Receiver<HubCommand>,
     verbose: bool,
 ) {
     let mut clock = BridgeClock::new(kind.name());
-    let source = match sources::start_source(kind, options) {
+    let mut source = match sources::start_source(kind, options) {
         Ok(s) => {
             eprintln!("player5-bridge: following {}", kind.name());
             Some(s)
@@ -257,6 +260,42 @@ fn run_hub(
                 HubCommand::Follow(target) => {
                     if let Some(src) = source.as_ref() {
                         src.command(SourceCommand::Follow(target));
+                    }
+                }
+                HubCommand::SetSource(new_kind) => {
+                    if new_kind != kind || source.is_none() {
+                        if let Some(old) = source.take() {
+                            old.stop();
+                        }
+                        kind = new_kind;
+                        clock = BridgeClock::new(kind.name());
+                        let empty_devs: Arc<str> = "{\"type\":\"devices\",\"devices\":[]}".into();
+                        {
+                            let mut st = hub.state.lock().unwrap_or_else(|p| p.into_inner());
+                            st.source_name = kind.name();
+                            st.devices = None;
+                            st.status = None;
+                            st.timeline = None;
+                        }
+                        hub.broadcast(empty_devs);
+                        source = match sources::start_source(kind, options) {
+                            Ok(s) => {
+                                eprintln!("player5-bridge: switched to {}", kind.name());
+                                Some(s)
+                            }
+                            Err(e) => {
+                                eprintln!("player5-bridge: {e}");
+                                let msg: Arc<str> = clock::status_message("error", &e).into();
+                                hub.state.lock().unwrap_or_else(|p| p.into_inner()).status =
+                                    Some(Arc::clone(&msg));
+                                hub.broadcast(msg);
+                                None
+                            }
+                        };
+                        let hello: Arc<str> =
+                            clock::hello_message(kind.name(), clock::now_us()).into();
+                        hub.broadcast(hello);
+                        last_timeline = Instant::now() - TIMELINE_PERIOD;
                     }
                 }
             }
@@ -468,9 +507,14 @@ fn handle_connection(
             );
         }
         "/bridge.json" => {
+            let src_name = hub
+                .state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .source_name;
             let body = format!(
                 "{{\"protocol\":1,\"ws\":\"/ws\",\"source\":\"{}\"}}",
-                hub.source_name
+                src_name
             );
             let _ = http::respond(
                 &mut stream,
@@ -609,9 +653,14 @@ fn websocket_loop(
     stop: &AtomicBool,
 ) -> End {
     let send = |stream: &mut TcpStream, frame: &[u8]| stream.write_all(frame).is_ok();
+    let src_name = hub
+        .state
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .source_name;
     if !send(
         stream,
-        ws::text_frame(&clock::hello_message(hub.source_name, clock::now_us())).as_slice(),
+        ws::text_frame(&clock::hello_message(src_name, clock::now_us())).as_slice(),
     ) {
         return End::Io;
     }
@@ -712,6 +761,13 @@ fn handle_client_message(text: &str, hub: &Hub) -> Option<String> {
             };
             let tx = hub.commands.lock().unwrap_or_else(|p| p.into_inner());
             let _ = tx.send(HubCommand::Follow(target));
+            None
+        }
+        "source" => {
+            let name = msg.get("source")?.as_str()?;
+            let kind = SourceKind::from_name(name)?;
+            let tx = hub.commands.lock().unwrap_or_else(|p| p.into_inner());
+            let _ = tx.send(HubCommand::SetSource(kind));
             None
         }
         _ => None,

@@ -97,6 +97,7 @@ export class BridgeClient {
   private observeTimer: ReturnType<typeof setInterval> | null = null;
   private nextPingId = 1;
   private followTarget: "master" | number | null = null;
+  private desiredSource: "prolink" | "link" | "opus" | "sim" | null = null;
   /** Device of the last on-target locked timeline (kept across reconnects). */
   private heardDevice: number | null = null;
   private samples: { rtt: number; offsetUs: number }[] = [];
@@ -143,6 +144,15 @@ export class BridgeClient {
   follow(target: "master" | number): void {
     this.followTarget = target;
     this.sendJson({ type: "follow", target });
+  }
+
+  /**
+   * Asks the bridge to switch its upstream network clock protocol
+   * ("prolink", "link" for Ableton Link, "opus", or "sim").
+   */
+  setSource(source: "prolink" | "link" | "opus" | "sim"): void {
+    this.desiredSource = source;
+    this.sendJson({ type: "source", source });
   }
 
   private open(): void {
@@ -228,6 +238,9 @@ export class BridgeClient {
           this.events.onStatus("warn", `bridge speaks protocol ${String(msg.protocol)}, expected 1`);
         }
         this.events.onHello?.(msg as { app?: string; version?: string; source?: string });
+        if (this.desiredSource !== null && msg.source !== this.desiredSource) {
+          this.sendJson({ type: "source", source: this.desiredSource });
+        }
         if (this.followTarget !== null) this.sendJson({ type: "follow", target: this.followTarget });
         break;
       case "pong":

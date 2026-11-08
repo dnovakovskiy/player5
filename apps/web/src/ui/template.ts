@@ -1,6 +1,7 @@
 // Static markup of the instrument. Dynamic parts (grid rows, voice
 // controls, device lists) are filled in by the modules that own them.
 
+import { GROOVE_TEMPLATES } from "../groove";
 import { KITS, PRESETS, type PresetCategory } from "../presets";
 import { howToModalMarkup } from "./how-to";
 
@@ -30,6 +31,9 @@ export function template(o: TemplateOptions): string {
     .join("");
   const kitOptions = KITS.map(
     (k) => `<option value="${k.id}" title="${k.blurb}">${k.name}</option>`,
+  ).join("");
+  const grooveOptions = GROOVE_TEMPLATES.map(
+    (g) => `<option value="${g.id}" title="${g.blurb}">${g.name}</option>`,
   ).join("");
   const unavailable = o.single
     ? "Bridge and MIDI clock need the full app; they are switched off in this embedded copy."
@@ -219,9 +223,54 @@ export function template(o: TemplateOptions): string {
 
   <section class="panel grid-panel" id="grid-panel" aria-labelledby="grid-title">
     <div class="panel-head">
-      <h2 id="grid-title">Pattern</h2>
+      <div class="grid-brand">
+        <h2 id="grid-title">TR-REC Pattern · 16-Step Sequencer</h2>
+        <span class="tr-color-key" aria-hidden="true">
+          <i class="c1">1–4</i><i class="c2">5–8</i><i class="c3">9–12</i><i class="c4">13–16</i>
+        </span>
+      </div>
       <span class="hint" id="grid-hint"></span>
     </div>
+
+    <div class="tr-perf-strip" role="region" aria-label="Groove, Variation &amp; Per-Sample FX">
+      <div class="tr-perf-col groove-col">
+        <div class="tr-perf-head">
+          <span class="label">GROOVE / HUMANIZE / VARIATION</span>
+          <span class="hint">Maschine feel &amp; TR-8S auto-fill</span>
+        </div>
+        <div class="tr-perf-row">
+          <select id="groove-template" aria-label="Groove pocket template" title="Apply a Groove swing + humanize feel template">
+            <option value="">Groove pocket…</option>${grooveOptions}
+          </select>
+          ${knob("humanize", "Humanize", 0, 1, 0.01)}
+        </div>
+        <div class="tr-perf-actions">
+          <button id="var-humanize" type="button" class="small" title="Humanize accents, flams &amp; ghost notes (⌥+G)">Humanize [⌥G]</button>
+          <button id="var-mutate" type="button" class="small" title="Generate musical pattern variation on active voices (⌥+V)">Variation [⌥V]</button>
+          <button id="var-fill" type="button" class="small" title="Inject a 1-bar TR-8S drum fill into steps 13–16 (⌥+F)">Auto-Fill [⌥F]</button>
+        </div>
+      </div>
+
+      <div class="tr-perf-col vfx-col">
+        <div class="tr-perf-head">
+          <span class="label">PER-SAMPLE &amp; GROUP FX SENDS</span>
+          <output id="vfx-readout" class="vfx-readout" aria-live="polite">DRY · NO VOICE FX</output>
+        </div>
+        <div class="tr-perf-row vfx-row">
+          <div class="vfx-chips" role="group" aria-label="Selected voice and group FX toggles">
+            <button id="vfx-echo" type="button" class="toggle small fx-chip fx-echo" aria-pressed="false" title="Toggle tempo-synced Dub Echo on selected voice (⌥+E or Ctrl+1..0)">Echo [⌥E]</button>
+            <button id="vfx-reverb" type="button" class="toggle small fx-chip fx-reverb" aria-pressed="false" title="Toggle Space Reverb on selected voice (⌥+R)">Reverb [⌥R]</button>
+            <button id="vfx-filter" type="button" class="toggle small fx-chip fx-filter" aria-pressed="false" title="Toggle Acid Resonant Filter + Drive on selected voice (⌥+D)">Filter [⌥D]</button>
+            <button id="grp-fx-snare" type="button" class="toggle small grp-chip" aria-pressed="false" title="Drop Dub Echo on Snare + Clap + Rimshot group (Shift+Q)">Snare+Clap Echo [⇧Q]</button>
+            <button id="grp-fx-hats" type="button" class="toggle small grp-chip" aria-pressed="false" title="Drop Dub Echo on Closed + Open Hi-Hats group (Shift+W)">Hi-Hats Echo [⇧W]</button>
+            <button id="grp-fx-toms" type="button" class="toggle small grp-chip" aria-pressed="false" title="Drop Dub Echo on Low/Mid/High Toms + Cowbell group (Shift+E)">Toms+Perc Echo [⇧E]</button>
+            <button id="vfx-clear" type="button" class="small" title="Clear all per-sample and group FX sends (⌥+X)">Dry [⌥X]</button>
+          </div>
+          ${knob("vfx-level", "FX Send", 0, 1, 0.01)}
+        </div>
+      </div>
+    </div>
+
     <div id="grid" class="grid" tabindex="-1"></div>
   </section>
 
@@ -258,6 +307,7 @@ export function template(o: TemplateOptions): string {
       <div class="seg" role="radiogroup" aria-label="Clock source">
         <label><input type="radio" name="clock-source" value="internal" checked /><span>Internal</span></label>
         <label><input type="radio" name="clock-source" value="tap" /><span>Tap</span></label>
+        <label${o.bridge ? "" : " hidden"}><input type="radio" name="clock-source" value="link"${o.bridge ? "" : " disabled"} /><span>Ableton Link</span></label>
         <label${o.bridge ? "" : " hidden"}><input type="radio" name="clock-source" value="bridge"${o.bridge ? "" : " disabled"} /><span>Bridge</span></label>
         <label${o.midi ? "" : " hidden"}><input type="radio" name="clock-source" value="midi"${o.midi ? "" : " disabled"} /><span>MIDI</span></label>
       </div>
@@ -275,6 +325,15 @@ export function template(o: TemplateOptions): string {
 
     <div class="source-panel" data-for="tap">
       <button id="tap-pad" type="button" class="tap-pad" aria-keyshortcuts="T">Tap the beat</button>
+    </div>
+    <div class="source-panel" data-for="link">
+      <div class="row-fields">
+        <label class="field grow" for="link-url"><span class="label">Ableton Link Bridge URL (LAN UDP 20808 + Browser Mesh)</span>
+          <input id="link-url" type="text" spellcheck="false" autocomplete="off" inputmode="url" /></label>
+        <button id="link-connect" type="button">Join Link</button>
+        <output id="link-peers" class="link-peers-badge" aria-live="polite">0 peers</output>
+      </div>
+      <p class="hint">Syncs tempo &amp; 4-beat bar phase with Ableton Live, Traktor, Serato, or other Link apps on the same Wi-Fi/LAN via player5-bridge, plus automatic browser-tab Link mesh.</p>
     </div>
     <div class="source-panel" data-for="bridge">
       <div class="row-fields">
@@ -332,7 +391,7 @@ export function template(o: TemplateOptions): string {
   ${howToModalMarkup()}
 
   <footer class="foot">
-    <span>Space play · 1–0 voices · A–K / Z–, steps 1–16 · Y–P kits · R release FX · T tap · ? how to</span>
-    <span>TR-inspired drum machine for the DJ booth</span>
+    <span>Space play · 1–0 voices · Ctrl+1–0 echo · ⇧Q/W/E group echo · ⌥G/V/F groove/fill · A–K / Z–, steps · Y–P kits · ? how to</span>
+    <span>TR-inspired drum machine for Ableton Link &amp; the Pioneer DJ booth</span>
   </footer>`;
 }

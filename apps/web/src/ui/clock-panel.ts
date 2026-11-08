@@ -1,5 +1,5 @@
-// The clock panel: source selection (Internal, Tap, Bridge, MIDI), engine
-// tempo / lock / bar position readouts, and the global timing controls
+// The clock panel: source selection (Internal, Tap, Ableton Link, Bridge, MIDI),
+// engine tempo / lock / bar position readouts, and the global timing controls
 // (phase nudge, latency offset, re-sync). Timed events from the sources
 // are mapped onto the engine's sample clock by AudioEngine (TimeMap) and
 // applied inside the audio runtime between blocks.
@@ -10,7 +10,7 @@ import { MidiClockInput, type MidiPort } from "../clock/midi";
 import type { AudioEngine, AudioState, EngineStatus } from "../engine/audio-engine";
 import { loadNumber, loadString, saveString } from "../storage";
 
-export type SourceKind = "internal" | "tap" | "bridge" | "midi";
+export type SourceKind = "internal" | "tap" | "link" | "bridge" | "midi";
 
 export interface ClockPanelHost {
   audio: AudioEngine;
@@ -18,6 +18,8 @@ export interface ClockPanelHost {
   tap(ms: number): void;
   /** Called after the source changed. */
   onSourceChange(source: SourceKind, previous: SourceKind): void;
+  /** Current pattern BPM (used to seed a standalone Ableton Link session). */
+  getPatternBpm?(): number;
 }
 
 export interface ClockPanelOptions {
@@ -45,6 +47,15 @@ export class ClockPanel {
   private midiError = "";
   private audioState: AudioState = "idle";
 
+  // Local browser-tab Ableton Link fallback mesh (used while bridge is offline)
+  private linkChannel: BroadcastChannel | null = null;
+  private linkTimer: ReturnType<typeof setInterval> | null = null;
+  private linkPeerId = Math.random().toString(36).slice(2, 10);
+  private linkPeers = new Map<string, number>();
+  private linkAnchorEpochMs = Date.now();
+  private linkAnchorBeat = 0;
+  private linkBpm = 124;
+
   private readonly el: {
     root: HTMLElement;
     tempo: HTMLOutputElement;
@@ -58,6 +69,8 @@ export class ClockPanel {
     bridgeUrl: HTMLInputElement;
     bridgeFollow: HTMLSelectElement;
     devices: HTMLUListElement;
+    linkUrl: HTMLInputElement | null;
+    linkPeersOut: HTMLElement | null;
     midiInput: HTMLSelectElement;
   };
 
@@ -79,6 +92,8 @@ export class ClockPanel {
       bridgeUrl: $(root, "#bridge-url"),
       bridgeFollow: $(root, "#bridge-follow"),
       devices: $(root, "#bridge-devices"),
+      linkUrl: root.querySelector<HTMLInputElement>("#link-url"),
+      linkPeersOut: root.querySelector<HTMLElement>("#link-peers"),
       midiInput: $(root, "#midi-input"),
     };
 
@@ -116,7 +131,7 @@ export class ClockPanel {
       if (e.detail === 0) host.tap(performance.now());
     });
 
-    // Bridge (compiled out of the single-file build).
+    // Bridge & Ableton Link relay (compiled out of the single-file build).
     this.bridgeUrl = "";
     this.bridgeUrlFromUser = false;
     if (!__P5_SINGLE__ && opts.bridge) {
@@ -124,18 +139,31 @@ export class ClockPanel {
       this.bridgeUrlFromUser = savedUrl !== null;
       this.bridgeUrl = savedUrl ?? DEFAULT_BRIDGE_URL;
       this.el.bridgeUrl.value = this.bridgeUrl;
-      const connect = () => {
-        const url = this.el.bridgeUrl.value.trim() || DEFAULT_BRIDGE_URL;
+      if (this.el.linkUrl) this.el.linkUrl.value = this.bridgeUrl;
+
+      const applyUrlAndConnect = (rawUrl: string) => {
+        const url = rawUrl.trim() || DEFAULT_BRIDGE_URL;
         this.el.bridgeUrl.value = url;
+        if (this.el.linkUrl) this.el.linkUrl.value = url;
         this.bridgeUrl = url;
         this.bridgeUrlFromUser = true;
         saveString("bridge-url", url);
-        if (this.source === "bridge") this.startBridge();
+        if (this.source === "bridge" || this.source === "link") this.startBridge();
       };
-      $(root, "#bridge-connect").addEventListener("click", connect);
+
+      $(root, "#bridge-connect").addEventListener("click", () =>
+        applyUrlAndConnect(this.el.bridgeUrl.value),
+      );
       this.el.bridgeUrl.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") connect();
+        if (e.key === "Enter") applyUrlAndConnect(this.el.bridgeUrl.value);
       });
+      root.querySelector<HTMLButtonElement>("#link-connect")?.addEventListener("click", () =>
+        applyUrlAndConnect(this.el.linkUrl?.value ?? this.el.bridgeUrl.value),
+      );
+      this.el.linkUrl?.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") applyUrlAndConnect(this.el.linkUrl?.value ?? "");
+      });
+
       this.el.bridgeFollow.addEventListener("change", () => {
         const v = this.el.bridgeFollow.value;
         this.followTarget = v === "master" ? "master" : Number(v);
@@ -156,13 +184,16 @@ export class ClockPanel {
   }
 
   get following(): boolean {
-    return this.source === "bridge" || this.source === "midi";
+    return this.source === "link" || this.source === "bridge" || this.source === "midi";
   }
 
   setSource(source: SourceKind): void {
     if (source === this.source) return;
     const previous = this.source;
-    if (previous === "bridge") this.stopBridge();
+    if (previous === "bridge" || previous === "link") {
+      this.stopBridge();
+      this.stopLocalLinkMesh();
+    }
     if (previous === "midi") this.midi?.close();
     this.source = source;
     this.el.root.dataset.source = source;
@@ -170,6 +201,10 @@ export class ClockPanel {
     if (radio) radio.checked = true;
     if (source === "internal" || source === "tap") {
       this.host.audio.setClockMode(0);
+    } else if (source === "link") {
+      this.host.audio.setClockMode(PRECISION_MODE.exact);
+      this.startLocalLinkMesh();
+      this.startBridge();
     } else if (source === "bridge") {
       this.host.audio.setClockMode(PRECISION_MODE.fine);
       this.startBridge();
@@ -185,6 +220,92 @@ export class ClockPanel {
     this.nudgeMs = Math.max(-500, Math.min(500, Math.round(ms)));
     this.el.nudge.textContent = `${this.nudgeMs > 0 ? "+" : this.nudgeMs < 0 ? "−" : ""}${Math.abs(this.nudgeMs)} ms`;
     this.host.audio.setNudgeMs(this.nudgeMs);
+  }
+
+  // ---- Ableton Link local fallback mesh + LAN Bridge -----------------
+
+  private startLocalLinkMesh(): void {
+    this.stopLocalLinkMesh();
+    const patBpm = this.host.getPatternBpm?.() ?? 124;
+    this.linkBpm = Number.isFinite(patBpm) && patBpm >= 20 && patBpm <= 400 ? patBpm : 124;
+    this.linkAnchorEpochMs = Date.now();
+    this.linkAnchorBeat = 0;
+
+    if (typeof BroadcastChannel === "function") {
+      try {
+        const ch = new BroadcastChannel("player5-ableton-link");
+        ch.onmessage = (ev: MessageEvent) => {
+          const d = ev.data as {
+            peer?: string;
+            bpm?: number;
+            anchorEpochMs?: number;
+            anchorBeat?: number;
+            bye?: boolean;
+          };
+          if (!d || typeof d.peer !== "string" || d.peer === this.linkPeerId) return;
+          if (d.bye) {
+            this.linkPeers.delete(d.peer);
+            this.renderStatus();
+            return;
+          }
+          this.linkPeers.set(d.peer, Date.now());
+          if (
+            typeof d.bpm === "number" &&
+            typeof d.anchorEpochMs === "number" &&
+            typeof d.anchorBeat === "number"
+          ) {
+            this.linkBpm = d.bpm;
+            this.linkAnchorEpochMs = d.anchorEpochMs;
+            this.linkAnchorBeat = d.anchorBeat;
+          }
+          this.renderStatus();
+        };
+        this.linkChannel = ch;
+      } catch {
+        this.linkChannel = null;
+      }
+    }
+
+    this.linkTimer = setInterval(() => {
+      if (this.source !== "link") return;
+      const nowEpoch = Date.now();
+      for (const [peer, seenAt] of this.linkPeers) {
+        if (nowEpoch - seenAt > 3000) this.linkPeers.delete(peer);
+      }
+      this.linkChannel?.postMessage({
+        peer: this.linkPeerId,
+        bpm: this.linkBpm,
+        anchorEpochMs: this.linkAnchorEpochMs,
+        anchorBeat: this.linkAnchorBeat,
+      });
+
+      // If the LAN bridge is not delivering a locked Ableton Link timeline yet,
+      // drive the engine from the shared Quantum=4 session timeline so Link
+      // locks immediately across local browser peers and standalone sessions.
+      const bridgeActive =
+        this.bridgeState === "open" && this.timeline !== null && this.timeline.locked;
+      if (!bridgeActive) {
+        const elapsedSec = (nowEpoch - this.linkAnchorEpochMs) / 1000;
+        const beat = this.linkAnchorBeat + elapsedSec * (this.linkBpm / 60);
+        const barPhase = ((beat % 4) + 4) % 4;
+        this.host.audio.observe(performance.now(), 0, barPhase, this.linkBpm);
+      }
+    }, 50);
+  }
+
+  private stopLocalLinkMesh(): void {
+    if (this.linkTimer) clearInterval(this.linkTimer);
+    this.linkTimer = null;
+    if (this.linkChannel) {
+      try {
+        this.linkChannel.postMessage({ peer: this.linkPeerId, bye: true });
+        this.linkChannel.close();
+      } catch {
+        /* ignore */
+      }
+    }
+    this.linkChannel = null;
+    this.linkPeers.clear();
   }
 
   // ---- bridge --------------------------------------------------------
@@ -205,8 +326,9 @@ export class ClockPanel {
         if (url && !this.bridgeUrlFromUser) {
           this.bridgeUrl = url;
           this.el.bridgeUrl.value = url;
+          if (this.el.linkUrl) this.el.linkUrl.value = url;
         }
-        if (this.source === "bridge" && !this.bridge) this.startBridge();
+        if ((this.source === "bridge" || this.source === "link") && !this.bridge) this.startBridge();
       });
       return;
     }
@@ -216,7 +338,8 @@ export class ClockPanel {
         if (state === "closed") this.timeline = null;
         // The bridge refuses pages from origins it does not trust and says
         // how to allow one; fill in ours.
-        if (detail && state === "closed") this.bridgeStatus = `closed (${detail.replace("<origin>", location.origin)})`;
+        if (detail && state === "closed")
+          this.bridgeStatus = `closed (${detail.replace("<origin>", location.origin)})`;
         this.renderStatus();
       },
       onHello: () => {
@@ -239,8 +362,12 @@ export class ClockPanel {
       },
     });
     this.bridge = client;
-    // A new connection (another URL, back from another source) asks for
-    // the device the menu shows, not the bridge's default.
+    // Tell the bridge whether we want Ableton Link ("link") or Pioneer Pro DJ Link ("prolink")
+    if (this.source === "link") {
+      client.setSource("link");
+    } else if (this.source === "bridge") {
+      client.setSource("prolink");
+    }
     if (this.followTarget !== "master") client.follow(this.followTarget);
     client.connect();
   }
@@ -280,9 +407,6 @@ export class ClockPanel {
       }),
     );
     // Follow targets: the master, or any player.
-    // The menu keeps showing the chosen device even while it is missing
-    // from the list (a bridge restart, a player rebooting): the client keeps
-    // asking the bridge for it, so the menu must not pretend otherwise.
     const select = this.el.bridgeFollow;
     const current = String(this.followTarget);
     const options = [new Option("Tempo master", "master")];
@@ -351,8 +475,6 @@ export class ClockPanel {
     this.el.root.dataset.lock = lock;
     this.el.tempo.textContent = running ? status.tempo.toFixed(2) : "—";
     this.el.root.dataset.tempo = running ? status.tempo.toFixed(3) : "";
-    // The beat as heard now (the status reports the render position, ahead
-    // of the speakers by the output latency).
     const beat = running ? (this.host.audio.beatHeardAt(performance.now()) ?? status.beat) : NaN;
     this.el.root.dataset.beat = running ? beat.toFixed(4) : "";
     this.el.root.dataset.beatAt = running ? performance.now().toFixed(2) : "";
@@ -365,11 +487,6 @@ export class ClockPanel {
     this.renderStatus();
   }
 
-  /**
-   * The source line is a polite live region: it changes only when the
-   * state does. Counters that tick (MIDI clocks, bridge round trip) go to
-   * a separate, non-live span so a screen reader is not flooded.
-   */
   private renderStatus(): void {
     let text = "";
     let detail = "";
@@ -381,6 +498,30 @@ export class ClockPanel {
       case "tap":
         text = "Tap the beat: sets the tempo and pulls the grid onto your taps.";
         break;
+      case "link": {
+        const t = this.timeline;
+        const rtt = this.bridge?.bestRttMs;
+        if (this.bridgeState === "open" && t) {
+          text = `Ableton Link — Enabled · ${t.locked ? "locked" : "searching"} · ${t.bpm.toFixed(2)} BPM · quantum 4 beats`;
+          if (this.bridgeStatus) text += ` (${this.bridgeStatus.replace(/^info:\s*/i, "")})`;
+          if (typeof rtt === "number") detail = `rtt ${rtt.toFixed(1)} ms`;
+          if (this.el.linkPeersOut) {
+            const m = /(\d+)\s+peer/i.exec(this.bridgeStatus);
+            this.el.linkPeersOut.textContent = m ? `${m[1]} LAN peer(s) via bridge` : "LAN session active via bridge";
+          }
+        } else {
+          const nPeers = this.linkPeers.size;
+          text = `Ableton Link — Enabled · ${this.linkBpm.toFixed(2)} BPM · quantum 4 beats · ${
+            nPeers === 0 ? "waiting for Ableton Live / Link peers" : `${nPeers} local peer(s)`
+          }`;
+          if (this.el.linkPeersOut) {
+            this.el.linkPeersOut.textContent =
+              nPeers > 0 ? `${nPeers} browser peer(s)` : "0 peers (connect bridge for LAN UDP 20808)";
+          }
+        }
+        this.el.root.dataset.bridge = this.bridgeState;
+        break;
+      }
       case "bridge": {
         const t = this.timeline;
         if (this.bridgeState === "discovering") text = "Looking for a bridge…";

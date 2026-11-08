@@ -34,7 +34,7 @@ export const SEQ_CHAPTERS: readonly Chapter[] = [
   },
   {
     id: 3,
-    title: "4 · Swing, Presets & Booth Sync",
+    title: "4 · Groove, Voice FX & Ableton Link",
     startSec: 90,
     endSec: 120,
   },
@@ -124,17 +124,17 @@ const SEQ_CAPTIONS: readonly Caption[] = [
   {
     from: 90,
     to: 100,
-    text: "Raising Shuffle delays every even-numbered step (Steps 2, 4, 6, 8...) to create authentic House and Nu-Disco swing.",
+    text: "Maschine-style Groove & Humanize: Pick a Groove Pocket, raise Humanize for micro-timing jitter, or press ⌥+G (Humanize), ⌥+V (Variation), and ⌥+F (1-Bar Auto-Fill).",
   },
   {
     from: 100,
     to: 110,
-    text: "Press Q and W in the Step Sequencer to audition the 17 built-in Nu-Disco, House, Techno, and Core Booth preset patterns.",
+    text: "Per-Sample & Group FX: Click EC / RV / FL on any drum row, press Ctrl+1..0 for per-voice Dub Echo, ⌥+E/R/D for Echo/Reverb/Filter, or Shift+Q/W/E for Group Echo throws!",
   },
   {
     from: 110,
     to: 120,
-    text: "Lock your Step Sequencer to a DJ set with Space (Play/Stop), T (Tap tempo), [ and ] (BPM), and ; or ' (±1 ms phase nudge).",
+    text: "Sync over Wi-Fi/LAN with Ableton Link (or Pioneer Pro DJ Link / MIDI Clock), and fine-tune phase with [ / ] (BPM), ; / ' (±1 ms nudge), and L (Re-sync).",
   },
 ];
 
@@ -1045,24 +1045,24 @@ export class HowToExplainer {
       ctx.fillText(`Step ${i + 1}`, swungX, 128);
     }
 
-    // Bottom cards: Presets (Q/W), Tempo ([ ]), and Phase Nudge (; ')
+    // Bottom cards: Groove/Variation, Per-Sample/Group FX, and Ableton Link / Booth Sync
     const cards = [
       {
-        title: "Genre Presets [Q / W]",
-        sub1: "17 Nu-Disco, House,",
-        sub2: "Techno & Booth grooves",
+        title: "Groove & Fill [⌥G / ⌥V / ⌥F]",
+        sub1: "Maschine humanize drift,",
+        sub2: "Variation & 1-Bar Auto-Fill",
         color: C_PURPLE,
       },
       {
-        title: "Tempo Control [T / [ / ]]",
-        sub1: "Tap Tempo (T) or nudge",
-        sub2: "BPM ±1 (Shift: ±0.1 BPM)",
+        title: "Voice & Group FX [Ctrl+1–0]",
+        sub1: "Row EC/RV/FL · ⌥E/R/D",
+        sub2: "⇧Q Snare · ⇧W Hats · ⇧E Toms",
         color: C_YELLOW,
       },
       {
-        title: "DJ Booth Sync [; / ' / L]",
-        sub1: "Bridge (CDJ Pro DJ Link) &",
-        sub2: "MIDI Clock + ±1 ms Nudge",
+        title: "Ableton Link & Pro DJ Link",
+        sub1: "Wi-Fi Ableton Link (20808),",
+        sub2: "CDJ Bridge & MIDI + Nudge",
         color: C_TEAL,
       },
     ];
@@ -1561,8 +1561,8 @@ export function howToModalMarkup(): string {
             Your MacBook Home Row <kbd>A</kbd>–<kbd>K</kbd> controls <strong>Steps 1–8</strong>, and the Bottom Row <kbd>Z</kbd>–<kbd>,</kbd> controls <strong>Steps 9–16</strong>. Tap once for a <em>Hit</em>, twice for a louder <em>Accent</em>, and a third time to turn it <em>Off</em> (hold <kbd>Shift</kbd> + step key or press <kbd>E</kbd> for a double-hit <em>Flam</em>).
           </li>
           <li>
-            <strong>4. Sculpt the TR voice circuit, swing &amp; DJ booth lock:</strong>
-            Use the <strong>Voice</strong> sliders (<em>Tune</em>, <em>Decay</em>, <em>Tone</em>, <em>Snappy</em>) below the grid to shape the selected drum, raise <strong>Shuffle</strong> for house/disco swing, and use the <strong>Clock</strong> panel (<kbd>T</kbd> Tap, <strong>Bridge</strong>, or <strong>MIDI</strong>) plus <kbd>[</kbd> <kbd>]</kbd> and <kbd>;</kbd> <kbd>'</kbd> to lock phase with Pioneer CDJs.
+            <strong>4. Add Maschine Groove/Variation, Per-Sample FX &amp; Ableton Link Sync:</strong>
+            Pick a <strong>Groove pocket</strong>, dial in <strong>Humanize</strong> micro-drift, or press <kbd>⌥+G</kbd> (Humanize), <kbd>⌥+V</kbd> (Variation), and <kbd>⌥+F</kbd> (Auto-Fill). Drop <strong>Dub Echo / Reverb / Filter</strong> on individual drums via row <strong>EC / RV / FL</strong> LEDs (<kbd>Ctrl</kbd>+<kbd>1</kbd>–<kbd>0</kbd> or <kbd>⌥+E/R/D</kbd>) or group echo throws (<kbd>⇧+Q</kbd> Snare+Clap, <kbd>⇧+W</kbd> Hats, <kbd>⇧+E</kbd> Toms), and sync with <strong>Ableton Link</strong>, <strong>Bridge</strong> (Pioneer Pro DJ Link), or <strong>MIDI</strong> in the <strong>Clock</strong> panel.
           </li>
         </ol>
 

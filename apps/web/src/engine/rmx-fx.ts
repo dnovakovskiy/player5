@@ -3,8 +3,9 @@
 // At default state (Scene FX = 0, Isolator = 0 dB, Release FX disengaged),
 // the dry signal passes through at unity gain with flat response.
 
+import { defaultVoiceFxMap, hasAnyVoiceFx, type VoiceFxMap } from "../groove";
 import type { PatternSpec } from "../spec";
-import type { VoiceId } from "../voices";
+import { VOICES, type VoiceId } from "../voices";
 
 export type SceneFxId =
   | "bpf_echo"
@@ -154,6 +155,17 @@ export class RmxFxRack {
   private readonly noiseSource: AudioBufferSourceNode;
   private readonly releaseFilter: BiquadFilterNode;
   private readonly releaseGain: GainNode;
+  private readonly voiceEchoIn: GainNode;
+  private readonly voiceEchoDelay: DelayNode;
+  private readonly voiceEchoFilter: BiquadFilterNode;
+  private readonly voiceEchoFeedback: GainNode;
+  private readonly voiceEchoWet: GainNode;
+  private readonly voiceReverbIn: GainNode;
+  private readonly voiceReverbWet: GainNode;
+  private readonly voiceFilterIn: GainNode;
+  private readonly voiceResFilter: BiquadFilterNode;
+  private readonly voiceDriveShaper: WaveShaperNode;
+  private readonly voiceFilterWet: GainNode;
   private readonly analyser: AnalyserNode;
   private readonly meterBuf: Float32Array<ArrayBuffer>;
   private readonly noiseBuf: AudioBuffer;
@@ -161,6 +173,9 @@ export class RmxFxRack {
   private lfoPhase = 0;
   private bpm = 124;
   private state: RmxState = defaultRmxState();
+  private voiceFxMap: VoiceFxMap = defaultVoiceFxMap();
+  private voiceFxLevel = 0.75;
+  private humanizeAmount = 0;
   private activeOpenHatGain: GainNode | null = null;
 
   constructor(private readonly ctx: AudioContext) {
@@ -250,6 +265,36 @@ export class RmxFxRack {
     this.releaseGain = ctx.createGain();
     this.releaseGain.gain.value = 1;
 
+    // 3b. Dedicated Per-Voice & Group FX Send buses (Dub Echo, Lush Reverb, Acid Filter/Drive)
+    this.voiceEchoIn = ctx.createGain();
+    this.voiceEchoIn.gain.value = 0.9;
+    this.voiceEchoDelay = ctx.createDelay(2.0);
+    this.voiceEchoDelay.delayTime.value = (60 / 124) * 0.75;
+    this.voiceEchoFilter = ctx.createBiquadFilter();
+    this.voiceEchoFilter.type = "bandpass";
+    this.voiceEchoFilter.frequency.value = 1550;
+    this.voiceEchoFilter.Q.value = 1.15;
+    this.voiceEchoFeedback = ctx.createGain();
+    this.voiceEchoFeedback.gain.value = 0.58;
+    this.voiceEchoWet = ctx.createGain();
+    this.voiceEchoWet.gain.value = 0.82;
+
+    this.voiceReverbIn = ctx.createGain();
+    this.voiceReverbIn.gain.value = 0.85;
+    this.voiceReverbWet = ctx.createGain();
+    this.voiceReverbWet.gain.value = 0.75;
+
+    this.voiceFilterIn = ctx.createGain();
+    this.voiceFilterIn.gain.value = 0.9;
+    this.voiceResFilter = ctx.createBiquadFilter();
+    this.voiceResFilter.type = "bandpass";
+    this.voiceResFilter.frequency.value = 1800;
+    this.voiceResFilter.Q.value = 3.4;
+    this.voiceDriveShaper = ctx.createWaveShaper();
+    this.voiceDriveShaper.curve = makeDriveCurve(0.68);
+    this.voiceFilterWet = ctx.createGain();
+    this.voiceFilterWet.gain.value = 0.85;
+
     // 4. Output analyser for peak meter when RMX synth/FX are active
     this.analyser = ctx.createAnalyser();
     this.analyser.fftSize = 256;
@@ -295,6 +340,24 @@ export class RmxFxRack {
     this.noiseSource.start();
 
     this.releaseGain.connect(this.analyser);
+
+    // Wire Per-Voice FX Send buses
+    this.voiceEchoIn.connect(this.voiceEchoDelay);
+    this.voiceEchoDelay.connect(this.voiceEchoFilter);
+    this.voiceEchoFilter.connect(this.voiceEchoFeedback);
+    this.voiceEchoFeedback.connect(this.voiceEchoDelay);
+    this.voiceEchoFilter.connect(this.voiceEchoWet);
+    this.voiceEchoWet.connect(this.releaseFilter);
+
+    this.voiceReverbIn.connect(this.convolver);
+    this.reverbFilter.connect(this.voiceReverbWet);
+    this.voiceReverbWet.connect(this.releaseFilter);
+
+    this.voiceFilterIn.connect(this.voiceResFilter);
+    this.voiceResFilter.connect(this.voiceDriveShaper);
+    this.voiceDriveShaper.connect(this.voiceFilterWet);
+    this.voiceFilterWet.connect(this.releaseFilter);
+
     this.analyser.connect(ctx.destination);
 
     this.lfoTimer = setInterval(() => this.tickModulation(), 25);
@@ -303,7 +366,28 @@ export class RmxFxRack {
   setBpm(bpm: number): void {
     if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 400) {
       this.bpm = bpm;
+      const beatSec = 60 / Math.max(40, Math.min(240, bpm));
+      this.voiceEchoDelay.delayTime.setTargetAtTime(beatSec * 0.75, this.ctx.currentTime, 0.03);
     }
+  }
+
+  /**
+   * Updates per-voice FX sends (Echo, Reverb, Acid Filter/Drive) and real-time
+   * Maschine-style Humanize amount (0..1).
+   */
+  setVoiceFxAndHumanize(map: VoiceFxMap, humanize: number, fxLevel = 0.75): void {
+    this.voiceFxMap = map;
+    this.humanizeAmount = Math.max(0, Math.min(1, humanize));
+    this.voiceFxLevel = Math.max(0.1, Math.min(1, fxLevel));
+    const now = this.ctx.currentTime;
+    const anyReverb = VOICES.some((v) => map[v.id].reverb);
+    this.voiceEchoWet.gain.setTargetAtTime(0.85 * this.voiceFxLevel, now, 0.02);
+    this.voiceReverbWet.gain.setTargetAtTime(anyReverb ? 0.78 * this.voiceFxLevel : 0, now, 0.02);
+    this.voiceFilterWet.gain.setTargetAtTime(0.85 * this.voiceFxLevel, now, 0.02);
+  }
+
+  hasActiveVoiceFxOrHumanize(): boolean {
+    return this.humanizeAmount > 0.01 || hasAnyVoiceFx(this.voiceFxMap);
   }
 
   /**
@@ -377,11 +461,12 @@ export class RmxFxRack {
   }
 
   /**
-   * Fires authentic TR-series analog/PCM character layers synchronized to the
-   * Step Sequencer's current step so each TR kit has unmistakable drum timbres.
+   * Fires authentic TR-series analog/PCM character layers, Per-Voice FX sends
+   * (Echo, Reverb, Filter/Drive on individual drums or groups), and real-time
+   * Maschine-style Humanize micro-timing layers synchronized to the current step.
    */
   triggerKitStep(kitId: string, step: number, spec: PatternSpec): void {
-    if (!kitId || step < 0 || step >= 16) return;
+    if (step < 0 || step >= 16) return;
     const now = this.ctx.currentTime;
     const stepChar = (v: VoiceId): string => {
       const voice = spec.voices[v];
@@ -393,6 +478,42 @@ export class RmxFxRack {
       const base = c === "X" || c === "F" ? 0.95 : 0.7;
       return base * (spec.voices[v]?.level ?? 0.8);
     };
+
+    // 1. Per-Voice & Group FX Sends + Real-Time Humanize Micro-Timing Layer
+    for (const vInfo of VOICES) {
+      const vid = vInfo.id;
+      const sc = stepChar(vid);
+      if (!isActive(sc)) continue;
+      const voiceSpec = spec.voices[vid];
+      const basePitch = (voiceSpec.tune - 0.5) * 0.85;
+      const vel = velOf(vid, sc);
+      const fx = this.voiceFxMap[vid];
+
+      if (fx.echo) {
+        this.triggerPad(vid, basePitch, vel * 0.88, this.voiceEchoIn, 0);
+      }
+      if (fx.reverb) {
+        this.triggerPad(vid, basePitch, vel * 0.82, this.voiceReverbIn, 0);
+      }
+      if (fx.filter) {
+        const cutoff = 650 + ((step * 230 + Math.round(voiceSpec.tone * 1400)) % 2800);
+        this.voiceResFilter.frequency.setTargetAtTime(cutoff, now, 0.012);
+        this.triggerPad(vid, basePitch, vel * 0.9, this.voiceFilterIn, 0);
+      }
+
+      if (this.humanizeAmount > 0.02) {
+        const h = this.humanizeAmount;
+        const pseudo = Math.sin(step * 12.9898 + vid.length * 78.233) * 43758.5453;
+        const frac = pseudo - Math.floor(pseudo); // 0..1 deterministic-organic per step
+        const maxMs = vid === "kick" ? 0.0025 : vid === "snare" || vid === "clap" ? 0.014 : 0.011;
+        const delaySec = frac * maxMs * h;
+        const pitchDrift = (frac - 0.5) * 0.14 * h;
+        const humanVel = vel * (0.28 + 0.22 * frac) * h;
+        this.triggerPad(vid, basePitch + pitchDrift, humanVel, this.xpadBus, delaySec);
+      }
+    }
+
+    if (!kitId) return;
 
     if (kitId === "club-punch" || kitId === "warehouse-raw") {
       // TR-9O9 signature layers: hard 2-stage triangle pitch-punch kick + 6-bit metallic hat sizzle
@@ -758,13 +879,28 @@ export class RmxFxRack {
    * 6-oscillator inharmonic square-wave hats with choke, dual-square cowbell,
    * dual-ping rimshot, and damped swept toms).
    */
-  triggerPad(voice: VoiceId, pitchShift = 0, velocity = 0.9): void {
-    const now = this.ctx.currentTime;
+  triggerPad(
+    voice: VoiceId,
+    pitchShift = 0,
+    velocity = 0.9,
+    targetBus?: AudioNode,
+    delayOffsetSec = 0,
+  ): void {
+    const now = this.ctx.currentTime + Math.max(0, delayOffsetSec);
     const ratio = 2 ** (pitchShift * 0.75);
-    const vel = Math.max(0.1, Math.min(1, velocity));
+    const vel = Math.max(0.05, Math.min(1, velocity));
     const out = this.ctx.createGain();
     out.gain.value = vel;
-    out.connect(this.xpadBus);
+    out.connect(targetBus ?? this.xpadBus);
+
+    // If triggered live from keyboard / X-Pad (no explicit targetBus) and this
+    // voice has per-voice FX enabled, also send to its active FX buses!
+    if (!targetBus) {
+      const fx = this.voiceFxMap[voice];
+      if (fx?.echo) out.connect(this.voiceEchoIn);
+      if (fx?.reverb) out.connect(this.voiceReverbIn);
+      if (fx?.filter) out.connect(this.voiceFilterIn);
+    }
 
     switch (voice) {
       case "kick": {

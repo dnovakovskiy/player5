@@ -1,6 +1,19 @@
 import "./style.css";
 import { midiSupported } from "./clock/midi";
 import { AudioEngine, type AudioState, type EngineMode, type EngineStatus } from "./engine/audio-engine";
+import {
+  applyAutoFill,
+  clearAllVoiceFx,
+  cloneVoiceFxMap,
+  defaultVoiceFxMap,
+  GROOVE_TEMPLATES,
+  humanizePattern,
+  isGroupEchoActive,
+  mutatePattern,
+  toggleGroupFx,
+  type VoiceFxKind,
+  type VoiceFxMap,
+} from "./groove";
 import { applyKitToSpec, DEFAULT_PRESET, KITS, PRESETS } from "./presets";
 import { setupPwa } from "./pwa";
 import {
@@ -51,6 +64,10 @@ interface HistoryEntry {
   spec: PatternSpec;
   presetId: string;
   kitId: string;
+  grooveId?: string;
+  humanize?: number;
+  voiceFx?: VoiceFxMap;
+  voiceFxLevel?: number;
 }
 
 function findMatchingPresetId(s: PatternSpec): string {
@@ -61,6 +78,10 @@ function findMatchingPresetId(s: PatternSpec): string {
 let spec: PatternSpec = initialSpec();
 let activePresetId = findMatchingPresetId(spec);
 let activeKitId = PRESETS.find((p) => p.id === activePresetId)?.kitId ?? "";
+let activeGrooveId = "";
+let humanizeAmount = 0;
+let voiceFx: VoiceFxMap = defaultVoiceFxMap();
+let voiceFxLevel = 0.72;
 let selected: VoiceId = "kick";
 let flamMode = false;
 /** Step being heard (the playhead). */
@@ -92,6 +113,10 @@ const flam = $<HTMLInputElement>("flam");
 const flamModeBtn = $<HTMLButtonElement>("flam-mode");
 const presetSelect = $<HTMLSelectElement>("preset");
 const kitSelect = $<HTMLSelectElement>("kit");
+const grooveSelect = $<HTMLSelectElement>("groove-template");
+const humanizeInput = $<HTMLInputElement>("humanize");
+const vfxLevelInput = $<HTMLInputElement>("vfx-level");
+const vfxReadout = $<HTMLOutputElement>("vfx-readout");
 const undoBtn = $<HTMLButtonElement>("undo");
 const gain = $<HTMLInputElement>("gain");
 const limiter = $<HTMLInputElement>("limiter");
@@ -112,6 +137,12 @@ const audio = new AudioEngine({
   onStatus: (status) => onEngineStatus(status),
 });
 
+function toggleVoiceFx(voice: VoiceId, fx: VoiceFxKind): void {
+  checkpoint(`vfx-${voice}-${fx}`);
+  voiceFx[voice][fx] = !voiceFx[voice][fx];
+  commit();
+}
+
 const grid = new Grid($("grid"), {
   onStep(voice, step) {
     checkpoint();
@@ -123,11 +154,15 @@ const grid = new Grid($("grid"), {
     selected = voice;
     renderVoicePanel();
     renderGrid();
+    renderGrooveAndFxControls();
   },
   onMute(voice) {
     checkpoint();
     spec.voices[voice].mute = !spec.voices[voice].mute;
     commit();
+  },
+  onToggleFx(voice, fx) {
+    toggleVoiceFx(voice, fx);
   },
 });
 
@@ -139,6 +174,7 @@ const clock = new ClockPanel(
     audio,
     tap: (ms) => tap(ms),
     onSourceChange: (source, previous) => onSourceChange(source, previous),
+    getPatternBpm: () => spec.bpm,
   },
   { bridge: bridgeOk, midi: midiOk },
 );
@@ -201,7 +237,43 @@ const pct = (v: number) => `${Math.round(v * 100)}%`;
 const gainDb = (g: number) => (g > 0 ? 20 * Math.log10(g) : -Infinity);
 
 function renderGrid(): void {
-  grid.render(spec, selected);
+  grid.render(spec, selected, voiceFx);
+}
+
+function renderGrooveAndFxControls(): void {
+  grooveSelect.value = activeGrooveId;
+  humanizeInput.value = String(humanizeAmount);
+  $("humanize-out").textContent = pct(humanizeAmount);
+  vfxLevelInput.value = String(voiceFxLevel);
+  $("vfx-level-out").textContent = pct(voiceFxLevel);
+
+  const selFx = voiceFx[selected];
+  const selInfo = voiceInfo(selected);
+  $("vfx-echo").setAttribute("aria-pressed", String(selFx.echo));
+  $("vfx-echo").textContent = `${selInfo.short} Echo [⌥E]`;
+  $("vfx-reverb").setAttribute("aria-pressed", String(selFx.reverb));
+  $("vfx-reverb").textContent = `${selInfo.short} Reverb [⌥R]`;
+  $("vfx-filter").setAttribute("aria-pressed", String(selFx.filter));
+  $("vfx-filter").textContent = `${selInfo.short} Filter [⌥D]`;
+
+  $("grp-fx-snare").setAttribute("aria-pressed", String(isGroupEchoActive(voiceFx, "snare_clap")));
+  $("grp-fx-hats").setAttribute("aria-pressed", String(isGroupEchoActive(voiceFx, "hats")));
+  $("grp-fx-toms").setAttribute("aria-pressed", String(isGroupEchoActive(voiceFx, "toms")));
+
+  // Build concise readout of active per-voice FX
+  const activeSummaries: string[] = [];
+  for (const v of VOICES) {
+    const f = voiceFx[v.id];
+    const tags: string[] = [];
+    if (f.echo) tags.push("EC");
+    if (f.reverb) tags.push("RV");
+    if (f.filter) tags.push("FL");
+    if (tags.length > 0) activeSummaries.push(`${v.short}:${tags.join("+")}`);
+  }
+  vfxReadout.textContent =
+    activeSummaries.length > 0
+      ? `FX ON (${pct(voiceFxLevel)}) · ${activeSummaries.join(" ")}`
+      : "DRY · NO VOICE FX";
 }
 
 function renderVoicePanel(): void {
@@ -265,6 +337,7 @@ function renderVoicePanel(): void {
 function renderControls(): void {
   renderGrid();
   renderVoicePanel();
+  renderGrooveAndFxControls();
   rmx.render();
   if (!clock.following && !bpmEditing) bpmInput.value = String(spec.bpm);
   shuffle.value = String(spec.shuffle);
@@ -287,7 +360,7 @@ function renderControls(): void {
   else delete app.dataset.kit;
   $("grid-hint").textContent = flamMode
     ? "flam edit: tap toggles a flam"
-    : "tap a step: off → hit → accent";
+    : "tap a step: off → hit → accent · EC/RV/FL: per-voice FX";
   undoBtn.disabled = undoStack.length === 0;
 }
 
@@ -364,6 +437,7 @@ function commit(): void {
   renderControls();
   audio.setPattern(specBytes(spec));
   audio.setKit(activeKitId, spec);
+  audio.setVoiceFxAndHumanize(voiceFx, humanizeAmount, voiceFxLevel);
   shareCode.value = encodeCode(spec);
   scheduleUrlWrite();
 }
@@ -400,7 +474,15 @@ function writeUrl(): void {
 // ---- undo ----
 
 function snapshotState(): string {
-  const entry: HistoryEntry = { spec, presetId: activePresetId, kitId: activeKitId };
+  const entry: HistoryEntry = {
+    spec,
+    presetId: activePresetId,
+    kitId: activeKitId,
+    grooveId: activeGrooveId,
+    humanize: humanizeAmount,
+    voiceFx: cloneVoiceFxMap(voiceFx),
+    voiceFxLevel,
+  };
   return JSON.stringify(entry);
 }
 
@@ -410,6 +492,10 @@ function restoreSnapshot(raw: string): void {
     spec = sanitize(parsed.spec);
     activePresetId = parsed.presetId ?? "";
     activeKitId = parsed.kitId ?? "";
+    activeGrooveId = parsed.grooveId ?? "";
+    humanizeAmount = typeof parsed.humanize === "number" ? parsed.humanize : 0;
+    voiceFx = parsed.voiceFx ? cloneVoiceFxMap(parsed.voiceFx) : defaultVoiceFxMap();
+    voiceFxLevel = typeof parsed.voiceFxLevel === "number" ? parsed.voiceFxLevel : 0.72;
   } else {
     spec = sanitize(parsed);
   }
@@ -507,10 +593,12 @@ tapBtn.addEventListener("click", (e) => {
 });
 
 function onSourceChange(source: SourceKind, previous: SourceKind): void {
-  const following = source === "bridge" || source === "midi";
+  const following = source === "link" || source === "bridge" || source === "midi";
   for (const b of [bpmInput, tapBtn, ...bpmButtons]) b.disabled = following;
-  bpmInput.title = following ? `Tempo follows the ${source === "midi" ? "MIDI clock" : "bridge"}` : "";
-  const wasFollowing = previous === "bridge" || previous === "midi";
+  bpmInput.title = following
+    ? `Tempo follows ${source === "midi" ? "MIDI clock" : source === "link" ? "Ableton Link" : "the bridge"}`
+    : "";
+  const wasFollowing = previous === "link" || previous === "bridge" || previous === "midi";
   if (wasFollowing && !following && audio.running && audio.lastStatus) {
     // Keep playing at the tempo we were following instead of jumping back.
     setBpm(audio.lastStatus.tempo, "adopt");
@@ -532,6 +620,74 @@ bindUnit(gain, "gain", (db) => (spec.render.output_gain = Math.round(10 ** (db /
 limiter.addEventListener("change", () => {
   checkpoint();
   spec.render.limiter = limiter.checked;
+  commit();
+});
+
+// ---- Groove, Humanize, Variation & Per-Sample FX bindings ----
+
+grooveSelect.addEventListener("change", () => {
+  const groove = GROOVE_TEMPLATES.find((g) => g.id === grooveSelect.value);
+  if (!groove) {
+    grooveSelect.value = activeGrooveId;
+    return;
+  }
+  checkpoint("groove-template");
+  activeGrooveId = groove.id;
+  spec.shuffle = groove.shuffle;
+  spec.accent = groove.accent;
+  spec.flam = groove.flam;
+  humanizeAmount = groove.humanize;
+  commit();
+});
+
+bindUnit(humanizeInput, "humanize", (v) => {
+  humanizeAmount = v;
+});
+
+bindUnit(vfxLevelInput, "vfx-level", (v) => {
+  voiceFxLevel = v;
+});
+
+function triggerHumanizeAction(): void {
+  checkpoint("var-humanize");
+  if (humanizeAmount < 0.25) humanizeAmount = 0.35;
+  spec = humanizePattern(spec, "all", Math.max(0.45, humanizeAmount));
+  commit();
+}
+
+function triggerMutateAction(): void {
+  checkpoint("var-mutate");
+  spec = mutatePattern(spec, "all", 0.55);
+  commit();
+}
+
+function triggerAutoFillAction(): void {
+  checkpoint("var-fill");
+  spec = applyAutoFill(spec);
+  commit();
+}
+
+$("var-humanize").addEventListener("click", triggerHumanizeAction);
+$("var-mutate").addEventListener("click", triggerMutateAction);
+$("var-fill").addEventListener("click", triggerAutoFillAction);
+
+$("vfx-echo").addEventListener("click", () => toggleVoiceFx(selected, "echo"));
+$("vfx-reverb").addEventListener("click", () => toggleVoiceFx(selected, "reverb"));
+$("vfx-filter").addEventListener("click", () => toggleVoiceFx(selected, "filter"));
+
+function triggerGroupEcho(groupId: "snare_clap" | "hats" | "toms"): boolean {
+  checkpoint(`grp-fx-${groupId}`);
+  const on = toggleGroupFx(voiceFx, groupId, "echo");
+  commit();
+  return on;
+}
+
+$("grp-fx-snare").addEventListener("click", () => triggerGroupEcho("snare_clap"));
+$("grp-fx-hats").addEventListener("click", () => triggerGroupEcho("hats"));
+$("grp-fx-toms").addEventListener("click", () => triggerGroupEcho("toms"));
+$("vfx-clear").addEventListener("click", () => {
+  checkpoint("vfx-clear");
+  clearAllVoiceFx(voiceFx);
   commit();
 });
 
@@ -755,10 +911,24 @@ window.addEventListener("keydown", (e) => {
     redo();
     return;
   }
+
+  // Ctrl + 1..0: Toggle Dub Echo send on Voice 1..0 directly
+  const vIdx = VOICE_DIGIT_CODES.indexOf(e.code as (typeof VOICE_DIGIT_CODES)[number]);
+  if (e.ctrlKey && !e.metaKey && !e.altKey && vIdx >= 0 && !e.repeat) {
+    const vInfo = VOICES[vIdx]!;
+    e.preventDefault();
+    toggleVoiceFx(vInfo.id, "echo");
+    const on = voiceFx[vInfo.id].echo;
+    howTo.notifyKeyDown(
+      e.code,
+      `Ctrl+${vIdx === 9 ? 0 : vIdx + 1} → ${vInfo.short} Dub Echo ${on ? "ON" : "OFF"}`,
+    );
+    return;
+  }
+
   if (mod) return;
 
   // 1. Number Row 1..0: Select Voice, Shift+1..0 Live Drum Trigger, Option+1..0 Mute
-  const vIdx = VOICE_DIGIT_CODES.indexOf(e.code as (typeof VOICE_DIGIT_CODES)[number]);
   if (vIdx >= 0 && !e.repeat) {
     const vInfo = VOICES[vIdx]!;
     e.preventDefault();
@@ -774,6 +944,7 @@ window.addEventListener("keydown", (e) => {
       rmx.triggerVoicePad(vInfo.id, true);
       renderVoicePanel();
       renderGrid();
+      renderGrooveAndFxControls();
       howTo.notifyKeyDown(e.code, `Shift+${vIdx === 9 ? 0 : vIdx + 1} → Trigger ${vInfo.short}`);
       return;
     }
@@ -781,6 +952,7 @@ window.addEventListener("keydown", (e) => {
     grid.setFocus(vIdx, 0, false);
     renderVoicePanel();
     renderGrid();
+    renderGrooveAndFxControls();
     if (surfaceMode === "rmx") {
       if (vIdx < 4) {
         rmx.triggerPadSlot(vIdx);
@@ -793,7 +965,58 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
-  if (e.altKey) return;
+  // Option (Alt) shortcuts for Groove / Variation & Selected-Voice FX
+  if (e.altKey && !e.repeat) {
+    switch (e.code) {
+      case "KeyG":
+        e.preventDefault();
+        triggerHumanizeAction();
+        howTo.notifyKeyDown(e.code, `⌥+G → Humanize Pattern (${pct(humanizeAmount)})`);
+        return;
+      case "KeyV":
+        e.preventDefault();
+        triggerMutateAction();
+        howTo.notifyKeyDown(e.code, "⌥+V → Pattern Variation");
+        return;
+      case "KeyF":
+        e.preventDefault();
+        triggerAutoFillAction();
+        howTo.notifyKeyDown(e.code, "⌥+F → 1-Bar Auto-Fill (Steps 13–16)");
+        return;
+      case "KeyE":
+        e.preventDefault();
+        toggleVoiceFx(selected, "echo");
+        howTo.notifyKeyDown(
+          e.code,
+          `⌥+E → ${selected.toUpperCase()} Dub Echo ${voiceFx[selected].echo ? "ON" : "OFF"}`,
+        );
+        return;
+      case "KeyR":
+        e.preventDefault();
+        toggleVoiceFx(selected, "reverb");
+        howTo.notifyKeyDown(
+          e.code,
+          `⌥+R → ${selected.toUpperCase()} Space Reverb ${voiceFx[selected].reverb ? "ON" : "OFF"}`,
+        );
+        return;
+      case "KeyD":
+        e.preventDefault();
+        toggleVoiceFx(selected, "filter");
+        howTo.notifyKeyDown(
+          e.code,
+          `⌥+D → ${selected.toUpperCase()} Acid Filter ${voiceFx[selected].filter ? "ON" : "OFF"}`,
+        );
+        return;
+      case "KeyX":
+        e.preventDefault();
+        checkpoint("vfx-clear");
+        clearAllVoiceFx(voiceFx);
+        commit();
+        howTo.notifyKeyDown(e.code, "⌥+X → All Per-Voice FX Cleared (Dry)");
+        return;
+    }
+    return;
+  }
 
   // 2. Home Row (A..K) + Bottom Row (Z..,) -> Steps 1..16
   const stepIdx = STEP_KEY_CODES.indexOf(e.code as (typeof STEP_KEY_CODES)[number]);
@@ -830,7 +1053,7 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
-  // 4. Surface Mode, Presets, Flam, RMX Release FX, Tempo, Nudge & Clear
+  // 4. Surface Mode, Presets, Group FX (Shift+Q/W/E), Flam, RMX Release FX, Tempo, Nudge & Clear
   switch (e.code) {
     case "Backquote":
       if (!e.repeat) {
@@ -845,6 +1068,9 @@ window.addEventListener("keydown", (e) => {
         if (surfaceMode === "rmx") {
           rmx.triggerPadSlot(0);
           howTo.notifyKeyDown(e.code, "Q → X-Pad Slot 1");
+        } else if (e.shiftKey) {
+          const on = triggerGroupEcho("snare_clap");
+          howTo.notifyKeyDown(e.code, `Shift+Q → Snare+Clap+Rim Echo ${on ? "ON" : "OFF"}`);
         } else {
           const cur = PRESETS.findIndex((p) => p.id === app.dataset.preset);
           applyPresetByIndex(cur <= 0 ? PRESETS.length - 1 : cur - 1);
@@ -858,6 +1084,9 @@ window.addEventListener("keydown", (e) => {
         if (surfaceMode === "rmx") {
           rmx.triggerPadSlot(1);
           howTo.notifyKeyDown(e.code, "W → X-Pad Slot 2");
+        } else if (e.shiftKey) {
+          const on = triggerGroupEcho("hats");
+          howTo.notifyKeyDown(e.code, `Shift+W → Hi-Hats Echo ${on ? "ON" : "OFF"}`);
         } else {
           const cur = PRESETS.findIndex((p) => p.id === app.dataset.preset);
           applyPresetByIndex(cur < 0 ? 1 : cur + 1);
@@ -871,6 +1100,9 @@ window.addEventListener("keydown", (e) => {
         if (surfaceMode === "rmx") {
           rmx.triggerPadSlot(2);
           howTo.notifyKeyDown(e.code, "E → X-Pad Slot 3");
+        } else if (e.shiftKey) {
+          const on = triggerGroupEcho("toms");
+          howTo.notifyKeyDown(e.code, `Shift+E → Toms+Cowbell Echo ${on ? "ON" : "OFF"}`);
         } else {
           flamMode = !flamMode;
           renderControls();

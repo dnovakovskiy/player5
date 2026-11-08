@@ -403,7 +403,7 @@ test("Nu-Disco, House, and Techno presets and analog drum kit selector retune vo
   await expect(kitSelect).toHaveValue("club-punch");
   await expect(app(page)).toHaveAttribute("data-kit", "club-punch");
   await expect(page.locator("#vc-tune-out")).toHaveText("68%");
-  await expect(page.locator("#vc-decay-out")).toHaveText("44%");
+  await expect(page.locator("#vc-decay-out")).toHaveText("46%");
   await expect(step(page, "kick", 15)).toHaveAttribute("data-state", "on");
 
   // Load Peak-Time Techno preset
@@ -453,5 +453,57 @@ test("MacBook Air keyboard bindings and 3Blue1Brown How-To video explainer (Step
 
   await page.keyboard.press("Escape");
   await expect(modal).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+test("Maschine Groove/Humanize/Auto-Fill, Per-Sample & Group FX visual cues/shortcuts, and Ableton Link clock mode", async ({ page }) => {
+  const errors = guard(page);
+  await page.goto("/");
+
+  // 1. Select MPC 62% Swing Pocket from Groove pocket selector
+  const grooveSelect = page.locator("#groove-template");
+  await grooveSelect.selectOption("mpc62");
+  await expect(page.locator("#shuffle-out")).toHaveText("48%");
+  await expect(page.locator("#humanize-out")).toHaveText("28%");
+
+  // 2. Trigger 1-Bar Auto-Fill (Alt+KeyF) -> fills steps 13..16
+  await page.keyboard.press("Alt+KeyF");
+  await expect(step(page, "snare", 15)).toHaveAttribute("data-state", "flam");
+  await expect(step(page, "snare", 16)).toHaveAttribute("data-state", "accent-flam");
+
+  // 3. Per-Sample FX: toggle Dub Echo on Snare via Ctrl+Digit2 and Reverb via row RV LED
+  await page.keyboard.press("Control+Digit2");
+  const snareRow = page.locator('.row[data-voice="snare"]');
+  await expect(snareRow).toHaveAttribute("data-fx", "echo");
+  await expect(snareRow.locator('[data-voice-fx="echo"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#vfx-readout")).toContainText("SD:EC");
+
+  await snareRow.locator('[data-voice-fx="reverb"]').click();
+  await expect(snareRow).toHaveAttribute("data-fx", "multi");
+  await expect(page.locator("#vfx-readout")).toContainText("SD:EC+RV");
+
+  // 4. Group FX: Shift+W toggles Dub Echo on Closed + Open Hi-Hats
+  await page.keyboard.press("Shift+KeyW");
+  await expect(page.locator("#grp-fx-hats")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator('.row[data-voice="closed_hat"]')).toHaveAttribute("data-fx", "echo");
+  await expect(page.locator('.row[data-voice="open_hat"]')).toHaveAttribute("data-fx", "echo");
+
+  // Clear all Per-Voice FX via Alt+KeyX
+  await page.keyboard.press("Alt+KeyX");
+  await expect(page.locator("#vfx-readout")).toHaveText("DRY · NO VOICE FX");
+  await expect(snareRow).not.toHaveAttribute("data-fx");
+
+  // 5. Ableton Link clock source selection
+  await page.locator(".seg label", { hasText: /^Ableton Link$/ }).click();
+  await expect(page.locator("#clock")).toHaveAttribute("data-source", "link");
+  await expect(page.locator("#link-url")).toBeVisible();
+  await expect(page.locator("#link-peers")).toBeVisible();
+  await expect(page.locator("#bpm")).toBeDisabled();
+
+  // Switch back to Internal clock
+  await page.locator(".seg label", { hasText: /^Internal$/ }).click();
+  await expect(page.locator("#clock")).toHaveAttribute("data-source", "internal");
+  await expect(page.locator("#bpm")).toBeEnabled();
+
   expect(errors).toEqual([]);
 });
