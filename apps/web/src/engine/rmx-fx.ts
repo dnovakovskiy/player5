@@ -42,6 +42,7 @@ export interface RmxState {
   xpadRolling: boolean;
   xpadOverdub: boolean;
   xpadBankB: boolean;
+  xpadQuantize?: boolean;
 }
 
 export function defaultRmxState(): RmxState {
@@ -64,6 +65,7 @@ export function defaultRmxState(): RmxState {
     xpadRolling: false,
     xpadOverdub: false,
     xpadBankB: false,
+    xpadQuantize: true,
   };
 }
 
@@ -170,8 +172,15 @@ export class RmxFxRack {
   private readonly meterBuf: Float32Array<ArrayBuffer>;
   private readonly noiseBuf: AudioBuffer;
   private lfoTimer: ReturnType<typeof setInterval> | null = null;
-  private lfoPhase = 0;
   private bpm = 124;
+  private anchorCtxTime = 0;
+  private anchorBeat = 0;
+  private enginePlaying = false;
+  private shuffle = 0;
+  private nextRollBeat = -1;
+  private nextFreeRollCtxTime = 0;
+  private lastRollDiv: RollDivision = 8;
+  private onRollStepHit: ((voice: VoiceId, stepIdx: number, accent: boolean, pitch: number) => void) | null = null;
   private state: RmxState = defaultRmxState();
   private voiceFxMap: VoiceFxMap = defaultVoiceFxMap();
   private voiceFxLevel = 0.75;
@@ -360,14 +369,61 @@ export class RmxFxRack {
 
     this.analyser.connect(ctx.destination);
 
-    this.lfoTimer = setInterval(() => this.tickModulation(), 25);
+    this.lfoTimer = setInterval(() => this.tickModulation(), 15);
+  }
+
+  setRollOverdubHandler(
+    fn: ((voice: VoiceId, stepIdx: number, accent: boolean, pitch: number) => void) | null,
+  ): void {
+    this.onRollStepHit = fn;
+  }
+
+  /**
+   * Locks RMX-1000's internal Web Audio clock (Beat Roll, Quantize, Isolator
+   * rhythmic gate, and Scene FX echo delay) to the Step Sequencer's exact
+   * AudioContext sample timeline and shuffle setting.
+   */
+  syncTimeline(
+    ctxTime: number,
+    beat: number,
+    tempo: number,
+    playing: boolean,
+    shuffle?: number,
+  ): void {
+    if (Number.isFinite(ctxTime) && Number.isFinite(beat)) {
+      this.anchorCtxTime = ctxTime;
+      this.anchorBeat = beat;
+    }
+    if (typeof shuffle === "number" && Number.isFinite(shuffle)) {
+      this.shuffle = Math.max(0, Math.min(1, shuffle));
+    }
+    this.enginePlaying = playing && beat >= 0;
+    this.setBpm(tempo);
+  }
+
+  setShuffle(shuffle: number): void {
+    if (Number.isFinite(shuffle)) {
+      this.shuffle = Math.max(0, Math.min(1, shuffle));
+    }
+  }
+
+  private beatAt(ctxTime: number): number {
+    return this.anchorBeat + (ctxTime - this.anchorCtxTime) * (this.bpm / 60);
+  }
+
+  private ctxTimeForBeat(targetBeat: number): number {
+    return this.anchorCtxTime + (targetBeat - this.anchorBeat) * (60 / this.bpm);
   }
 
   setBpm(bpm: number): void {
     if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 400) {
+      const changed = Math.abs(bpm - this.bpm) > 0.05;
       this.bpm = bpm;
       const beatSec = 60 / Math.max(40, Math.min(240, bpm));
       this.voiceEchoDelay.delayTime.setTargetAtTime(beatSec * 0.75, this.ctx.currentTime, 0.03);
+      if (changed && (this.state.sceneAmount > 0.005 || this.state.releaseHeld)) {
+        this.apply(this.state);
+      }
     }
   }
 
@@ -463,11 +519,28 @@ export class RmxFxRack {
   /**
    * Fires authentic TR-series analog/PCM character layers, Per-Voice FX sends
    * (Echo, Reverb, Filter/Drive on individual drums or groups), and real-time
-   * Maschine-style Humanize micro-timing layers synchronized to the current step.
+   * Maschine-style Humanize micro-timing layers synchronized to the exact
+   * AudioContext sample & shuffle offset of the current step.
    */
-  triggerKitStep(kitId: string, step: number, spec: PatternSpec): void {
+  triggerKitStep(
+    kitId: string,
+    step: number,
+    spec: PatternSpec,
+    straightStepCtxTime?: number,
+  ): void {
     if (step < 0 || step >= 16) return;
-    const now = this.ctx.currentTime;
+    this.shuffle = Math.max(0, Math.min(1, spec.shuffle));
+    const beatSec = 60 / Math.max(40, Math.min(240, this.bpm));
+    // Odd steps (1, 3, 5, ...) are delayed in the core by shuffle * (0.25 / 3) beats
+    const shuffleBeats = step % 2 === 1 ? this.shuffle * (0.25 / 3) : 0;
+    const shuffleSec = shuffleBeats * beatSec;
+    const targetCtxTime =
+      (typeof straightStepCtxTime === "number" && Number.isFinite(straightStepCtxTime)
+        ? straightStepCtxTime
+        : this.ctx.currentTime) + shuffleSec;
+    const now = Math.max(this.ctx.currentTime, targetCtxTime);
+    const stepDelaySec = Math.max(0, now - this.ctx.currentTime);
+
     const stepChar = (v: VoiceId): string => {
       const voice = spec.voices[v];
       if (!voice || voice.mute || voice.level <= 0.01) return "-";
@@ -490,15 +563,15 @@ export class RmxFxRack {
       const fx = this.voiceFxMap[vid];
 
       if (fx.echo) {
-        this.triggerPad(vid, basePitch, vel * 0.88, this.voiceEchoIn, 0);
+        this.triggerPad(vid, basePitch, vel * 0.88, this.voiceEchoIn, stepDelaySec);
       }
       if (fx.reverb) {
-        this.triggerPad(vid, basePitch, vel * 0.82, this.voiceReverbIn, 0);
+        this.triggerPad(vid, basePitch, vel * 0.82, this.voiceReverbIn, stepDelaySec);
       }
       if (fx.filter) {
         const cutoff = 650 + ((step * 230 + Math.round(voiceSpec.tone * 1400)) % 2800);
         this.voiceResFilter.frequency.setTargetAtTime(cutoff, now, 0.012);
-        this.triggerPad(vid, basePitch, vel * 0.9, this.voiceFilterIn, 0);
+        this.triggerPad(vid, basePitch, vel * 0.9, this.voiceFilterIn, stepDelaySec);
       }
 
       if (this.humanizeAmount > 0.02) {
@@ -506,7 +579,7 @@ export class RmxFxRack {
         const pseudo = Math.sin(step * 12.9898 + vid.length * 78.233) * 43758.5453;
         const frac = pseudo - Math.floor(pseudo); // 0..1 deterministic-organic per step
         const maxMs = vid === "kick" ? 0.0025 : vid === "snare" || vid === "clap" ? 0.014 : 0.011;
-        const delaySec = frac * maxMs * h;
+        const delaySec = stepDelaySec + frac * maxMs * h;
         const pitchDrift = (frac - 0.5) * 0.14 * h;
         const humanVel = vel * (0.28 + 0.22 * frac) * h;
         this.triggerPad(vid, basePitch + pitchDrift, humanVel, this.xpadBus, delaySec);
@@ -657,9 +730,20 @@ export class RmxFxRack {
 
   apply(next: RmxState): void {
     const prevHeld = this.state.releaseHeld;
+    const prevRolling = this.state.xpadRolling;
+    const prevDiv = this.lastRollDiv;
     this.state = { ...next };
+    this.lastRollDiv = next.xpadRollDiv;
     const now = this.ctx.currentTime;
     const smooth = 0.025;
+
+    if (!next.xpadRolling) {
+      this.nextRollBeat = -1;
+      this.nextFreeRollCtxTime = 0;
+    } else if (!prevRolling || next.xpadRollDiv !== prevDiv) {
+      this.nextRollBeat = -1;
+      if (!prevRolling) this.nextFreeRollCtxTime = 0;
+    }
 
     // 1. Isolator EQ bands (-48 dB .. +6 dB)
     const lowDb = next.killLow ? -48 : next.isoLow;
@@ -808,6 +892,10 @@ export class RmxFxRack {
       this.releaseGain.gain.setTargetAtTime(1, now, 0.015);
       this.dryGain.gain.setTargetAtTime(1, now, 0.015);
     }
+
+    if (next.xpadRolling) {
+      this.tickModulation();
+    }
   }
 
   private triggerReleaseFx(mode: ReleaseMode, beatSec: number): void {
@@ -862,14 +950,110 @@ export class RmxFxRack {
   private tickModulation(): void {
     const mode = this.state.isoMode;
     const now = this.ctx.currentTime;
+
+    // 1. Beat-phase-locked Isolator Rhythmic Gate (CUT/ADD = 1/8, TRANS/ROLL = 1/16)
     if (mode === "cut_add" || mode === "trans_roll") {
-      const rateHz = (this.bpm / 60) * (mode === "trans_roll" ? 4 : 2);
-      this.lfoPhase = (this.lfoPhase + 0.025 * rateHz) % 1;
-      const open = this.lfoPhase < 0.55 ? 1 : mode === "trans_roll" ? 0.12 : 0.35;
-      this.isoGateGain.gain.setTargetAtTime(open, now, 0.008);
+      const mult = mode === "trans_roll" ? 4 : 2;
+      const beat = this.enginePlaying ? Math.max(0, this.beatAt(now)) : now * (this.bpm / 60);
+      const phase = ((beat * mult) % 1 + 1) % 1;
+      const open = phase < 0.55 ? 1 : mode === "trans_roll" ? 0.12 : 0.35;
+      this.isoGateGain.gain.setTargetAtTime(open, now, 0.006);
     } else {
       this.isoGateGain.gain.setTargetAtTime(1, now, 0.015);
     }
+
+    // 2. Web Audio lookahead X-Pad Beat Roll scheduler locked to Step Sequencer beat grid
+    if (this.state.xpadRolling) {
+      const div = this.state.xpadRollDiv;
+      const divBeats = 4 / div; // 1/1 -> 4, 1/2 -> 2, 1/4 -> 1, 1/8 -> 0.5, 1/16 -> 0.25, 1/32 -> 0.125
+      const beatSec = 60 / Math.max(40, Math.min(240, this.bpm));
+      const lookaheadSec = 0.055;
+      const horizon = now + lookaheadSec;
+      const vel = div >= 16 ? 1.0 : 0.88;
+
+      if (this.enginePlaying && this.state.xpadQuantize !== false) {
+        const curBeat = Math.max(0, this.beatAt(now));
+        if (this.nextRollBeat < 0) {
+          const nearestIdx = Math.round(curBeat / divBeats);
+          const nearestBeat = nearestIdx * divBeats;
+          const latenessSec = (curBeat - nearestBeat) * beatSec;
+          if (latenessSec >= -0.005 && latenessSec <= 0.028) {
+            this.nextRollBeat = Math.max(0, nearestBeat);
+          } else {
+            this.nextRollBeat = Math.ceil(curBeat / divBeats) * divBeats;
+          }
+        }
+        let guard = 0;
+        while (guard++ < 8) {
+          const subIdx = Math.round(this.nextRollBeat / divBeats);
+          const gridBeat = subIdx * divBeats;
+          const shuffleOffset = div === 16 && subIdx % 2 === 1 ? this.shuffle * (0.25 / 3) : 0;
+          const targetBeat = gridBeat + shuffleOffset;
+          const hitCtxTime = this.ctxTimeForBeat(targetBeat);
+          if (hitCtxTime > horizon) break;
+          const delaySec = Math.max(0, hitCtxTime - now);
+          this.triggerPad(this.state.xpadVoice, this.state.xpadPitch, vel, undefined, delaySec);
+          if (this.state.xpadOverdub && this.onRollStepHit) {
+            const step16 = ((Math.round(gridBeat / 0.25) % 16) + 16) % 16;
+            this.onRollStepHit(this.state.xpadVoice, step16, div >= 16, this.state.xpadPitch);
+          }
+          this.nextRollBeat = (subIdx + 1) * divBeats;
+        }
+      } else {
+        const intervalSec = Math.max(0.028, beatSec * divBeats);
+        if (this.nextFreeRollCtxTime <= 0 || this.nextFreeRollCtxTime < now - intervalSec) {
+          this.nextFreeRollCtxTime = now;
+        }
+        let guard = 0;
+        while (this.nextFreeRollCtxTime <= horizon && guard++ < 8) {
+          const delaySec = Math.max(0, this.nextFreeRollCtxTime - now);
+          this.triggerPad(this.state.xpadVoice, this.state.xpadPitch, vel, undefined, delaySec);
+          this.nextFreeRollCtxTime += intervalSec;
+        }
+      }
+    } else {
+      this.nextRollBeat = -1;
+      this.nextFreeRollCtxTime = 0;
+    }
+  }
+
+  /**
+   * Triggers an X-Pad hit, snapping to the running Step Sequencer's 16th-note
+   * (plus shuffle) grid when `xpadQuantize` is enabled so live pad hits and
+   * overdubs lock tightly to the groove. Returns the quantized step index (0..15,
+   * or -1 when stopped).
+   */
+  quantizeAndTriggerPad(voice: VoiceId, pitchShift = 0, velocity = 0.9): number {
+    const now = this.ctx.currentTime;
+    if (!this.enginePlaying || this.state.xpadQuantize === false) {
+      this.triggerPad(voice, pitchShift, velocity, undefined, 0);
+      if (!this.enginePlaying) return -1;
+      const curBeat = Math.max(0, this.beatAt(now));
+      return ((Math.round(curBeat / 0.25) % 16) + 16) % 16;
+    }
+
+    const curBeat = Math.max(0, this.beatAt(now));
+    const s0 = Math.floor(curBeat / 0.25);
+    const s1 = s0 + 1;
+    const stepBeat = (s: number) => s * 0.25 + (s % 2 === 1 ? this.shuffle * (0.25 / 3) : 0);
+    const t0 = this.ctxTimeForBeat(stepBeat(s0));
+    const t1 = this.ctxTimeForBeat(stepBeat(s1));
+
+    let delaySec = 0;
+    let chosenStep = s0;
+    if (now - t0 <= 0.032) {
+      delaySec = Math.max(0, t0 - now);
+      chosenStep = s0;
+    } else if (t1 - now <= 0.095) {
+      delaySec = Math.max(0, t1 - now);
+      chosenStep = s1;
+    } else {
+      delaySec = 0;
+      chosenStep = Math.round(curBeat / 0.25);
+    }
+
+    this.triggerPad(voice, pitchShift, velocity, undefined, delaySec);
+    return ((chosenStep % 16) + 16) % 16;
   }
 
   /**

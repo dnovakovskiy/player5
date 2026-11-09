@@ -159,7 +159,13 @@ export class EngineHost {
     const step = api.p5_engine_playing_step(e);
     if (step !== this.lastStep) {
       this.lastStep = step;
-      this.post({ type: "step", step: step });
+      this.post({
+        type: "step",
+        step: step,
+        beat: api.p5_engine_beat(e),
+        tempo: api.p5_engine_tempo(e),
+        contextFrame: contextFrame + frames,
+      });
     }
     this.sinceStatus += frames;
     if (this.sinceStatus >= this.statusEvery) {

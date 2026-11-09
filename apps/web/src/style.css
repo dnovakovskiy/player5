@@ -1269,6 +1269,12 @@ input[type="range"] {
   letter-spacing: 0.14em;
   color: var(--text);
 }
+.rmx-xpad-head-btns {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
 
 .rmx-modes {
   display: grid;

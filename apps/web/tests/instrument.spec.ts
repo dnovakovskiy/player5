@@ -347,11 +347,12 @@ test("RMX-1000 Station mode: X-Pad overdub, Scene FX, Isolator, Release lever an
   await expect(page.locator("#rmx-panel")).toBeVisible();
   await expect(page.locator("#grid-panel")).toBeHidden();
 
-  // Enable Overdub and trigger Clap on the X-Pad
+  // Enable Overdub and trigger Clap on the X-Pad (with Quantize enabled by default)
+  await expect(page.locator("#rmx-quantize")).toHaveAttribute("aria-pressed", "true");
   await page.locator("#rmx-overdub").click();
   await expect(page.locator("#rmx-overdub")).toHaveAttribute("aria-pressed", "true");
   await page.locator('[data-xpad-slot="2"]').click();
-  await expect(page.locator("#rmx-readout")).toContainText("X-PAD CLAP");
+  await expect(page.locator("#rmx-readout")).toContainText("X-PAD CLAP 1/8 · QUANT");
 
   // Select Scene FX (SPIRAL UP) and set level
   await page.locator('[data-scene-fx="spiral_up"]').click();

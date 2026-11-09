@@ -139,7 +139,10 @@ export function template(o: TemplateOptions): string {
       <div class="rmx-box rmx-xpad" role="group" aria-labelledby="rmx-xpad-heading">
         <div class="rmx-box-head">
           <h3 id="rmx-xpad-heading">X-PAD FX</h3>
-          <button id="rmx-bank" type="button" class="toggle small" aria-pressed="false">Bank A (BD/SD/CP/CH)</button>
+          <div class="rmx-xpad-head-btns">
+            <button id="rmx-quantize" type="button" class="toggle small" aria-pressed="true" title="Snap X-Pad hits &amp; Touch Roll Ribbon to the Step Sequencer beat grid">QUANTIZE</button>
+            <button id="rmx-bank" type="button" class="toggle small" aria-pressed="false">Bank A (BD/SD/CP/CH)</button>
+          </div>
         </div>
         <div class="rmx-pads" role="group" aria-label="X-Pad drum voices">
           <button type="button" class="rmx-pad-btn" data-xpad-slot="0" aria-pressed="false">BD · KICK</button>

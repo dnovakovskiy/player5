@@ -69,7 +69,6 @@ const ROLL_DIVS: readonly RollDivision[] = [1, 2, 4, 8, 16, 32];
 
 export class RmxPanel {
   private state: RmxState = defaultRmxState();
-  private rollTimer: ReturnType<typeof setTimeout> | null = null;
   private rollPointerDown = false;
   private rollLatched = false;
   private overdubStepCursor = 0;
@@ -78,6 +77,11 @@ export class RmxPanel {
     private readonly root: HTMLElement,
     private readonly cb: RmxCallbacks,
   ) {
+    this.cb.audio.setRmxRollOverdubHandler((voice, stepIdx, accent, pitch) => {
+      if (this.state.xpadOverdub) {
+        this.cb.onOverdubHit(voice, stepIdx, accent, pitch);
+      }
+    });
     this.bind();
     this.render();
   }
@@ -201,7 +205,15 @@ export class RmxPanel {
     bindKill("rmx-kill-mid", "killMid");
     bindKill("rmx-kill-high", "killHigh");
 
-    // X-Pad Bank A/B toggle
+    // X-Pad Quantize & Bank A/B toggles
+    const qBtn = this.root.querySelector<HTMLButtonElement>("#rmx-quantize");
+    if (qBtn) {
+      qBtn.addEventListener("click", () => {
+        this.state.xpadQuantize = !(this.state.xpadQuantize !== false);
+        this.pushState();
+      });
+    }
+
     $("rmx-bank").addEventListener("click", () => {
       this.state.xpadBankB = !this.state.xpadBankB;
       const bank = this.state.xpadBankB ? BANK_B : BANK_A;
@@ -354,33 +366,31 @@ export class RmxPanel {
   private startRoll(div: RollDivision): void {
     this.state.xpadRollDiv = div;
     this.state.xpadRolling = true;
+    void this.cb.audio.ensureStarted().catch(() => {});
     this.pushState();
-    if (this.rollTimer) clearTimeout(this.rollTimer);
-    const tick = () => {
-      if (!this.state.xpadRolling) return;
-      this.firePadHit(this.state.xpadRollDiv >= 16);
-      const bpm = Math.max(40, Math.min(240, this.cb.getBpm()));
-      const beatMs = 60_000 / bpm;
-      const intervalMs = Math.max(28, (beatMs * 4) / this.state.xpadRollDiv);
-      this.rollTimer = setTimeout(tick, intervalMs);
-    };
-    tick();
   }
 
   private stopRoll(): void {
     this.state.xpadRolling = false;
-    if (this.rollTimer) clearTimeout(this.rollTimer);
-    this.rollTimer = null;
   }
 
   private firePadHit(accent: boolean): void {
     const velocity = accent ? 1.0 : 0.85;
-    void this.cb.audio.triggerRmxPad(this.state.xpadVoice, this.state.xpadPitch, velocity);
-    if (this.state.xpadOverdub) {
-      const liveStep = this.cb.getStep();
-      const targetStep = liveStep >= 0 ? liveStep : this.overdubStepCursor++ % 16;
-      this.cb.onOverdubHit(this.state.xpadVoice, targetStep, accent, this.state.xpadPitch);
+    const voice = this.state.xpadVoice;
+    const pitch = this.state.xpadPitch;
+    const overdub = this.state.xpadOverdub;
+    const liveStep = this.cb.getStep();
+    // If Overdub is armed, record immediately when stopped (or using current/quantized step when playing)
+    if (overdub && liveStep < 0) {
+      const targetStep = this.overdubStepCursor++ % 16;
+      this.cb.onOverdubHit(voice, targetStep, accent, pitch);
     }
+    void this.cb.audio.triggerRmxPad(voice, pitch, velocity).then((quantizedStep) => {
+      if (overdub && liveStep >= 0) {
+        const targetStep = quantizedStep >= 0 ? quantizedStep : liveStep;
+        this.cb.onOverdubHit(voice, targetStep, accent, pitch);
+      }
+    });
   }
 
   private pushState(): void {
@@ -397,9 +407,10 @@ export class RmxPanel {
     const fxPct = `${Math.round(s.sceneAmount * 100)}%`;
     const bank = s.xpadBankB ? BANK_B : BANK_A;
     const activePad = bank.find((p) => p.id === s.xpadVoice) ?? BANK_A[0]!;
+    const qTag = s.xpadQuantize !== false ? " · QUANT" : "";
     $("rmx-readout").textContent = s.releaseHeld
       ? `RELEASE · ${s.releaseMode.replace("_", " ").toUpperCase()}`
-      : `${fxName} ${fxPct} · X-PAD ${activePad.label} 1/${s.xpadRollDiv}`;
+      : `${fxName} ${fxPct} · X-PAD ${activePad.label} 1/${s.xpadRollDiv}${qTag}`;
 
     // Scene FX buttons & sliders
     for (const btn of this.root.querySelectorAll<HTMLButtonElement>("[data-scene-fx]")) {
@@ -436,7 +447,11 @@ export class RmxPanel {
     $("rmx-iso-high-out").textContent = fmtIso(s.isoHigh, s.killHigh);
     $("rmx-kill-high").setAttribute("aria-pressed", String(s.killHigh));
 
-    // X-Pad Bank & Voice Pads
+    // X-Pad Quantize, Bank & Voice Pads
+    const qBtn = this.root.querySelector<HTMLButtonElement>("#rmx-quantize");
+    if (qBtn) {
+      qBtn.setAttribute("aria-pressed", String(s.xpadQuantize !== false));
+    }
     const bankBtn = $("rmx-bank");
     bankBtn.textContent = s.xpadBankB ? "Bank B (LT/RS/OH/CB)" : "Bank A (BD/SD/CP/CH)";
     bankBtn.setAttribute("aria-pressed", String(s.xpadBankB));

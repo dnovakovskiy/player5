@@ -46,7 +46,13 @@ export type HostMessage =
 export type HostEvent =
   | { type: "ready"; abi: number; sampleRate: number }
   | { type: "offset"; offset: number }
-  | { type: "step"; step: number }
+  | {
+      type: "step";
+      step: number;
+      beat?: number;
+      tempo?: number;
+      contextFrame?: number;
+    }
   | {
       type: "status";
       step: number;
